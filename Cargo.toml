@@ -10,5 +10,10 @@ crossterm = "0.28"
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
 strip-ansi-escapes = "0.2"
+winit = "0.30"
+softbuffer = "0.4"
+fontdue = "0.9.3"
+portable-pty = "0.9.0"
+vte = "0.15.0"
 
 [dev-dependencies]

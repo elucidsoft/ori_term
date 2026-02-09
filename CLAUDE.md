@@ -1,16 +1,19 @@
 # ori_console
 
-A Rust console/TUI library that gets terminal interaction right. Built by studying what
-crossterm, ratatui, bubbletea, lipgloss, termenv, rich, textual, ink, fzf, ghostty,
-alacritty, wezterm, and others do — then fixing the things they don't.
+A cross-platform GPU-accelerated terminal emulator written in Rust — in the same
+category as WezTerm, Alacritty, and Ghostty. Built by studying what those projects
+(plus crossterm, ratatui, bubbletea, lipgloss, termenv, rich, textual, ink, and fzf)
+do well — then fixing what they don't.
+
+This is a **terminal emulator application**, not just a TUI library. It opens a window,
+renders a terminal grid, handles input, and runs shell processes. Think WezTerm, not
+ratatui.
 
 ## Why This Exists
 
-Most console apps break in predictable ways: they ignore `NO_COLOR`, assume 80 columns,
-corrupt output when piped, miscalculate Unicode widths, don't handle resize, or blast
-raw ANSI into a dumb terminal. Claude Code had to be rewritten multiple times partly
-because of these issues. ori_console is a library that makes it impossible to get
-these wrong.
+Most terminal emulators either get the basics wrong or are too complex to extend.
+ori_console aims to be a correct, fast, cross-platform terminal emulator that respects
+standards (NO_COLOR, CLICOLOR, Unicode width) by design, not by convention.
 
 ## Project Structure
 
@@ -332,6 +335,17 @@ cargo test
 cargo run --example hello
 ```
 
+### Windows Cross-Compile (from WSL)
+
+Target: `x86_64-pc-windows-gnu` (mingw). Windows test binaries go to `C:\Users\ericm\ori_console\`.
+
+```bash
+cargo build --target x86_64-pc-windows-gnu --example hello --release
+cp target/x86_64-pc-windows-gnu/release/examples/hello.exe /mnt/c/Users/ericm/ori_console/
+```
+
+Launch from Windows: `C:\Users\ericm\ori_console\hello.exe`
+
 ## Code Style
 
 - No `unwrap()` in library code — return `Result` or provide a default
@@ -339,3 +353,6 @@ cargo run --example hello
 - Prefer `impl Into<Color>` and `impl AsRef<str>` for ergonomic APIs
 - Keep the public API surface small — expose primitives, not internals
 - Document every public item
+
+## Current State
+See [current_state.md](current_state.md) for the current implementation status.
