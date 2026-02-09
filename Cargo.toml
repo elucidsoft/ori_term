@@ -1,0 +1,14 @@
+[package]
+name = "ori_console"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust console/TUI library that gets terminal interaction right"
+license = "MIT"
+
+[dependencies]
+crossterm = "0.28"
+unicode-width = "0.2"
+unicode-segmentation = "1.12"
+strip-ansi-escapes = "0.2"
+
+[dev-dependencies]
