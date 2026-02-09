@@ -49,7 +49,7 @@ impl GlyphCache {
     }
 }
 
-/// Render a grid into a pixel buffer at the given vertical offset (y_offset is in pixels).
+/// Render a grid into a pixel buffer at the given offsets (in pixels).
 /// The buffer is assumed to be `buf_w` pixels wide.
 pub fn render_grid(
     glyphs: &mut GlyphCache,
@@ -57,6 +57,7 @@ pub fn render_grid(
     buffer: &mut [u32],
     buf_w: usize,
     buf_h: usize,
+    x_offset: usize,
     y_offset: usize,
 ) {
     // Pre-cache every visible char
@@ -72,7 +73,7 @@ pub fn render_grid(
         for col in 0..grid.cols {
             let idx = row * grid.cols + col;
             let cell = &grid.cells[idx];
-            let x0 = col * cw;
+            let x0 = col * cw + x_offset;
             let y0 = row * cell_h + y_offset;
 
             if x0 >= buf_w || y0 >= buf_h {

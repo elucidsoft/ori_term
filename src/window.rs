@@ -12,6 +12,7 @@ pub struct TermWindow {
     pub tabs: Vec<TabId>,
     pub active_tab: usize,
     pub tab_bar_height: usize,
+    pub is_maximized: bool,
 }
 
 impl TermWindow {
@@ -27,6 +28,7 @@ impl TermWindow {
             tabs: Vec::new(),
             active_tab: 0,
             tab_bar_height: TAB_BAR_HEIGHT,
+            is_maximized: false,
         }
     }
 

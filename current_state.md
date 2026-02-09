@@ -2,30 +2,36 @@
 
 ## What the App Does
 
-ori_console is a terminal emulator written in Rust with Chrome-style tab tear-off.
-It opens a native window using winit, renders a terminal character grid with a tab bar
-using softbuffer (CPU pixel buffer) and fontdue (CPU glyph rasterization), and runs
-shell processes (`cmd.exe`) through ConPTY via the `portable-pty` crate. It is
-cross-compiled from WSL targeting `x86_64-pc-windows-gnu` and runs on Windows.
+ori_console (binary name: `oriterm`) is a terminal emulator written in Rust with
+Chrome-style tab tear-off and a custom frameless window chrome. It opens a native
+window using winit (with OS decorations disabled), renders a terminal character grid
+with a custom title bar using softbuffer (CPU pixel buffer) and fontdue (CPU glyph
+rasterization), and runs shell processes (`cmd.exe`) through ConPTY via the
+`portable-pty` crate. It is cross-compiled from WSL targeting `x86_64-pc-windows-gnu`
+and runs on Windows.
 
-The core feature under development is Chrome-style tab management: multiple tabs per
-window, tab reordering by drag, and tearing a tab off into its own floating window by
-dragging it vertically out of the tab bar. Re-attaching a torn-off tab to another
-window is scaffolded but not yet functional.
+The core features under development are Chrome-style tab management (multiple tabs per
+window, tab reordering by drag, tearing a tab off into its own floating window) and a
+VS Code-style custom window chrome (frameless window with integrated tab bar as title
+bar, pixel-drawn window controls, resize borders).
 
 ## Architecture Overview
 
 ### Module Map
 
 ```
-examples/hello.rs              Entry point: App::run() with #![windows_subsystem = "windows"]
+src/main.rs                    Entry point: App::run() with #![windows_subsystem = "windows"]
 
 src/
   lib.rs                       Module declarations + log() / log_path() helpers
-  app.rs                       App struct, winit ApplicationHandler, event dispatch
-  window.rs                    TermWindow (winit Window + softbuffer Surface + tab list)
+  app.rs                       App struct, winit ApplicationHandler, event dispatch,
+                               frameless window creation, resize border detection,
+                               double-click maximize, initial surface fill (no white flash)
+  window.rs                    TermWindow (winit Window + softbuffer Surface + tab list + is_maximized)
   tab.rs                       Tab (Grid + PTY writer + VTE parser + ConPTY handles); TabId; TermEvent
-  tab_bar.rs                   Tab bar rendering and hit-testing (TabBarLayout, TabBarHit)
+  tab_bar.rs                   Tab bar rendering and hit-testing (TabBarLayout, TabBarHit),
+                               window control buttons (minimize/maximize/close), window border,
+                               pixel drawing helpers (draw_x, draw_plus, draw_rect, blend, etc.)
   drag.rs                      DragState / DragPhase -- Chrome-style drag state machine
   grid.rs                      Grid / Cell -- terminal character cell buffer
   render.rs                    GlyphCache (fontdue), render_grid(), render_text(), load_font()
@@ -48,9 +54,11 @@ src/
    `C:\Windows\Fonts\` (CascadiaMono > Consolas > Courier), builds a `GlyphCache`,
    creates a winit `EventLoop<TermEvent>`, and calls `event_loop.run_app(&mut app)`.
 
-2. **Window + Tab creation** (`resumed` handler): On first resume, creates one decorated
-   window and spawns one tab inside it. Each tab opens a ConPTY pair, spawns `cmd.exe`
-   on the slave side, and starts a background reader thread.
+2. **Window + Tab creation** (`resumed` handler): On first resume, creates one
+   frameless window (`with_decorations(false)`) and spawns one tab inside it. The
+   surface is immediately filled with the background color to prevent a white flash.
+   Each tab opens a ConPTY pair, spawns `cmd.exe` on the slave side, and starts a
+   background reader thread.
 
 3. **PTY output**: The reader thread sends `TermEvent::PtyOutput(tab_id, data)` through
    the `EventLoopProxy`. The `user_event` handler feeds the data through the VTE parser,
@@ -58,10 +66,11 @@ src/
    containing the active tab is asked to redraw.
 
 4. **Rendering** (`render_window`): Resizes the softbuffer surface, fills with background
-   color (Catppuccin Mocha base `#1e1e2e`), calls `tab_bar::render_tab_bar()` for the
-   tab strip, then `render::render_grid()` for the active tab's grid. Each glyph is
-   rasterized by fontdue and alpha-blended into the pixel buffer. Finally
-   `buffer.present()` flips.
+   color (black `#000000`), calls `tab_bar::render_tab_bar()` for the custom title bar
+   with tabs and window controls, then `render::render_grid()` for the active tab's grid
+   (offset by `GRID_PADDING_LEFT` and `TAB_BAR_HEIGHT + 10`). Finally draws a 1px
+   window border (`render_window_border`, skipped when maximized) and calls
+   `buffer.present()`.
 
 5. **Input**: Keyboard events are intercepted for built-in shortcuts (Ctrl+T new tab,
    Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, Escape cancel drag), then
@@ -69,20 +78,62 @@ src/
 
 6. **Mouse / Drag**: Mouse presses on the tab bar trigger hit-testing (`TabBarLayout`).
    Clicking a tab selects it; clicking the close button closes it; clicking the "+"
-   button creates a new tab. A press-and-hold initiates a `DragState` which transitions
-   through `Pending -> DraggingInBar -> TornOff` as the cursor moves.
+   button creates a new tab. Window control buttons handle minimize, maximize, and
+   close. Empty space in the tab bar is a drag area (calls `drag_window()` for native
+   OS drag, double-click toggles maximize). A press-and-hold on a tab initiates a
+   `DragState` which transitions through `Pending -> DraggingInBar -> TornOff`.
+
+7. **Resize borders**: Mouse near window edges (8px) triggers `drag_resize_window()`
+   with the appropriate `ResizeDirection`. Cursor icon changes to resize arrows on hover.
+
+## Custom Window Chrome
+
+The app uses frameless windows with a custom-rendered title bar (VS Code / Windows
+Terminal style):
+
+- **Tab bar height**: 46px, serves as the window title bar
+- **Tab styling**: Catppuccin Mocha colors, rounded top corners (2px cutoff), active
+  tab is black (matches terminal BG for seamless blending), inactive tabs are surface0
+- **Tab close button**: Pixel-drawn 8x8 X icon in a 24x24 hover square with alpha-blended
+  background (~15% white tint) so it's visible on both active and inactive tabs
+- **New tab button**: 38px wide with a pixel-drawn 11x11 plus icon (1px thick, centered)
+- **Window controls**: Rightmost 138px (3 x 46px buttons) with pixel-drawn Windows 10/11
+  style icons — minimize (horizontal line), maximize (rectangle / overlapping restore
+  rects), close (X with red hover background)
+- **Window border**: 1px border around entire window in overlay0 color, hidden when maximized
+- **Drag area**: Empty space between tabs and controls calls `drag_window()` for native
+  OS window dragging with Aero Snap support
+- **Internal padding**: 16px left margin for tabs, 8px top margin, 6px grid left padding,
+  10px gap between tab bar and grid, 4px bottom padding
 
 ## What's Working
+
+- **Custom frameless window chrome**: No OS title bar. Tab bar acts as the title bar with
+  integrated tabs, window controls (minimize/maximize/close), and drag area.
+
+- **Window controls**: Pixel-drawn minimize, maximize/restore, and close buttons with
+  hover states. Maximize toggles between maximized and restored. Close removes all tabs
+  and closes the window.
+
+- **Window dragging**: Dragging empty tab bar area moves the window via native OS drag.
+  Double-click toggles maximize. Aero Snap works.
+
+- **Window resizing**: 8px resize borders on all edges and corners with appropriate cursor
+  icons and native OS resize via `drag_resize_window()`.
+
+- **No white flash on startup**: Surface is pre-filled with background color immediately
+  after window creation.
 
 - **Multi-tab support**: Ctrl+T creates new tabs, Ctrl+W closes them, Ctrl+Tab /
   Ctrl+Shift+Tab cycles between them. Each tab has its own Grid, PTY, and VTE parser.
 
 - **Tab bar rendering**: Catppuccin Mocha-themed tab bar with active/inactive/hover
-  states, close buttons (x) with hover highlight, and a "+" new-tab button.
-  Hit-testing correctly distinguishes tab body, close button, and new-tab regions.
+  states, pixel-drawn close buttons (x) with alpha-blended hover highlight, and a
+  pixel-drawn "+" new-tab button. Hit-testing correctly distinguishes tab body, close
+  button, new-tab, window controls, and drag area regions.
 
 - **Tab tear-off creates new window**: Dragging a tab vertically past the tear-off
-  threshold (15 px) removes it from its source window and creates a new undecorated
+  threshold (15 px) removes it from its source window and creates a new frameless
   window positioned at the cursor. The tab's PTY and Grid survive the move because
   tabs live in `App.tabs` (keyed by `TabId`), separate from windows.
 
@@ -176,8 +227,9 @@ src/
 
 Top-level application state. Owns all windows (`HashMap<WindowId, TermWindow>`),
 all tabs (`HashMap<TabId, Tab>`), the shared `GlyphCache`, the current `DragState`,
-per-window cursor positions and hover states, keyboard modifier state, and the
-`EventLoopProxy` for sending `TermEvent`s from background threads. Implements
+per-window cursor positions and hover states, keyboard modifier state, double-click
+tracking (`last_click_time`, `last_click_window`), and the `EventLoopProxy` for
+sending `TermEvent`s from background threads. Implements
 `ApplicationHandler<TermEvent>` for the winit event loop.
 
 The separation of tabs from windows (each in their own HashMap) is the key design
@@ -187,8 +239,9 @@ that enables tab tear-off: moving a tab between windows is just updating two
 ### `TermWindow` (window.rs)
 
 Per-window state: an `Arc<Window>` (winit), a softbuffer `Context` and `Surface`
-for pixel rendering, a `Vec<TabId>` of tabs in display order, and the `active_tab`
-index. Methods: `add_tab`, `remove_tab`, `active_tab_id`, `tab_index`.
+for pixel rendering, a `Vec<TabId>` of tabs in display order, the `active_tab`
+index, and `is_maximized` for tracking maximize state. Methods: `add_tab`,
+`remove_tab`, `active_tab_id`, `tab_index`.
 
 ### `Tab` / `TabId` (tab.rs)
 
@@ -227,6 +280,17 @@ torn-off window).
 Thresholds match Chrome's `tab_drag_controller.cc`: `kMinimumDragDistance` = 10 px,
 `kVerticalDetachMagnetism` = 15 px.
 
+### `TabBarLayout` / `TabBarHit` (tab_bar.rs)
+
+`TabBarLayout` computes tab widths (clamped 80--200 px) based on count and available
+width, reserving space for the left margin, new-tab button (38px), and window controls
+zone (138px). `TabBarHit` is an enum: `Tab(usize)`, `CloseTab(usize)`, `NewTab`,
+`Minimize`, `Maximize`, `CloseWindow`, `DragArea`, `None`. Used for both click
+dispatch and hover state tracking.
+
+Pixel drawing helpers: `set_pixel`, `fill_rect`, `draw_hline`, `draw_rect`, `draw_x`,
+`draw_plus`, `blend` (alpha compositing for hover effects).
+
 ### `GlyphCache` (render.rs)
 
 Wraps a `fontdue::Font` and a `HashMap<char, (Metrics, Vec<u8>)>` of rasterized
@@ -241,15 +305,8 @@ construction time. Font size is 16.0 px.
 `backspace`, `scroll_up`, `clear`, and `erase_line_from_cursor`.
 
 `Cell` holds a `char` and an `fg` color as `u32`. Background color is a global
-constant (`BG = 0x001e1e2e`, Catppuccin Mocha base). Cursor color is
-`0x00f5e0dc` (Catppuccin rosewater).
-
-### `TabBarLayout` / `TabBarHit` (tab_bar.rs)
-
-`TabBarLayout` computes tab widths (clamped 80--200 px) based on count and available
-width, reserving 30 px for the new-tab button. `TabBarHit` is an enum:
-`Tab(usize)`, `CloseTab(usize)`, `NewTab`, `None`. Used for both click dispatch and
-hover state tracking.
+constant (`BG = 0x00000000`, black). Cursor color is `0x00f5e0dc` (Catppuccin
+rosewater).
 
 ### `Performer` (vte_performer.rs)
 
@@ -265,7 +322,8 @@ Translates VTE actions into grid mutations:
 ```
 winit EventLoop<TermEvent>
   |
-  +-- resumed()                       Create first window + first tab (once)
+  +-- resumed()                       Create first frameless window + first tab (once)
+  |                                   Pre-fill surface with BG to avoid white flash
   |
   +-- user_event(TermEvent)
   |     |
@@ -276,10 +334,11 @@ winit EventLoop<TermEvent>
         |
         +-- RedrawRequested           render_window():
         |                               1. Resize softbuffer surface
-        |                               2. Fill background
-        |                               3. render_tab_bar() with hover state
-        |                               4. render_grid() for active tab
-        |                               5. buffer.present()
+        |                               2. Fill background (black)
+        |                               3. render_tab_bar() with hover state + is_maximized
+        |                               4. render_grid() for active tab (with padding offsets)
+        |                               5. render_window_border() (1px, skipped when maximized)
+        |                               6. buffer.present()
         |
         +-- KeyboardInput             Intercept shortcuts:
         |                               Ctrl+T     -> new_tab_in_window()
@@ -289,17 +348,24 @@ winit EventLoop<TermEvent>
         |                               Escape     -> cancel drag
         |                             Otherwise forward to active tab's PTY
         |
-        +-- MouseInput (pressed)      Hit-test tab bar:
+        +-- MouseInput (pressed)      Check resize borders first (8px edges):
+        |                               Resize zone -> drag_resize_window(direction)
+        |                             Then hit-test tab bar:
         |                               Tab(idx)      -> start DragState + select tab
         |                               CloseTab(idx) -> close_tab()
         |                               NewTab        -> new_tab_in_window()
+        |                               Minimize      -> set_minimized(true)
+        |                               Maximize      -> toggle maximized
+        |                               CloseWindow   -> close_window()
+        |                               DragArea      -> drag_window() or double-click maximize
         |
         +-- MouseInput (released)     Finalize drag:
-        |                               TornOff    -> find_window_at_cursor (stub) or add decorations
+        |                               TornOff    -> find_window_at_cursor (stub)
         |                               DraggingInBar -> reorder done
         |                               Pending    -> was just a click
         |
-        +-- CursorMoved              Update hover_hit for tab bar redraw
+        +-- CursorMoved              Update cursor icon (resize arrows at edges)
+        |                            Update hover_hit for tab bar redraw
         |                            Advance drag state machine:
         |                               Pending -> DraggingInBar (if dist >= 10px)
         |                               DraggingInBar -> TornOff (if vert >= 15px)
@@ -317,11 +383,11 @@ winit EventLoop<TermEvent>
 ### Cross-compile from WSL for Windows
 
 ```bash
-cargo build --target x86_64-pc-windows-gnu --example hello --release
-cp target/x86_64-pc-windows-gnu/release/examples/hello.exe /mnt/c/Users/ericm/ori_console/
+cargo build --target x86_64-pc-windows-gnu --release
+cp target/x86_64-pc-windows-gnu/release/oriterm.exe /mnt/c/Users/ericm/ori_console/oriterm.exe
 ```
 
-Launch from Windows: `C:\Users\ericm\ori_console\hello.exe`
+Launch from Windows: `C:\Users\ericm\ori_console\oriterm.exe`
 
 ### Debug logs
 

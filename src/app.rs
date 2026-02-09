@@ -1,24 +1,31 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
 use crate::grid::BG;
 use crate::log;
 use crate::render::{self, GlyphCache, render_grid};
 use crate::tab::{Tab, TabId, TermEvent};
-use crate::tab_bar::{self, TabBarHit, TabBarLayout, TAB_BAR_HEIGHT};
+use crate::tab_bar::{self, TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, GRID_PADDING_LEFT, GRID_PADDING_BOTTOM, render_window_border};
 use crate::window::TermWindow;
 
 const COLS: usize = 120;
 const ROWS: usize = 30;
+
+// Resize border thickness in pixels
+const RESIZE_BORDER: f64 = 8.0;
+
+// Double-click detection threshold in milliseconds
+const DOUBLE_CLICK_MS: u128 = 400;
 
 pub struct App {
     windows: HashMap<WindowId, TermWindow>,
@@ -31,6 +38,8 @@ pub struct App {
     hover_hit: HashMap<WindowId, TabBarHit>,
     modifiers: ModifiersState,
     first_window_created: bool,
+    last_click_time: Option<Instant>,
+    last_click_window: Option<WindowId>,
 }
 
 impl App {
@@ -66,6 +75,8 @@ impl App {
             hover_hit: HashMap::new(),
             modifiers: ModifiersState::empty(),
             first_window_created: false,
+            last_click_time: None,
+            last_click_window: None,
         };
 
         event_loop.run_app(&mut app)?;
@@ -81,15 +92,14 @@ impl App {
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
-        decorated: bool,
     ) -> Option<WindowId> {
         let win_w = (self.glyphs.cell_width * COLS) as u32;
-        let win_h = (self.glyphs.cell_height * ROWS) as u32 + TAB_BAR_HEIGHT as u32;
+        let win_h = (self.glyphs.cell_height * ROWS) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
 
         let attrs = Window::default_attributes()
             .with_title("ori_console")
             .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
-            .with_decorations(decorated);
+            .with_decorations(false);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -116,7 +126,18 @@ impl App {
         };
 
         let id = window.id();
-        let tw = TermWindow::new(window, context, surface);
+        let mut tw = TermWindow::new(window, context, surface);
+
+        // Fill surface with dark background immediately to prevent white flash
+        if let (Some(nw), Some(nh)) = (NonZeroU32::new(win_w), NonZeroU32::new(win_h)) {
+            if tw.surface.resize(nw, nh).is_ok() {
+                if let Ok(mut buf) = tw.surface.buffer_mut() {
+                    buf.fill(BG);
+                    let _ = buf.present();
+                }
+            }
+        }
+
         self.windows.insert(id, tw);
         log(&format!("created window {:?}", id));
         Some(id)
@@ -170,9 +191,25 @@ impl App {
         }
     }
 
+    fn close_window(&mut self, window_id: WindowId, event_loop: &ActiveEventLoop) {
+        let tab_ids: Vec<TabId> = self
+            .windows
+            .get(&window_id)
+            .map(|tw| tw.tabs.clone())
+            .unwrap_or_default();
+        for tid in tab_ids {
+            self.tabs.remove(&tid);
+        }
+        self.windows.remove(&window_id);
+
+        if self.windows.is_empty() {
+            event_loop.exit();
+        }
+    }
+
     fn render_window(&mut self, window_id: WindowId) {
         // Extract all info we need before borrowing the surface mutably.
-        let (phys, tab_info, active_idx, active_tab_id) = {
+        let (phys, tab_info, active_idx, active_tab_id, is_maximized) = {
             let tw = match self.windows.get(&window_id) {
                 Some(tw) => tw,
                 None => return,
@@ -192,7 +229,8 @@ impl App {
                 .collect();
             let active_idx = tw.active_tab;
             let active_tab_id = tw.active_tab_id();
-            (phys, tab_info, active_idx, active_tab_id)
+            let is_maximized = tw.is_maximized;
+            (phys, tab_info, active_idx, active_tab_id, is_maximized)
         };
 
         if phys.width == 0 || phys.height == 0 {
@@ -231,6 +269,7 @@ impl App {
             &tab_info,
             active_idx,
             hover,
+            is_maximized,
         );
 
         // Render active tab's grid
@@ -242,12 +281,52 @@ impl App {
                     &mut buffer,
                     w,
                     h,
-                    TAB_BAR_HEIGHT,
+                    GRID_PADDING_LEFT,
+                    TAB_BAR_HEIGHT + 10,
                 );
             }
         }
 
+        // Draw 1px window border on top of everything (Windows 10 style)
+        render_window_border(&mut buffer, w, h, is_maximized);
+
         let _ = buffer.present();
+    }
+
+    /// Detect if cursor is in the resize border zone. Returns the resize direction
+    /// if so, or None if the cursor is in the client area.
+    fn resize_direction_at(
+        &self,
+        window_id: WindowId,
+        pos: PhysicalPosition<f64>,
+    ) -> Option<ResizeDirection> {
+        let tw = self.windows.get(&window_id)?;
+        if tw.is_maximized {
+            return None; // No resize when maximized
+        }
+
+        let size = tw.window.inner_size();
+        let w = size.width as f64;
+        let h = size.height as f64;
+        let x = pos.x;
+        let y = pos.y;
+
+        let left = x < RESIZE_BORDER;
+        let right = x >= w - RESIZE_BORDER;
+        let top = y < RESIZE_BORDER;
+        let bottom = y >= h - RESIZE_BORDER;
+
+        match (left, right, top, bottom) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, true, _) => Some(ResizeDirection::NorthEast),
+            (true, _, _, true) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::West),
+            (_, true, _, _) => Some(ResizeDirection::East),
+            (_, _, true, _) => Some(ResizeDirection::North),
+            (_, _, _, true) => Some(ResizeDirection::South),
+            _ => None,
+        }
     }
 
     fn handle_mouse_input(
@@ -272,6 +351,14 @@ impl App {
 
         match state {
             ElementState::Pressed => {
+                // Check resize borders first
+                if let Some(direction) = self.resize_direction_at(window_id, pos) {
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        let _ = tw.window.drag_resize_window(direction);
+                    }
+                    return;
+                }
+
                 if y < TAB_BAR_HEIGHT {
                     let tw = match self.windows.get(&window_id) {
                         Some(tw) => tw,
@@ -291,6 +378,49 @@ impl App {
                             };
                             if let Some(&tab_id) = tw.tabs.get(idx) {
                                 self.close_tab(tab_id, event_loop);
+                            }
+                        }
+                        TabBarHit::Minimize => {
+                            if let Some(tw) = self.windows.get(&window_id) {
+                                tw.window.set_minimized(true);
+                            }
+                        }
+                        TabBarHit::Maximize => {
+                            if let Some(tw) = self.windows.get_mut(&window_id) {
+                                let new_max = !tw.is_maximized;
+                                tw.is_maximized = new_max;
+                                tw.window.set_maximized(new_max);
+                                tw.window.request_redraw();
+                            }
+                        }
+                        TabBarHit::CloseWindow => {
+                            self.close_window(window_id, event_loop);
+                        }
+                        TabBarHit::DragArea => {
+                            // Check for double-click to toggle maximize
+                            let now = Instant::now();
+                            let is_double = self.last_click_time
+                                .map(|t| now.duration_since(t).as_millis() < DOUBLE_CLICK_MS)
+                                .unwrap_or(false)
+                                && self.last_click_window == Some(window_id);
+
+                            if is_double {
+                                // Double-click: toggle maximize
+                                self.last_click_time = None;
+                                self.last_click_window = None;
+                                if let Some(tw) = self.windows.get_mut(&window_id) {
+                                    let new_max = !tw.is_maximized;
+                                    tw.is_maximized = new_max;
+                                    tw.window.set_maximized(new_max);
+                                    tw.window.request_redraw();
+                                }
+                            } else {
+                                // Single click: start window drag
+                                self.last_click_time = Some(now);
+                                self.last_click_window = Some(window_id);
+                                if let Some(tw) = self.windows.get(&window_id) {
+                                    let _ = tw.window.drag_window();
+                                }
                             }
                         }
                         TabBarHit::Tab(idx) => {
@@ -323,7 +453,7 @@ impl App {
                             if let Some(target_wid) = self.find_window_at_cursor(torn_wid) {
                                 self.reattach_tab(drag.tab_id, torn_wid, target_wid, pos);
                             }
-                            // Window is already decorated — nothing else needed
+                            // Window is already created — nothing else needed
                         }
                         DragPhase::DraggingInBar => {
                             // Tab reorder finalized — nothing extra needed
@@ -339,6 +469,18 @@ impl App {
 
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
+
+        // Update cursor icon for resize borders
+        if let Some(dir) = self.resize_direction_at(window_id, position) {
+            let icon: CursorIcon = dir.into();
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.set_cursor(icon);
+            }
+        } else {
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.set_cursor(CursorIcon::Default);
+            }
+        }
 
         // Update hover state for tab bar
         let y = position.y as usize;
@@ -439,17 +581,15 @@ impl App {
         let grab_x = 75.0; // roughly half a tab width
         let grab_y = (TAB_BAR_HEIGHT / 2) as f64;
 
-        // Create new decorated window at cursor position
-        if let Some(new_wid) = self.create_window(event_loop, true) {
+        // Create new frameless window at cursor position
+        if let Some(new_wid) = self.create_window(event_loop) {
             if let Some(tw) = self.windows.get_mut(&new_wid) {
                 tw.add_tab(tab_id);
                 // Position so cursor is at grab_offset within the client area.
-                let title_bar_offset = tw.window.inner_position().ok()
-                    .and_then(|ip| tw.window.outer_position().ok().map(|op| (ip.x - op.x, ip.y - op.y)))
-                    .unwrap_or((0, 0));
+                // No title bar offset needed — frameless window has no OS decoration.
                 if let Some((sx, sy)) = screen_cursor {
-                    let win_x = sx - grab_x as i32 - title_bar_offset.0;
-                    let win_y = sy - grab_y as i32 - title_bar_offset.1;
+                    let win_x = sx - grab_x as i32;
+                    let win_y = sy - grab_y as i32;
                     tw.window
                         .set_outer_position(winit::dpi::PhysicalPosition::new(win_x, win_y));
                 }
@@ -553,7 +693,7 @@ impl ApplicationHandler<TermEvent> for App {
         }
         self.first_window_created = true;
 
-        if let Some(wid) = self.create_window(event_loop, true) {
+        if let Some(wid) = self.create_window(event_loop) {
             self.new_tab_in_window(wid);
         }
     }
@@ -586,20 +726,7 @@ impl ApplicationHandler<TermEvent> for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                // Close all tabs in this window
-                let tab_ids: Vec<TabId> = self
-                    .windows
-                    .get(&window_id)
-                    .map(|tw| tw.tabs.clone())
-                    .unwrap_or_default();
-                for tid in tab_ids {
-                    self.tabs.remove(&tid);
-                }
-                self.windows.remove(&window_id);
-
-                if self.windows.is_empty() {
-                    std::process::exit(0);
-                }
+                self.close_window(window_id, event_loop);
             }
 
             WindowEvent::RedrawRequested => {
@@ -706,4 +833,3 @@ impl ApplicationHandler<TermEvent> for App {
         }
     }
 }
-

@@ -1,4 +1,4 @@
-pub const BG: u32 = 0x001e1e2e;
+pub const BG: u32 = 0x00000000;
 pub const FG: u32 = 0x00cdd6f4;
 pub const CURSOR_COLOR: u32 = 0x00f5e0dc;
 

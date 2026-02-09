@@ -16,4 +16,8 @@ fontdue = "0.9.3"
 portable-pty = "0.9.0"
 vte = "0.15.0"
 
+[[bin]]
+name = "oriterm"
+path = "src/main.rs"
+
 [dev-dependencies]
