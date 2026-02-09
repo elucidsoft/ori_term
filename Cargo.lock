@@ -1039,8 +1039,10 @@ dependencies = [
 name = "ori_console"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.10.0",
  "crossterm",
  "fontdue",
+ "log",
  "portable-pty",
  "softbuffer",
  "strip-ansi-escapes",
@@ -1655,6 +1657,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
+ "bitflags 2.10.0",
+ "cursor-icon",
+ "log",
  "memchr",
 ]
 

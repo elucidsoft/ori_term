@@ -354,5 +354,14 @@ Launch from Windows: `C:\Users\ericm\ori_console\hello.exe`
 - Keep the public API surface small — expose primitives, not internals
 - Document every public item
 
+## Reference Repos
+
+Source code for all studied projects is at `../reference_repos/console_repos/`:
+
+alacritty, ghostty, wezterm, crossterm, ratatui, bubbletea, bubbles, lipgloss,
+termenv, fzf, rich, textual, ink, chalk, console, indicatif, xterm.js, and others.
+
+Use these as reference when implementing features — read the actual source, don't guess.
+
 ## Current State
 See [current_state.md](current_state.md) for the current implementation status.

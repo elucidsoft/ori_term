@@ -8,9 +8,12 @@ pub mod layout;
 pub mod widgets;
 
 // Terminal emulator modules
+pub mod cell;
 pub mod grid;
+pub mod palette;
+pub mod term_mode;
+pub mod term_handler;
 pub mod render;
-pub mod vte_performer;
 pub mod tab;
 pub mod tab_bar;
 pub mod drag;

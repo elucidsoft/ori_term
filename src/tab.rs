@@ -1,24 +1,30 @@
 use std::io::{Read, Write};
 use std::thread;
 
+use vte::ansi::CursorShape;
 use winit::event_loop::EventLoopProxy;
 
 use crate::grid::Grid;
 use crate::log;
-use crate::vte_performer::Performer;
+use crate::palette::Palette;
+use crate::term_handler::TermHandler;
+use crate::term_mode::TermMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
 
 pub struct Tab {
     pub id: TabId,
-    pub grid: Grid,
+    primary_grid: Grid,
+    alt_grid: Grid,
+    active_is_alt: bool,
     pub pty_writer: Option<Box<dyn Write + Send>>,
-    pub vte_parser: vte::Parser,
+    processor: vte::ansi::Processor,
     pub title: String,
-    // Must keep these alive — dropping the master closes the ConPTY,
-    // and dropping the child may terminate the process.
-    _pty_master: Box<dyn portable_pty::MasterPty + Send>,
+    pub palette: Palette,
+    pub mode: TermMode,
+    pub cursor_shape: CursorShape,
+    pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
@@ -78,20 +84,40 @@ impl Tab {
         log(&format!("Tab::spawn done for {:?}", id));
         Ok(Tab {
             id,
-            grid: Grid::new(cols, rows),
+            primary_grid: Grid::new(cols, rows),
+            alt_grid: Grid::new(cols, rows),
+            active_is_alt: false,
             pty_writer: Some(writer),
-            vte_parser: vte::Parser::new(),
+            processor: vte::ansi::Processor::new(),
             title: format!("Tab {}", id.0),
-            _pty_master: pair.master,
+            palette: Palette::new(),
+            mode: TermMode::default(),
+            cursor_shape: CursorShape::default(),
+            pty_master: pair.master,
             _child: child,
         })
     }
 
+    pub fn grid(&self) -> &Grid {
+        if self.active_is_alt { &self.alt_grid } else { &self.primary_grid }
+    }
+
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        if self.active_is_alt { &mut self.alt_grid } else { &mut self.primary_grid }
+    }
+
     pub fn process_output(&mut self, data: &[u8]) {
-        let grid = &mut self.grid;
-        let writer = &mut self.pty_writer;
-        let mut performer = Performer { grid, writer };
-        self.vte_parser.advance(&mut performer, data);
+        let mut handler = TermHandler::new(
+            &mut self.primary_grid,
+            &mut self.alt_grid,
+            &mut self.mode,
+            &mut self.palette,
+            &mut self.title,
+            &mut self.pty_writer,
+            &mut self.active_is_alt,
+            &mut self.cursor_shape,
+        );
+        self.processor.advance(&mut handler, data);
     }
 
     pub fn send_pty(&mut self, data: &[u8]) {
@@ -103,5 +129,16 @@ impl Tab {
                 Err(e) => log(&format!("send_pty ERROR for tab {:?}: {e}", self.id)),
             }
         }
+    }
+
+    pub fn resize(&mut self, cols: usize, rows: usize, pixel_width: u16, pixel_height: u16) {
+        self.primary_grid.resize(cols, rows);
+        self.alt_grid.resize(cols, rows);
+        let _ = self.pty_master.resize(portable_pty::PtySize {
+            rows: rows as u16,
+            cols: cols as u16,
+            pixel_width,
+            pixel_height,
+        });
     }
 }

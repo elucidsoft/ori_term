@@ -5,27 +5,31 @@ use std::time::Instant;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
-use crate::grid::BG;
 use crate::log;
+use crate::palette::rgb_to_u32;
 use crate::render::{self, GlyphCache, render_grid};
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::{self, TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, GRID_PADDING_LEFT, GRID_PADDING_BOTTOM, render_window_border};
+use crate::term_mode::TermMode;
 use crate::window::TermWindow;
 
-const COLS: usize = 120;
-const ROWS: usize = 30;
+const DEFAULT_COLS: usize = 120;
+const DEFAULT_ROWS: usize = 30;
 
 // Resize border thickness in pixels
 const RESIZE_BORDER: f64 = 8.0;
 
 // Double-click detection threshold in milliseconds
 const DOUBLE_CLICK_MS: u128 = 400;
+
+// Scroll lines per mouse wheel tick
+const SCROLL_LINES: usize = 3;
 
 pub struct App {
     windows: HashMap<WindowId, TermWindow>,
@@ -89,12 +93,22 @@ impl App {
         id
     }
 
+    fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
+        let cw = self.glyphs.cell_width;
+        let ch = self.glyphs.cell_height;
+        let grid_w = (width as usize).saturating_sub(GRID_PADDING_LEFT);
+        let grid_h = (height as usize).saturating_sub(TAB_BAR_HEIGHT + 10 + GRID_PADDING_BOTTOM);
+        let cols = if cw > 0 { grid_w / cw } else { DEFAULT_COLS };
+        let rows = if ch > 0 { grid_h / ch } else { DEFAULT_ROWS };
+        (cols.max(2), rows.max(1))
+    }
+
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
     ) -> Option<WindowId> {
-        let win_w = (self.glyphs.cell_width * COLS) as u32;
-        let win_h = (self.glyphs.cell_height * ROWS) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
+        let win_w = (self.glyphs.cell_width * DEFAULT_COLS) as u32 + GRID_PADDING_LEFT as u32;
+        let win_h = (self.glyphs.cell_height * DEFAULT_ROWS) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
 
         let attrs = Window::default_attributes()
             .with_title("ori_console")
@@ -129,10 +143,11 @@ impl App {
         let mut tw = TermWindow::new(window, context, surface);
 
         // Fill surface with dark background immediately to prevent white flash
+        let bg_u32 = rgb_to_u32(crate::palette::Palette::new().default_bg());
         if let (Some(nw), Some(nh)) = (NonZeroU32::new(win_w), NonZeroU32::new(win_h)) {
             if tw.surface.resize(nw, nh).is_ok() {
                 if let Ok(mut buf) = tw.surface.buffer_mut() {
-                    buf.fill(BG);
+                    buf.fill(bg_u32);
                     let _ = buf.present();
                 }
             }
@@ -147,8 +162,16 @@ impl App {
         &mut self,
         window_id: WindowId,
     ) -> Option<TabId> {
+        // Compute grid size from window
+        let (cols, rows) = self.windows.get(&window_id)
+            .map(|tw| {
+                let size = tw.window.inner_size();
+                self.grid_dims_for_size(size.width, size.height)
+            })
+            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+
         let tab_id = self.alloc_tab_id();
-        let tab = match Tab::spawn(tab_id, COLS, ROWS, self.proxy.clone()) {
+        let tab = match Tab::spawn(tab_id, cols, rows, self.proxy.clone()) {
             Ok(t) => t,
             Err(e) => {
                 log(&format!("failed to spawn tab: {e}"));
@@ -241,6 +264,11 @@ impl App {
         let h = phys.height as usize;
         let hover = self.hover_hit.get(&window_id).copied().unwrap_or(TabBarHit::None);
 
+        // Get palette info for background color
+        let bg_u32 = self.tabs.values().next()
+            .map(|t| rgb_to_u32(t.palette.default_bg()))
+            .unwrap_or(0x001e1e2e);
+
         let tw = match self.windows.get_mut(&window_id) {
             Some(tw) => tw,
             None => return,
@@ -258,7 +286,7 @@ impl App {
             Err(_) => return,
         };
 
-        buffer.fill(BG);
+        buffer.fill(bg_u32);
 
         // Render tab bar
         tab_bar::render_tab_bar(
@@ -277,7 +305,9 @@ impl App {
             if let Some(tab) = self.tabs.get(&tab_id) {
                 render_grid(
                     &mut self.glyphs,
-                    &tab.grid,
+                    tab.grid(),
+                    &tab.palette,
+                    tab.mode,
                     &mut buffer,
                     w,
                     h,
@@ -326,6 +356,24 @@ impl App {
             (_, _, true, _) => Some(ResizeDirection::North),
             (_, _, _, true) => Some(ResizeDirection::South),
             _ => None,
+        }
+    }
+
+    fn handle_resize(&mut self, window_id: WindowId, width: u32, height: u32) {
+        let (cols, rows) = self.grid_dims_for_size(width, height);
+
+        let tw = match self.windows.get(&window_id) {
+            Some(tw) => tw,
+            None => return,
+        };
+
+        let pixel_w = width as u16;
+        let pixel_h = height as u16;
+
+        for &tab_id in &tw.tabs {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.resize(cols, rows, pixel_w, pixel_h);
+            }
         }
     }
 
@@ -463,6 +511,45 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn handle_mouse_wheel(&mut self, window_id: WindowId, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                if y > 0.0 { SCROLL_LINES as i32 } else { -(SCROLL_LINES as i32) }
+            }
+            MouseScrollDelta::PixelDelta(pos) => {
+                let cell_h = self.glyphs.cell_height as f64;
+                if cell_h > 0.0 {
+                    (pos.y / cell_h).round() as i32
+                } else {
+                    0
+                }
+            }
+        };
+
+        if lines == 0 {
+            return;
+        }
+
+        let tab_id = self.windows.get(&window_id)
+            .and_then(|tw| tw.active_tab_id());
+        if let Some(tid) = tab_id {
+            if let Some(tab) = self.tabs.get_mut(&tid) {
+                let grid = tab.grid_mut();
+                if lines > 0 {
+                    // Scroll up (into history)
+                    let max = grid.scrollback.len();
+                    grid.display_offset = (grid.display_offset + lines as usize).min(max);
+                } else {
+                    // Scroll down (toward live)
+                    grid.display_offset = grid.display_offset.saturating_sub((-lines) as usize);
+                }
+            }
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.request_redraw();
             }
         }
     }
@@ -702,6 +789,7 @@ impl ApplicationHandler<TermEvent> for App {
         match event {
             TermEvent::PtyOutput(tab_id, data) => {
                 log(&format!("pty_output: tab={:?} len={}", tab_id, data.len()));
+
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
                 }
@@ -733,12 +821,23 @@ impl ApplicationHandler<TermEvent> for App {
                 self.render_window(window_id);
             }
 
+            WindowEvent::Resized(size) => {
+                self.handle_resize(window_id, size.width, size.height);
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+            }
+
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
                 self.handle_mouse_input(window_id, state, button, event_loop);
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(window_id, delta);
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -800,25 +899,123 @@ impl ApplicationHandler<TermEvent> for App {
                     return;
                 }
 
-                // Forward to active tab's PTY
+                // Shift+PageUp/PageDown — page scroll through scrollback
+                if shift && matches!(event.logical_key, Key::Named(NamedKey::PageUp)) {
+                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            let grid = tab.grid_mut();
+                            let page = grid.lines;
+                            let max = grid.scrollback.len();
+                            grid.display_offset = (grid.display_offset + page).min(max);
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
+                if shift && matches!(event.logical_key, Key::Named(NamedKey::PageDown)) {
+                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            let grid = tab.grid_mut();
+                            let page = grid.lines;
+                            grid.display_offset = grid.display_offset.saturating_sub(page);
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
+                if shift && matches!(event.logical_key, Key::Named(NamedKey::Home)) {
+                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            let grid = tab.grid_mut();
+                            grid.display_offset = grid.scrollback.len();
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
+                if shift && matches!(event.logical_key, Key::Named(NamedKey::End)) {
+                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            tab.grid_mut().display_offset = 0;
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
+                // Any keyboard input to PTY — scroll to live
                 let tab_id = self
                     .windows
                     .get(&window_id)
                     .and_then(|tw| tw.active_tab_id());
                 if let Some(tid) = tab_id {
+                    // Scroll to live on any PTY input
                     if let Some(tab) = self.tabs.get_mut(&tid) {
+                        tab.grid_mut().display_offset = 0;
+                    }
+
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let app_cursor = tab.mode.contains(TermMode::APP_CURSOR);
                         match &event.logical_key {
                             Key::Named(NamedKey::Enter) => tab.send_pty(b"\r"),
                             Key::Named(NamedKey::Backspace) => tab.send_pty(&[0x7f]),
                             Key::Named(NamedKey::Tab) => tab.send_pty(b"\t"),
                             Key::Named(NamedKey::Escape) => tab.send_pty(&[0x1b]),
-                            Key::Named(NamedKey::ArrowUp) => tab.send_pty(b"\x1b[A"),
-                            Key::Named(NamedKey::ArrowDown) => tab.send_pty(b"\x1b[B"),
-                            Key::Named(NamedKey::ArrowRight) => tab.send_pty(b"\x1b[C"),
-                            Key::Named(NamedKey::ArrowLeft) => tab.send_pty(b"\x1b[D"),
-                            Key::Named(NamedKey::Home) => tab.send_pty(b"\x1b[H"),
-                            Key::Named(NamedKey::End) => tab.send_pty(b"\x1b[F"),
+                            Key::Named(NamedKey::ArrowUp) => {
+                                if app_cursor { tab.send_pty(b"\x1bOA") }
+                                else { tab.send_pty(b"\x1b[A") }
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                if app_cursor { tab.send_pty(b"\x1bOB") }
+                                else { tab.send_pty(b"\x1b[B") }
+                            }
+                            Key::Named(NamedKey::ArrowRight) => {
+                                if app_cursor { tab.send_pty(b"\x1bOC") }
+                                else { tab.send_pty(b"\x1b[C") }
+                            }
+                            Key::Named(NamedKey::ArrowLeft) => {
+                                if app_cursor { tab.send_pty(b"\x1bOD") }
+                                else { tab.send_pty(b"\x1b[D") }
+                            }
+                            Key::Named(NamedKey::Home) => {
+                                if app_cursor { tab.send_pty(b"\x1bOH") }
+                                else { tab.send_pty(b"\x1b[H") }
+                            }
+                            Key::Named(NamedKey::End) => {
+                                if app_cursor { tab.send_pty(b"\x1bOF") }
+                                else { tab.send_pty(b"\x1b[F") }
+                            }
                             Key::Named(NamedKey::Delete) => tab.send_pty(b"\x1b[3~"),
+                            Key::Named(NamedKey::PageUp) => tab.send_pty(b"\x1b[5~"),
+                            Key::Named(NamedKey::PageDown) => tab.send_pty(b"\x1b[6~"),
+                            Key::Named(NamedKey::Insert) => tab.send_pty(b"\x1b[2~"),
+                            Key::Named(NamedKey::F1) => tab.send_pty(b"\x1bOP"),
+                            Key::Named(NamedKey::F2) => tab.send_pty(b"\x1bOQ"),
+                            Key::Named(NamedKey::F3) => tab.send_pty(b"\x1bOR"),
+                            Key::Named(NamedKey::F4) => tab.send_pty(b"\x1bOS"),
+                            Key::Named(NamedKey::F5) => tab.send_pty(b"\x1b[15~"),
+                            Key::Named(NamedKey::F6) => tab.send_pty(b"\x1b[17~"),
+                            Key::Named(NamedKey::F7) => tab.send_pty(b"\x1b[18~"),
+                            Key::Named(NamedKey::F8) => tab.send_pty(b"\x1b[19~"),
+                            Key::Named(NamedKey::F9) => tab.send_pty(b"\x1b[20~"),
+                            Key::Named(NamedKey::F10) => tab.send_pty(b"\x1b[21~"),
+                            Key::Named(NamedKey::F11) => tab.send_pty(b"\x1b[23~"),
+                            Key::Named(NamedKey::F12) => tab.send_pty(b"\x1b[24~"),
                             _ => {
                                 if let Some(text) = &event.text {
                                     tab.send_pty(text.as_bytes());

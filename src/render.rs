@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-use crate::grid::{CURSOR_COLOR, Grid};
+use crate::cell::CellFlags;
+use crate::grid::Grid;
+use crate::palette::{Palette, rgb_to_u32};
+use crate::term_mode::TermMode;
 
 pub const FONT_SIZE: f32 = 16.0;
 
@@ -54,52 +57,103 @@ impl GlyphCache {
 pub fn render_grid(
     glyphs: &mut GlyphCache,
     grid: &Grid,
+    palette: &Palette,
+    mode: TermMode,
     buffer: &mut [u32],
     buf_w: usize,
     buf_h: usize,
     x_offset: usize,
     y_offset: usize,
 ) {
-    // Pre-cache every visible char
-    for cell in &grid.cells {
-        glyphs.ensure(cell.ch);
-    }
-
     let cw = glyphs.cell_width;
     let cell_h = glyphs.cell_height;
     let baseline = glyphs.baseline;
 
-    for row in 0..grid.rows {
+    // Pre-cache visible chars
+    for line in 0..grid.lines {
+        let row = grid.visible_row(line);
         for col in 0..grid.cols {
-            let idx = row * grid.cols + col;
-            let cell = &grid.cells[idx];
+            let cell = &row[col];
+            if cell.c != ' ' && cell.c != '\0' && !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                glyphs.ensure(cell.c);
+            }
+        }
+    }
+
+    let default_bg_u32 = rgb_to_u32(palette.default_bg());
+
+    for line in 0..grid.lines {
+        let row = grid.visible_row(line);
+        for col in 0..grid.cols {
+            let cell = &row[col];
             let x0 = col * cw + x_offset;
-            let y0 = row * cell_h + y_offset;
+            let y0 = line * cell_h + y_offset;
 
             if x0 >= buf_w || y0 >= buf_h {
                 continue;
             }
 
-            // Draw cursor block
-            if row == grid.cursor_row && col == grid.cursor_col {
+            // Skip wide char spacer cells
+            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+
+            // Resolve colors
+            let fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
+            let bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
+            let bg_u32 = rgb_to_u32(bg_rgb);
+            let fg_u32 = rgb_to_u32(fg_rgb);
+
+            // Draw cell background if non-default
+            let cell_w = if cell.flags.contains(CellFlags::WIDE_CHAR) { cw * 2 } else { cw };
+            if bg_u32 != default_bg_u32 {
                 for dy in 0..cell_h.min(buf_h - y0) {
-                    for dx in 0..cw.min(buf_w - x0) {
-                        buffer[(y0 + dy) * buf_w + (x0 + dx)] = CURSOR_COLOR;
+                    for dx in 0..cell_w.min(buf_w - x0) {
+                        buffer[(y0 + dy) * buf_w + (x0 + dx)] = bg_u32;
                     }
                 }
             }
 
-            if cell.ch == ' ' || cell.ch == '\0' {
+            // Draw cursor block (only on live viewport)
+            if grid.display_offset == 0
+                && mode.contains(TermMode::SHOW_CURSOR)
+                && line == grid.cursor.row
+                && col == grid.cursor.col
+            {
+                let cursor_u32 = rgb_to_u32(palette.cursor_color());
+                for dy in 0..cell_h.min(buf_h - y0) {
+                    for dx in 0..cw.min(buf_w - x0) {
+                        buffer[(y0 + dy) * buf_w + (x0 + dx)] = cursor_u32;
+                    }
+                }
+            }
+
+            if cell.c == ' ' || cell.c == '\0' {
                 continue;
             }
 
-            if let Some((metrics, bitmap)) = glyphs.get(cell.ch) {
+            if let Some((metrics, bitmap)) = glyphs.get(cell.c) {
                 let gx = x0 as i32 + metrics.xmin;
                 let gy = y0 as i32 + baseline as i32 - metrics.height as i32 - metrics.ymin;
 
-                let fg_r = (cell.fg >> 16) & 0xFF;
-                let fg_g = (cell.fg >> 8) & 0xFF;
-                let fg_b = cell.fg & 0xFF;
+                let fg_r = (fg_u32 >> 16) & 0xFF;
+                let fg_g = (fg_u32 >> 8) & 0xFF;
+                let fg_b = fg_u32 & 0xFF;
+
+                // If cursor is on this cell, use black text for contrast
+                let (draw_r, draw_g, draw_b, draw_u32) =
+                    if grid.display_offset == 0
+                        && mode.contains(TermMode::SHOW_CURSOR)
+                        && line == grid.cursor.row
+                        && col == grid.cursor.col
+                    {
+                        // Use dark text over cursor
+                        let dark = palette.default_bg();
+                        let du32 = rgb_to_u32(dark);
+                        ((du32 >> 16) & 0xFF, (du32 >> 8) & 0xFF, du32 & 0xFF, du32)
+                    } else {
+                        (fg_r, fg_g, fg_b, fg_u32)
+                    };
 
                 for by in 0..metrics.height {
                     for bx in 0..metrics.width {
@@ -114,13 +168,13 @@ pub fn render_grid(
                         }
                         let pidx = py as usize * buf_w + px as usize;
                         if alpha == 255 {
-                            buffer[pidx] = cell.fg;
+                            buffer[pidx] = draw_u32;
                         } else {
                             let bg_val = buffer[pidx];
                             let inv = 255 - alpha;
-                            let r = (fg_r * alpha + ((bg_val >> 16) & 0xFF) * inv) / 255;
-                            let g = (fg_g * alpha + ((bg_val >> 8) & 0xFF) * inv) / 255;
-                            let b = (fg_b * alpha + (bg_val & 0xFF) * inv) / 255;
+                            let r = (draw_r * alpha + ((bg_val >> 16) & 0xFF) * inv) / 255;
+                            let g = (draw_g * alpha + ((bg_val >> 8) & 0xFF) * inv) / 255;
+                            let b = (draw_b * alpha + (bg_val & 0xFF) * inv) / 255;
                             buffer[pidx] = (r << 16) | (g << 8) | b;
                         }
                     }

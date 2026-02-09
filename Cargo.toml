@@ -14,7 +14,9 @@ winit = "0.30"
 softbuffer = "0.4"
 fontdue = "0.9.3"
 portable-pty = "0.9.0"
-vte = "0.15.0"
+vte = { version = "0.15.0", features = ["ansi"] }
+bitflags = "2"
+log = "0.4"
 
 [[bin]]
 name = "oriterm"
