@@ -237,20 +237,20 @@ throughput, latency, frame rate, FPS
 
 ## Quick Reference
 
-| ID | Title | File | Tier |
-|----|-------|------|------|
-| 01 | Cell & Grid Model | `section-01-cell-grid.md` | 1 |
-| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 |
-| 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 |
-| 04 | Resize Handling | `section-04-resize.md` | 1 |
-| 05 | Color System | `section-05-color.md` | 1 |
-| 06 | Font System | `section-06-font-system.md` | 2 |
-| 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 |
-| 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 |
-| 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 |
-| 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 |
-| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 |
-| 12 | Search | `section-12-search.md` | 3 |
-| 13 | Configuration | `section-13-configuration.md` | 3 |
-| 14 | Cross-Platform | `section-14-cross-platform.md` | 3 |
-| 15 | Performance | `section-15-performance.md` | 3 |
+| ID | Title | File | Tier | Status |
+|----|-------|------|------|--------|
+| 01 | Cell & Grid Model | `section-01-cell-grid.md` | 1 | **Complete** |
+| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **In Progress** (02.1-02.5 done, OSC/DA partial) |
+| 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **In Progress** (functional, ring buffer deferred) |
+| 04 | Resize Handling | `section-04-resize.md` | 1 | **In Progress** (resize works, text reflow not started) |
+| 05 | Color System | `section-05-color.md` | 1 | **In Progress** (palette + render done, schemes not started) |
+| 06 | Font System | `section-06-font-system.md` | 2 | Not Started |
+| 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | Not Started |
+| 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | Not Started |
+| 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 | Not Started |
+| 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 | Not Started |
+| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | Not Started |
+| 12 | Search | `section-12-search.md` | 3 | Not Started |
+| 13 | Configuration | `section-13-configuration.md` | 3 | Not Started |
+| 14 | Cross-Platform | `section-14-cross-platform.md` | 3 | Not Started |
+| 15 | Performance | `section-15-performance.md` | 3 | Not Started |

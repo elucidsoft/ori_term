@@ -6,7 +6,7 @@ goal: Implement a ring-buffer scrollback with efficient memory usage and viewpor
 sections:
   - id: "03.1"
     title: Ring Buffer Storage
-    status: in-progress
+    status: not-started
   - id: "03.2"
     title: Viewport Scrolling
     status: complete
@@ -20,7 +20,7 @@ sections:
 
 # Section 03: Scrollback Buffer
 
-**Status:** In Progress (functional Vec-based scrollback, ring buffer upgrade pending)
+**Status:** In Progress (03.2 and 03.3 complete, ring buffer optimization deferred)
 **Goal:** Lines scrolled off the top of the screen are preserved in a scrollback
 buffer, allowing the user to scroll back through history.
 
@@ -28,19 +28,24 @@ buffer, allowing the user to scroll back through history.
 - Alacritty's ring buffer with O(1) rotation (`grid/storage.rs`)
 - Ghostty's PageList with page-based memory management
 
-**Implemented in:** `src/grid/mod.rs` (scrollback fields + scroll_up_in_region), `src/app.rs` (mouse wheel + keyboard scroll)
+**Implemented in:** `src/grid/mod.rs` (scrollback fields, scroll_up_in_region, display_offset, visible_row), `src/app.rs` (mouse wheel handler, Shift+PageUp/Down/Home/End shortcuts)
 
 **What was built:**
 - Vec-based scrollback with `max_scrollback: 10_000`
-- `display_offset` for viewport positioning
-- Mouse wheel scroll (3 lines per tick)
-- Shift+PageUp/Down/Home/End keyboard shortcuts
-- Viewport anchoring: when scrolled up, new output doesn't jump viewport (increments display_offset)
+- `display_offset` for viewport positioning (0 = live, N = scrolled back N lines)
+- `visible_row(line)` renders from scrollback or active rows based on display_offset
+- Mouse wheel scroll (3 lines per tick, LineDelta and PixelDelta)
+- Shift+PageUp: scroll up one page
+- Shift+PageDown: scroll down one page
+- Shift+Home: scroll to top of scrollback
+- Shift+End: scroll to bottom (live)
+- Viewport anchoring: when scrolled up, new output increments display_offset to keep viewport pinned
 - Auto-scroll to live on keyboard input
 - Alternate screen forces display_offset=0, no scrollback accumulation
-- ED 3 clears scrollback
+- ED 3 clears scrollback and resets display_offset
+- display_offset clamped on resize
 
-**Remaining:** Replace Vec with ring buffer (O(1) rotation instead of Vec::remove(0) which is O(n)). This is a performance optimization tracked in Section 15.
+**Remaining:** Replace Vec with ring buffer for O(1) rotation (currently Vec::remove(0) is O(n)). This is a performance optimization — the functional behavior is complete. Ring buffer upgrade tracked in Section 15 (15.3).
 
 ---
 
@@ -126,16 +131,16 @@ Wire scrollback to user input.
 
 ## 03.4 Completion Checklist
 
-- [ ] Scrollback preserves lines that scroll off the top
-- [ ] Mouse wheel scrolls through history
-- [ ] Shift+PageUp/PageDown works
-- [ ] New output appears at bottom while scrolled up (viewport stays)
-- [ ] Typing scrolls back to bottom
-- [ ] Alternate screen has no scrollback
-- [ ] ED 3 clears scrollback
-- [ ] Scrollback configurable (max lines)
-- [ ] Memory usage stays bounded
-- [ ] No visible performance impact with 10,000+ lines of scrollback
+- [x] Scrollback preserves lines that scroll off the top
+- [x] Mouse wheel scrolls through history
+- [x] Shift+PageUp/PageDown works
+- [x] New output appears at bottom while scrolled up (viewport stays)
+- [x] Typing scrolls back to bottom
+- [x] Alternate screen has no scrollback
+- [x] ED 3 clears scrollback
+- [x] Scrollback configurable (max lines)
+- [x] Memory usage stays bounded
+- [ ] No visible performance impact with 10,000+ lines of scrollback (needs ring buffer — Section 15)
 
 **Exit Criteria:** User can scroll through terminal history with mouse wheel and
 keyboard shortcuts. Scrollback survives across multiple screens of output.

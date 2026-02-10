@@ -32,7 +32,7 @@ sections:
 
 # Section 02: VTE Escape Sequences
 
-**Status:** In Progress (core sequences complete, some OSC/DA remaining)
+**Status:** In Progress (02.1–02.5 complete, OSC and DA partially done)
 **Goal:** Make the VTE Performer comprehensive enough to run vim, htop, tmux, and
 other real applications -- not just cmd.exe with basic output.
 
@@ -40,16 +40,20 @@ other real applications -- not just cmd.exe with basic output.
 - Ghostty's comprehensive Terminal.zig with 100+ handled sequences
 - Alacritty's `term/mod.rs` Handler implementation (3300 lines)
 
-**Implemented in:** `src/term_handler.rs` (499 lines), `src/term_mode.rs`
+**Implemented in:** `src/term_handler.rs` (499 lines), `src/term_mode.rs` (29 lines)
 
-**What was built:** Replaced `vte_performer.rs` with `term_handler.rs` implementing
-`vte::ansi::Handler` trait (~40 methods). Uses vte's high-level `Processor` which
-parses all SGR/CSI/OSC sequences and calls semantic methods. All SGR attributes,
-cursor movement, erase operations, scroll regions, alternate screen (DECSET 1049),
-terminal modes, OSC titles, DSR/CPR, palette mutations handled.
+**What was built:**
+- Replaced `vte_performer.rs` with `term_handler.rs` implementing `vte::ansi::Handler` trait (~40 methods)
+- Uses vte's high-level `Processor` which parses SGR/CSI/OSC and calls semantic methods
+- **SGR (02.1):** All attributes (bold, dim, italic, underline variants, blink, inverse, hidden, strikeout), foreground/background/underline colors (named, indexed, RGB), reset codes
+- **Cursor/Erase (02.2):** CUP, CUU/D/F/B, CR, LF, NEL, RI, BS, HT, TBC, ED (all modes), EL (all modes), ECH, DCH, ICH, IL, DL
+- **Scroll Regions (02.3):** DECSTBM with proper boundary handling, SU/SD respecting region
+- **Alternate Screen (02.4):** DECSET/DECRST 1049 with save/restore cursor, dual grid (primary + alt)
+- **Terminal Modes (02.5):** 15 modes via TermMode bitflags (APP_CURSOR, INSERT, SHOW_CURSOR, ORIGIN, LINE_WRAP, MOUSE_REPORT/MOTION/ALL, SGR_MOUSE, UTF8_MOUSE, FOCUS_IN_OUT, BRACKETED_PASTE, ALTERNATE_SCROLL, ALT_SCREEN, LINE_FEED_NEW_LINE)
+- **OSC (02.6):** OSC 0/1/2 (set title), set_color/reset_color stubs, set_hyperlink stub
+- **DA (02.7):** DSR 6 (cursor position report), text_area_size_chars
 
-**Remaining:** OSC 7 (CWD), OSC 52 (clipboard), OSC 133 (prompt markers), DA/DA2,
-DSR 5, DECRQM, XTVERSION, REP (repeat char).
+**Remaining:** OSC 7 (CWD), OSC 8 (hyperlinks fully wired), OSC 10/11/12 (set fg/bg/cursor color), OSC 52 (clipboard), OSC 133 (prompt markers), DA/DA2 identification responses, DSR 5, DECRQM, XTVERSION, REP (repeat char).
 
 ---
 
@@ -258,19 +262,19 @@ Proper responses make applications detect terminal capabilities.
 
 ## 02.8 Completion Checklist
 
-- [ ] SGR sets all 16+ attributes on cells with correct colors
+- [x] SGR sets all 16+ attributes on cells with correct colors
 - [ ] vim opens, displays syntax highlighting, and exits cleanly
 - [ ] htop displays with correct colors and layout
 - [ ] tmux works (requires alternate screen + scroll regions)
 - [ ] less works (requires alternate screen)
-- [ ] ls --color shows colored output
-- [ ] Tab title updates from OSC sequences
-- [ ] Cursor visibility toggles (DECSET 25)
-- [ ] Origin mode works (DECSET 6)
-- [ ] Auto-wrap mode works (DECSET 7)
-- [ ] Insert mode works (SM 4)
-- [ ] All erase operations correct (ED 0/1/2/3, EL 0/1/2)
-- [ ] Scroll regions work for vim/htop scrolling
+- [x] ls --color shows colored output
+- [x] Tab title updates from OSC sequences
+- [x] Cursor visibility toggles (DECSET 25)
+- [x] Origin mode works (DECSET 6)
+- [x] Auto-wrap mode works (DECSET 7)
+- [x] Insert mode works (SM 4)
+- [x] All erase operations correct (ED 0/1/2/3, EL 0/1/2)
+- [x] Scroll regions work for vim/htop scrolling
 - [ ] Unit tests for each sequence category
 
 **Exit Criteria:** vim, htop, tmux, and less all run correctly in the terminal

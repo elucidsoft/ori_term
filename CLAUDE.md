@@ -339,11 +339,6 @@ cargo run --example hello
 
 Target: `x86_64-pc-windows-gnu` (mingw). Windows test binaries go to `C:\Users\ericm\ori_console\`.
 
-```bash
-cargo build --target x86_64-pc-windows-gnu --example hello --release
-cp target/x86_64-pc-windows-gnu/release/examples/hello.exe /mnt/c/Users/ericm/ori_console/
-```
-
 Launch from Windows: `C:\Users\ericm\ori_console\hello.exe`
 
 ## Code Style

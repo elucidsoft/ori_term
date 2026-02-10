@@ -139,16 +139,16 @@ Support loading different color schemes.
 
 ## 05.4 Completion Checklist
 
-- [ ] `ls --color` shows correct colors
-- [ ] 256-color test (`for i in {0..255}; do printf '\e[38;5;%dm%3d ' $i $i; done`) renders correctly
-- [ ] Truecolor test (`printf '\e[38;2;255;100;0mHello'`) renders orange text
-- [ ] Bold text uses bright colors (or configurable)
-- [ ] Dim text is visually dimmer
-- [ ] Inverse video swaps fg/bg
-- [ ] Cursor renders in configurable color
-- [ ] OSC 4 can change palette entries
-- [ ] OSC 104 resets palette
-- [ ] Multiple color schemes built in
+- [x] `ls --color` shows correct colors
+- [x] 256-color test (`for i in {0..255}; do printf '\e[38;5;%dm%3d ' $i $i; done`) renders correctly
+- [x] Truecolor test (`printf '\e[38;2;255;100;0mHello'`) renders orange text
+- [x] Bold text uses bright colors (or configurable)
+- [x] Dim text is visually dimmer
+- [x] Inverse video swaps fg/bg
+- [x] Cursor renders in configurable color
+- [x] OSC 4 can change palette entries (set_color implemented)
+- [x] OSC 104 resets palette (reset_color implemented)
+- [ ] Multiple color schemes built in — 05.3 not started
 
 **Exit Criteria:** Terminal output renders with full color fidelity. 256-color and
 truecolor test scripts produce correct visual output.

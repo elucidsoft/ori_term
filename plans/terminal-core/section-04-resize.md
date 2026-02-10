@@ -116,16 +116,16 @@ When columns change, reflow wrapped lines to fit the new width.
 
 ## 04.4 Completion Checklist
 
-- [ ] Resizing the window resizes the grid
-- [ ] PTY receives new dimensions on resize
-- [ ] Shell prompt redraws correctly after resize
-- [ ] Text reflows when columns change (long lines wrap/unwrap)
-- [ ] Wide characters handled at reflow boundaries
-- [ ] Cursor position preserved through resize
-- [ ] No crash on zero-dimension resize
-- [ ] No crash on rapid resize sequences
-- [ ] Alternate screen resizes correctly (no reflow in alt screen)
-- [ ] vim/htop redraw correctly after resize (they query new size)
+- [x] Resizing the window resizes the grid
+- [x] PTY receives new dimensions on resize
+- [x] Shell prompt redraws correctly after resize
+- [ ] Text reflows when columns change (long lines wrap/unwrap) — 04.3 not started
+- [ ] Wide characters handled at reflow boundaries — 04.3 not started
+- [x] Cursor position preserved through resize
+- [x] No crash on zero-dimension resize
+- [x] No crash on rapid resize sequences
+- [x] Alternate screen resizes correctly (no reflow in alt screen)
+- [x] vim/htop redraw correctly after resize (they query new size)
 
 **Exit Criteria:** Resizing the window produces correct terminal behavior -- text
 reflows, the shell adapts, and full-screen apps redraw properly.

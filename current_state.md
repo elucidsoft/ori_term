@@ -24,28 +24,40 @@ src/main.rs                    Entry point: App::run() with #![windows_subsystem
 
 src/
   lib.rs                       Module declarations + log() / log_path() helpers
-  app.rs                       App struct, winit ApplicationHandler, event dispatch,
-                               frameless window creation, resize border detection,
-                               double-click maximize, initial surface fill (no white flash)
+  app.rs                       App struct (1032 lines), winit ApplicationHandler, event dispatch,
+                               frameless window creation, resize handling, keyboard/mouse input,
+                               scrollback scroll shortcuts, drag state machine
   window.rs                    TermWindow (winit Window + softbuffer Surface + tab list + is_maximized)
-  tab.rs                       Tab (Grid + PTY writer + VTE parser + ConPTY handles); TabId; TermEvent
+  tab.rs                       Tab (dual Grid primary+alt, PTY writer+master, VTE Processor,
+                               Palette, TermMode, title); TabId; TermEvent; resize
   tab_bar.rs                   Tab bar rendering and hit-testing (TabBarLayout, TabBarHit),
                                window control buttons (minimize/maximize/close), window border,
                                pixel drawing helpers (draw_x, draw_plus, draw_rect, blend, etc.)
   drag.rs                      DragState / DragPhase -- Chrome-style drag state machine
-  grid.rs                      Grid / Cell -- terminal character cell buffer
-  render.rs                    GlyphCache (fontdue), render_grid(), render_text(), load_font()
-  vte_performer.rs             Performer -- vte::Perform impl driving Grid from PTY output
+  cell.rs                      Rich Cell (24 bytes), CellFlags (u16 bitflags), CellExtra (Arc),
+                               Hyperlink struct
+  grid/
+    mod.rs                     Grid (845 lines) -- rows, cursor, scrollback, display_offset,
+                               scroll regions, tab stops, all operations, resize
+    row.rs                     Row with occupancy tracking, grow/truncate
+    cursor.rs                  Cursor with template Cell, input_needs_wrap
+  term_handler.rs              TermHandler -- vte::ansi::Handler impl (~40 methods), SGR,
+                               cursor, erase, scroll, modes, alt screen, OSC titles
+  term_mode.rs                 TermMode bitflags (15 terminal modes)
+  palette.rs                   270-entry color palette, resolve fg/bg with attributes,
+                               bold-bright, dim, inverse, hidden, set/reset color
+  render.rs                    GlyphCache (fontdue), render_grid() with per-cell color
+                               resolution, cursor rendering, alpha blending
 
   (Library scaffolding modules -- present but not used by the terminal emulator yet)
   color/                       Color types, profile detection (NO_COLOR, CLICOLOR, COLORTERM)
   style/                       Style struct, profile-aware rendering
-  text/                        Unicode width, wrapping, truncation, ANSI stripping
+  text/                        Unicode width, wrapping, truncation, ANSI stripping (stubs)
   terminal/                    Terminal struct, size, raw mode (crossterm-based)
-  output/                      Buffered writer, pipe detection
-  input/                       Key events, async reader
-  layout/                      Rect, constraints
-  widgets/                     Spinner, progress, prompt, select
+  output/                      Buffered writer, pipe detection (stubs)
+  input/                       Key events, async reader (stubs)
+  layout/                      Rect, constraints (stubs)
+  widgets/                     Spinner, progress, prompt, select (stubs)
 ```
 
 ### Data Flow
@@ -61,20 +73,26 @@ src/
    background reader thread.
 
 3. **PTY output**: The reader thread sends `TermEvent::PtyOutput(tab_id, data)` through
-   the `EventLoopProxy`. The `user_event` handler feeds the data through the VTE parser,
-   which calls `Performer` methods that mutate the tab's `Grid`. Then the window
+   the `EventLoopProxy`. The `user_event` handler feeds the data through the VTE
+   `Processor`, which parses escape sequences and calls `TermHandler` methods (via
+   `vte::ansi::Handler` trait) that mutate the active grid (primary or alternate),
+   update the palette, toggle terminal modes, and set tab title. Then the window
    containing the active tab is asked to redraw.
 
 4. **Rendering** (`render_window`): Resizes the softbuffer surface, fills with background
-   color (black `#000000`), calls `tab_bar::render_tab_bar()` for the custom title bar
-   with tabs and window controls, then `render::render_grid()` for the active tab's grid
-   (offset by `GRID_PADDING_LEFT` and `TAB_BAR_HEIGHT + 10`). Finally draws a 1px
-   window border (`render_window_border`, skipped when maximized) and calls
+   color, calls `tab_bar::render_tab_bar()` for the custom title bar with tabs and
+   window controls, then `render::render_grid()` for the active tab's grid (using
+   `visible_row()` for scrollback-aware rendering, with per-cell color resolution via
+   `Palette::resolve_fg/resolve_bg` applying bold-bright, dim, inverse, hidden).
+   Finally draws a 1px window border (skipped when maximized) and calls
    `buffer.present()`.
 
 5. **Input**: Keyboard events are intercepted for built-in shortcuts (Ctrl+T new tab,
-   Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, Escape cancel drag), then
-   forwarded to the active tab's PTY writer as raw bytes or escape sequences.
+   Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, Escape cancel drag,
+   Shift+PageUp/Down page scroll, Shift+Home/End scroll to top/bottom of scrollback),
+   then forwarded to the active tab's PTY writer as raw bytes or escape sequences.
+   Supported keys: printable chars (UTF-8), Enter, Backspace, Tab, Escape, arrows
+   (with APP_CURSOR mode), Home, End, Delete, Insert, PageUp/Down, F1-F12.
 
 6. **Mouse / Drag**: Mouse presses on the tab bar trigger hit-testing (`TabBarLayout`).
    Clicking a tab selects it; clicking the close button closes it; clicking the "+"
@@ -143,18 +161,41 @@ Terminal style):
   child process. A background thread reads PTY output and sends it to the event loop
   via `EventLoopProxy`.
 
-- **VTE parsing**: The `vte` crate parses the PTY byte stream. The `Performer`
-  implements cursor movement (CUP, CUU, CUD, CUF, CUB), erase (ED mode 2/3, EL
-  mode 0), device status report (DSR 6 -- cursor position response), tab stops, and
-  printable character output.
+- **Rich cell model**: 24-byte Cell struct with fg/bg colors (Named/Indexed/Spec),
+  CellFlags bitflags (bold, dim, italic, underline variants, blink, inverse, hidden,
+  strikeout, wide char, wrapline), and Arc<CellExtra> for rare data (zerowidth chars,
+  underline color, hyperlinks). Row wrapper with occupancy tracking.
+
+- **VTE parsing (comprehensive)**: `term_handler.rs` implements `vte::ansi::Handler`
+  trait (~40 methods). Full SGR attribute handling (all codes 0-29 + colors), cursor
+  movement (CUP/CUU/CUD/CUF/CUB/CR/LF/NEL/RI), erase operations (ED 0/1/2/3,
+  EL 0/1/2, ECH, DCH, ICH), line operations (IL/DL), scroll regions (DECSTBM),
+  alternate screen (DECSET 1049), 15 terminal modes, tab stops, DSR 6 cursor report,
+  OSC title updates.
+
+- **Full color support**: 270-entry palette (16 ANSI Catppuccin Mocha + 216 color
+  cube + 24 grayscale + semantic colors). Per-cell foreground/background color
+  resolution with bold-as-bright, DIM dimming, INVERSE swap, HIDDEN. Truecolor
+  (24-bit RGB) support. OSC 4 palette mutation, OSC 104 reset.
+
+- **Scrollback buffer**: Vec-based scrollback with configurable max (10,000 lines).
+  display_offset viewport scrolling. Mouse wheel scroll (3 lines/tick). Keyboard
+  shortcuts: Shift+PageUp/Down (page scroll), Shift+Home/End (top/bottom). Viewport
+  anchoring when scrolled up. Auto-scroll to live on keyboard input. ED 3 clears
+  scrollback. Alternate screen has no scrollback.
+
+- **Dynamic resize**: Window resize recalculates grid dimensions, resizes both primary
+  and alternate grids (Ghostty-style algorithm: smart scrollback integration, cursor
+  preservation), notifies PTY via pty_master.resize(). Scroll region resets on resize.
 
 - **Font rendering**: fontdue rasterizes glyphs from system monospace fonts. The
-  `GlyphCache` lazily caches rasterized glyphs. Alpha blending is done per-pixel
-  against the background.
+  `GlyphCache` lazily caches rasterized glyphs. Per-cell color-resolved alpha blending
+  against resolved background colors.
 
-- **Keyboard input forwarding**: Enter, Backspace, Tab, Escape, arrow keys, Home,
-  End, Delete, and printable text are all forwarded to the PTY with correct escape
-  sequences. The shell is interactive -- cmd.exe works.
+- **Keyboard input forwarding**: Enter, Backspace, Tab, Escape, arrow keys (with
+  APP_CURSOR mode support), Home, End, Delete, Insert, PageUp/Down, F1-F12, and
+  printable text are all forwarded to the PTY with correct escape sequences. The
+  shell is interactive -- cmd.exe works.
 
 - **Tab reordering**: While dragging within the tab bar (before tear-off), tabs can
   be reordered by horizontal cursor position.
@@ -184,23 +225,6 @@ Terminal style):
   which shifts as the window moves. A more robust approach would use absolute screen
   coordinates or platform-specific drag APIs.
 
-- **cmd.exe shell works but first tab may need testing**: The first tab spawns
-  `cmd.exe` and immediately starts reading. On some systems the initial prompt may
-  take a moment to appear or may require a resize event to trigger a full redraw.
-  There is no explicit "wait for prompt" logic.
-
-- **No per-cell color attributes**: `Cell` stores only `fg` as a `u32` and always
-  uses the global `FG` constant in `put_char`. SGR (Select Graphic Rendition)
-  sequences for foreground color, background color, bold, italic, underline, etc.
-  are not handled in the `Performer`. All text renders in one color.
-
-- **No scrollback buffer**: `Grid::scroll_up()` discards the top row permanently.
-  There is no scrollback history and no scroll UI.
-
-- **No window resize handling**: The grid is fixed at 120 columns x 30 rows.
-  Resizing the OS window does not resize the grid or notify the PTY of new
-  dimensions.
-
 - **No selection / copy-paste**: No text selection with the mouse and no clipboard
   integration.
 
@@ -208,18 +232,44 @@ Terminal style):
   WSL, or other shells.
 
 - **Font loading is Windows-only**: `load_font()` looks for fonts at hardcoded
-  `C:\Windows\Fonts\` paths. This will panic on Linux or macOS.
+  `C:\Windows\Fonts\` paths. Will panic on Linux or macOS. No font fallback
+  chain, no bold/italic variants, no emoji support.
 
-- **Limited VTE coverage**: Many sequences are unhandled -- scroll regions,
-  insert/delete line, SGR attributes, alternate screen buffer, mouse reporting,
-  bracketed paste, OSC sequences (window title, hyperlinks), etc.
+- **No mouse reporting to applications**: Terminal modes for mouse reporting
+  (1000/1002/1003/1006) are tracked in TermMode bitflags but mouse events are
+  not forwarded to the PTY. vim/htop/tmux mouse interaction won't work.
+
+- **No text reflow on column resize**: When the window is resized horizontally,
+  wrapped lines are not re-wrapped to the new column width.
+
+- **No color scheme configuration**: Only Catppuccin Mocha is available. No
+  built-in scheme switching or custom color scheme loading.
+
+- **Incomplete OSC support**: Only OSC 0/1/2 (window/tab title) handled. OSC 7
+  (CWD), OSC 8 (hyperlinks), OSC 10/11/12 (fg/bg/cursor colors), OSC 52
+  (clipboard), OSC 133 (prompt markers) not yet wired.
+
+- **No device attributes responses**: DA/DA2 (terminal identification) not
+  implemented. Some applications use DA to detect terminal capabilities.
 
 - **Tab title truncation uses byte length**: In `tab_bar.rs`, `title.len()` is
   compared against a character count, which is incorrect for multi-byte or wide
   characters.
 
-- **Static tab titles**: Titles are "Tab N" and do not update from OSC title
-  sequences.
+- **No cursor style changes**: Cursor is always a block. DECSCUSR (CSI Ps SP q)
+  for bar/underline/blinking cursor styles not implemented.
+
+- **No focus events**: DECSET 1004 tracked but focus in/out events not sent to
+  PTY when window gains/loses focus.
+
+- **No synchronized output**: DCS synchronized output protocol not implemented.
+  Rapid terminal output may cause partial frame rendering.
+
+- **CPU rendering only**: softbuffer pixel-by-pixel rendering with no damage
+  tracking. Full redraw every frame. No GPU acceleration.
+
+- **Vec-based scrollback**: Scrollback uses `Vec<Row>` with O(n) removal at front.
+  Should be upgraded to ring buffer for O(1) rotation (performance optimization).
 
 ## Key Data Structures
 
@@ -298,24 +348,70 @@ glyphs. Provides `ensure(ch)` to lazily rasterize and `get(ch)` to retrieve.
 Computes `cell_width`, `cell_height`, and `baseline` from font line metrics at
 construction time. Font size is 16.0 px.
 
-### `Grid` / `Cell` (grid.rs)
+### `Cell` / `CellFlags` / `CellExtra` (cell.rs)
 
-`Grid` is a flat `Vec<Cell>` of size `cols * rows` with a cursor position
-(`cursor_col`, `cursor_row`). Supports `put_char`, `newline`, `carriage_return`,
-`backspace`, `scroll_up`, `clear`, and `erase_line_from_cursor`.
+Rich 24-byte Cell struct:
+- `c: char` — the character (4 bytes)
+- `fg: vte::ansi::Color` — foreground (Named/Indexed/Spec)
+- `bg: vte::ansi::Color` — background
+- `flags: CellFlags` — u16 bitflags (BOLD, DIM, ITALIC, UNDERLINE, DOUBLE_UNDERLINE,
+  UNDERCURL, DOTTED_UNDERLINE, DASHED_UNDERLINE, BLINK, INVERSE, HIDDEN, STRIKEOUT,
+  WIDE_CHAR, WIDE_CHAR_SPACER, WRAPLINE, LEADING_WIDE_CHAR_SPACER)
+- `extra: Option<Arc<CellExtra>>` — rare data (zerowidth chars, underline_color, hyperlink)
 
-`Cell` holds a `char` and an `fg` color as `u32`. Background color is a global
-constant (`BG = 0x00000000`, black). Cursor color is `0x00f5e0dc` (Catppuccin
-rosewater).
+### `Grid` / `Row` / `Cursor` (grid/mod.rs, grid/row.rs, grid/cursor.rs)
 
-### `Performer` (vte_performer.rs)
+`Grid` contains:
+- `rows: Vec<Row>` — visible rows
+- `cols` / `lines` — dimensions
+- `cursor: Cursor` — current position + template cell + `input_needs_wrap`
+- `saved_cursor: Cursor` — for DECSC/DECRC
+- `scroll_top` / `scroll_bottom` — scroll region bounds
+- `tab_stops: Vec<bool>` — tab stop positions
+- `scrollback: Vec<Row>` — history buffer
+- `max_scrollback: usize` — cap (default 10,000)
+- `display_offset: usize` — viewport offset into scrollback
 
-Implements `vte::Perform` with mutable references to a `Grid` and the PTY writer.
-Translates VTE actions into grid mutations:
-- `print(char)` -- put character at cursor
-- `execute(byte)` -- LF, CR, BS, HT
-- `csi_dispatch` -- CUP/CUF/CUB/CUU/CUD, ED, EL, DSR
-- `esc_dispatch`, `osc_dispatch`, `hook`, `put`, `unhook` -- no-ops
+`Row` wraps `Vec<Cell>` with `occ` (occupancy) for efficient reset.
+`Cursor` has `col`, `row`, `template: Cell` (current attributes), `input_needs_wrap`.
+
+Operations: put_char, put_wide_char, newline, carriage_return, backspace, scroll_up/down
+(in region), erase_display, erase_line, erase_chars, insert_blank_chars, delete_chars,
+insert_lines, delete_lines, resize, visible_row (viewport rendering).
+
+### `TermHandler` (term_handler.rs)
+
+Implements `vte::ansi::Handler` trait (~40 methods) with mutable access to Grid,
+Palette, TermMode, PTY writer, tab title, and active_is_alt flag. Uses vte's
+high-level `Processor` which parses all SGR/CSI/OSC sequences and calls semantic
+methods:
+- `input(char)` -- put character at cursor with template attributes
+- `linefeed`, `carriage_return`, `backspace`, `tab` -- cursor movement
+- `goto(line, col)`, `move_up/down/forward/backward` -- CUP/CUU/CUD/CUF/CUB
+- `terminal_attribute(Attr)` -- SGR: all attributes, colors
+- `erase_display/erase_line/erase_chars` -- ED/EL/ECH
+- `insert_blank_chars/delete_chars/insert_blank_lines/delete_lines` -- ICH/DCH/IL/DL
+- `set_scrolling_region` -- DECSTBM
+- `scroll_up/scroll_down` -- SU/SD
+- `set_mode/unset_mode` -- DECSET/DECRST for 15 terminal modes
+- `swap_alt_screen/restore_primary_screen` -- alternate screen (1049)
+- `save_cursor_position/restore_cursor_position` -- DECSC/DECRC
+- `set_title` -- OSC 0/1/2
+- `device_status` -- DSR 6 cursor position report
+- `reverse_index`, `newline` -- RI, NEL
+
+### `TermMode` (term_mode.rs)
+
+Bitflags u32 tracking terminal modes: SHOW_CURSOR, APP_CURSOR, APP_KEYPAD,
+LINE_WRAP, ORIGIN, INSERT, ALT_SCREEN, MOUSE_REPORT, MOUSE_MOTION, MOUSE_ALL,
+SGR_MOUSE, FOCUS_IN_OUT, BRACKETED_PASTE, UTF8_MOUSE, ALTERNATE_SCROLL,
+LINE_FEED_NEW_LINE.
+
+### `Palette` (palette.rs)
+
+270-entry color palette (256 standard + semantic colors). Methods: resolve(),
+resolve_fg() (bold-bright, dim, inverse, hidden), resolve_bg() (inverse),
+set_color(), reset_color(), cursor_color(). Default theme: Catppuccin Mocha.
 
 ## Event Flow
 
@@ -341,12 +437,17 @@ winit EventLoop<TermEvent>
         |                               6. buffer.present()
         |
         +-- KeyboardInput             Intercept shortcuts:
-        |                               Ctrl+T     -> new_tab_in_window()
-        |                               Ctrl+W     -> close_tab()
-        |                               Ctrl+Tab   -> cycle tabs forward
-        |                               Ctrl+S+Tab -> cycle tabs backward
-        |                               Escape     -> cancel drag
+        |                               Ctrl+T       -> new_tab_in_window()
+        |                               Ctrl+W       -> close_tab()
+        |                               Ctrl+Tab     -> cycle tabs forward
+        |                               Ctrl+S+Tab   -> cycle tabs backward
+        |                               Escape       -> cancel drag
+        |                               Shift+PgUp   -> scroll up one page
+        |                               Shift+PgDn   -> scroll down one page
+        |                               Shift+Home   -> scroll to top of scrollback
+        |                               Shift+End    -> scroll to bottom (live)
         |                             Otherwise forward to active tab's PTY
+        |                             (Enter, BS, Tab, Esc, arrows, F1-F12, etc.)
         |
         +-- MouseInput (pressed)      Check resize borders first (8px edges):
         |                               Resize zone -> drag_resize_window(direction)
@@ -402,13 +503,15 @@ The app writes log files next to the executable:
 |---|---|---|
 | `winit` | 0.30 | Window creation, event loop, input events |
 | `softbuffer` | 0.4 | CPU pixel buffer presented to the OS window |
-| `fontdue` | 0.9 | Font parsing and glyph rasterization |
-| `portable-pty` | 0.9 | Cross-platform PTY (ConPTY on Windows) |
-| `vte` | 0.15 | ANSI/VT escape sequence parser |
-| `crossterm` | 0.28 | Library modules (not used by emulator yet) |
-| `unicode-width` | 0.2 | Library modules (not used by emulator yet) |
-| `unicode-segmentation` | 1.12 | Library modules (not used by emulator yet) |
-| `strip-ansi-escapes` | 0.2 | Library modules (not used by emulator yet) |
+| `fontdue` | 0.9.3 | Font parsing and glyph rasterization |
+| `portable-pty` | 0.9.0 | Cross-platform PTY (ConPTY on Windows) |
+| `vte` | 0.15 (ansi feature) | ANSI/VT escape sequence parser with high-level Handler trait |
+| `bitflags` | 2 | CellFlags and TermMode bitflags |
+| `log` | 0.4 | Logging macros |
+| `unicode-width` | 0.2 | Wide character width detection in term_handler |
+| `crossterm` | 0.28 | Library scaffolding modules (not used by emulator yet) |
+| `unicode-segmentation` | 1.12 | Library scaffolding (not used by emulator yet) |
+| `strip-ansi-escapes` | 0.2 | Library scaffolding (not used by emulator yet) |
 
 ## Chrome Tab Drag Reference
 

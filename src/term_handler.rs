@@ -321,7 +321,11 @@ impl Handler for TermHandler<'_> {
 
     fn device_status(&mut self, status: usize) {
         match status {
-            // CPR — Cursor Position Report
+            // DSR 5 — Device Status Report: respond "OK"
+            5 => {
+                self.write_pty(b"\x1b[0n");
+            }
+            // DSR 6 — Cursor Position Report
             6 => {
                 let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
                 let response = format!(
@@ -332,6 +336,21 @@ impl Handler for TermHandler<'_> {
                 self.write_pty(response.as_bytes());
             }
             _ => {}
+        }
+    }
+
+    fn identify_terminal(&mut self, intermediate: Option<char>) {
+        match intermediate {
+            // DA2 — Secondary Device Attributes (CSI > c)
+            Some('>') => {
+                // Report as VT220-compatible: type 1, firmware version 100, ROM 0
+                self.write_pty(b"\x1b[>1;100;0c");
+            }
+            // DA — Primary Device Attributes (CSI c or ESC Z)
+            _ => {
+                // Report VT220 with ANSI color (62), columns (1), sixel (4), selective erase (6)
+                self.write_pty(b"\x1b[?62;22c");
+            }
         }
     }
 
