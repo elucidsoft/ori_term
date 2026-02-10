@@ -19,18 +19,18 @@ Built by studying 18 terminal projects from the inside out — Alacritty, Ghostt
 - **Synchronized output** *(pending)* — DCS protocol to prevent flicker during rapid updates.
 - **Cursor styles** *(pending)* — block, underline, and bar cursors with blinking support.
 - **Hyperlinks** *(pending)* — clickable URLs via OSC 8.
-- **Bracketed paste** *(pending)* — paste content wrapped in escape sequences for aware applications.
+- **Bracketed paste** — paste content wrapped in escape sequences for aware applications.
 - **Focus events** *(pending)* — notify applications when the terminal gains or loses focus.
 
 ### Rendering
 - **GPU-accelerated** *(pending)* — wgpu-based rendering with glyph atlas texture packing and instanced drawing.
 - **Damage tracking** *(pending)* — only redraws changed cells for minimal GPU work.
-- **Text decorations** *(pending)* — underline (single, double, dotted, dashed, curly), strikethrough.
+- **Text decorations** — underline (single, double, dotted, dashed, curly), strikethrough, with SGR 58 underline color support.
 
 ### Font
-- **Font fallback chain** *(pending)* — automatic fallback for missing glyphs across multiple fonts.
-- **Bold / italic variants** *(pending)* — real font variants with synthetic bold as fallback.
-- **Dynamic font sizing** *(pending)* — Ctrl+=/Ctrl+- to zoom, Ctrl+0 to reset.
+- **Font fallback chain** — automatic fallback for missing glyphs across multiple fonts (Segoe UI Symbol, MS Gothic, Noto Sans, etc.).
+- **Bold / italic variants** — real font variants with synthetic bold as fallback when no bold font is available.
+- **Dynamic font sizing** — Ctrl+=/Ctrl+- to zoom, Ctrl+0 to reset. Size clamped to 8–32px.
 
 ### Unicode
 - **Grapheme cluster segmentation** *(pending)* — correct handling of combining marks, ZWJ sequences, and emoji.
@@ -78,6 +78,12 @@ cargo build --target x86_64-pc-windows-gnu --release
 | `Ctrl+T` | New tab |
 | `Ctrl+W` | Close tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
+| `Ctrl+=` / `Ctrl+-` | Zoom in / out |
+| `Ctrl+0` | Reset zoom |
+| `Ctrl+C` | Copy selection (or send ^C if no selection) |
+| `Ctrl+V` | Paste from clipboard |
+| `Ctrl+Shift+C` / `Ctrl+Insert` | Copy selection |
+| `Ctrl+Shift+V` / `Shift+Insert` | Paste from clipboard |
 | `Shift+PageUp` / `Shift+PageDown` | Scroll page |
 | `Shift+Home` / `Shift+End` | Scroll to top / bottom |
 
