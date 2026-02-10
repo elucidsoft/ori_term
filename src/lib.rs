@@ -8,7 +8,9 @@ pub mod layout;
 pub mod widgets;
 
 // Terminal emulator modules
+pub mod clipboard;
 pub mod cell;
+pub mod selection;
 pub mod grid;
 pub mod palette;
 pub mod term_mode;

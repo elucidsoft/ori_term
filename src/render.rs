@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::cell::CellFlags;
 use crate::grid::Grid;
 use crate::palette::{Palette, rgb_to_u32};
+use crate::selection::Selection;
 use crate::term_mode::TermMode;
 
 pub const FONT_SIZE: f32 = 16.0;
@@ -59,6 +60,7 @@ pub fn render_grid(
     grid: &Grid,
     palette: &Palette,
     mode: TermMode,
+    selection: Option<&Selection>,
     buffer: &mut [u32],
     buf_w: usize,
     buf_h: usize,
@@ -99,14 +101,26 @@ pub fn render_grid(
             }
 
             // Resolve colors
-            let fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
-            let bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
+            let mut fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
+            let mut bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
+
+            // Selection highlight: invert fg/bg for selected cells
+            let is_selected = selection.is_some_and(|sel| {
+                let abs_row = grid.scrollback.len()
+                    .saturating_sub(grid.display_offset)
+                    + line;
+                sel.contains(abs_row, col)
+            });
+            if is_selected {
+                std::mem::swap(&mut fg_rgb, &mut bg_rgb);
+            }
+
             let bg_u32 = rgb_to_u32(bg_rgb);
             let fg_u32 = rgb_to_u32(fg_rgb);
 
-            // Draw cell background if non-default
+            // Draw cell background if non-default or selected
             let cell_w = if cell.flags.contains(CellFlags::WIDE_CHAR) { cw * 2 } else { cw };
-            if bg_u32 != default_bg_u32 {
+            if bg_u32 != default_bg_u32 || is_selected {
                 for dy in 0..cell_h.min(buf_h - y0) {
                     for dx in 0..cell_w.min(buf_w - x0) {
                         buffer[(y0 + dy) * buf_w + (x0 + dx)] = bg_u32;

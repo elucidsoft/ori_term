@@ -17,6 +17,10 @@ portable-pty = "0.9.0"
 vte = { version = "0.15.0", features = ["ansi"] }
 bitflags = "2"
 log = "0.4"
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4"
 
 [[bin]]
 name = "oriterm"

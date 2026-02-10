@@ -10,10 +10,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
+use crate::clipboard;
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
 use crate::log;
 use crate::palette::rgb_to_u32;
 use crate::render::{self, GlyphCache, render_grid};
+use crate::selection::{
+    self, Selection, SelectionMode, SelectionPoint, Side,
+};
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::{self, TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, GRID_PADDING_LEFT, GRID_PADDING_BOTTOM, render_window_border};
 use crate::term_mode::TermMode;
@@ -44,6 +48,10 @@ pub struct App {
     first_window_created: bool,
     last_click_time: Option<Instant>,
     last_click_window: Option<WindowId>,
+    // Selection state
+    left_mouse_down: bool,
+    last_grid_click_pos: Option<(usize, usize)>,
+    click_count: u8,
 }
 
 impl App {
@@ -81,6 +89,9 @@ impl App {
             first_window_created: false,
             last_click_time: None,
             last_click_window: None,
+            left_mouse_down: false,
+            last_grid_click_pos: None,
+            click_count: 0,
         };
 
         event_loop.run_app(&mut app)?;
@@ -304,6 +315,7 @@ impl App {
                     tab.grid(),
                     &tab.palette,
                     tab.mode,
+                    tab.selection.as_ref(),
                     &mut buffer,
                     w,
                     h,
@@ -372,9 +384,70 @@ impl App {
 
         for &tab_id in &tw.tabs {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.selection = None;
                 tab.resize(cols, rows, pixel_w, pixel_h);
             }
         }
+    }
+
+    /// Convert pixel coordinates to grid cell (col, `viewport_line`).
+    /// Returns None if outside the grid area.
+    fn pixel_to_cell(&self, pos: PhysicalPosition<f64>) -> Option<(usize, usize)> {
+        let x = pos.x as usize;
+        let y = pos.y as usize;
+        let grid_top = TAB_BAR_HEIGHT + 10;
+        if y < grid_top || x < GRID_PADDING_LEFT {
+            return None;
+        }
+        let cw = self.glyphs.cell_width;
+        let ch = self.glyphs.cell_height;
+        if cw == 0 || ch == 0 {
+            return None;
+        }
+        let col = (x - GRID_PADDING_LEFT) / cw;
+        let line = (y - grid_top) / ch;
+        Some((col, line))
+    }
+
+    /// Determine which side of the cell the cursor is on.
+    fn pixel_to_side(&self, pos: PhysicalPosition<f64>) -> Side {
+        let x = pos.x as usize;
+        let cw = self.glyphs.cell_width;
+        if cw == 0 {
+            return Side::Left;
+        }
+        let cell_x = (x.saturating_sub(GRID_PADDING_LEFT)) % cw;
+        if cell_x < cw / 2 { Side::Left } else { Side::Right }
+    }
+
+    /// Convert a viewport line to an absolute row index.
+    fn viewport_to_absolute(grid: &crate::grid::Grid, line: usize) -> usize {
+        grid.scrollback.len().saturating_sub(grid.display_offset) + line
+    }
+
+    /// Detect click count (1=char, 2=word, 3=line), cycling on rapid clicks.
+    fn detect_click_count(&mut self, window_id: WindowId, col: usize, line: usize) -> u8 {
+        let now = Instant::now();
+        let same_pos = self.last_grid_click_pos == Some((col, line));
+        let same_window = self.last_click_window == Some(window_id);
+        let within_time = self.last_click_time
+            .is_some_and(|t| now.duration_since(t).as_millis() < DOUBLE_CLICK_MS);
+
+        let count = if same_pos && same_window && within_time {
+            match self.click_count {
+                1 => 2,
+                2 => 3,
+                _ => 1,
+            }
+        } else {
+            1
+        };
+
+        self.last_click_time = Some(now);
+        self.last_click_window = Some(window_id);
+        self.last_grid_click_pos = Some((col, line));
+        self.click_count = count;
+        count
     }
 
     fn handle_mouse_input(
@@ -384,10 +457,6 @@ impl App {
         button: MouseButton,
         event_loop: &ActiveEventLoop,
     ) {
-        if button != MouseButton::Left {
-            return;
-        }
-
         let pos = self
             .cursor_pos
             .get(&window_id)
@@ -396,6 +465,42 @@ impl App {
 
         let x = pos.x as usize;
         let y = pos.y as usize;
+
+        // Right-click: copy if selection exists, paste if not
+        if button == MouseButton::Right {
+            if state == ElementState::Released {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    let has_selection = self.tabs.get(&tid)
+                        .is_some_and(|t| t.selection.is_some());
+                    if has_selection {
+                        // Copy and clear selection
+                        if let Some(tab) = self.tabs.get(&tid) {
+                            if let Some(ref sel) = tab.selection {
+                                let text = selection::extract_text(tab.grid(), sel);
+                                if !text.is_empty() {
+                                    clipboard::set_text(&text);
+                                }
+                            }
+                        }
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            tab.selection = None;
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    } else {
+                        // No selection — paste
+                        self.paste_from_clipboard(window_id);
+                    }
+                }
+            }
+            return;
+        }
+
+        if button != MouseButton::Left {
+            return;
+        }
 
         match state {
             ElementState::Pressed => {
@@ -487,9 +592,32 @@ impl App {
                         }
                         TabBarHit::None => {}
                     }
+                } else {
+                    // Click in grid area — handle selection
+                    self.handle_grid_press(window_id, pos);
                 }
             }
             ElementState::Released => {
+                // Finalize selection and auto-copy
+                if self.left_mouse_down {
+                    self.left_mouse_down = false;
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            if tab.selection.as_ref().is_some_and(Selection::is_empty) {
+                                tab.selection = None;
+                            } else if let Some(ref sel) = tab.selection {
+                                let text = selection::extract_text(tab.grid(), sel);
+                                if !text.is_empty() {
+                                    clipboard::set_text(&text);
+                                }
+                            } else {
+                                // No selection — nothing to finalize
+                            }
+                        }
+                    }
+                }
+
                 if let Some(drag) = self.drag.take() {
                     // drag.source_window was updated to the torn-off window
                     // during tear_off_tab — use it, not window_id
@@ -506,6 +634,118 @@ impl App {
                             // Tab reorder finalized / was just a click — nothing extra needed
                         }
                     }
+                }
+            }
+        }
+    }
+
+    fn handle_grid_press(&mut self, window_id: WindowId, pos: PhysicalPosition<f64>) {
+        let (col, line) = match self.pixel_to_cell(pos) {
+            Some(c) => c,
+            None => return,
+        };
+        let side = self.pixel_to_side(pos);
+
+        let tab_id = match self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Clamp col/line to grid bounds
+        let (grid_cols, grid_lines) = match self.tabs.get(&tab_id) {
+            Some(tab) => (tab.grid().cols, tab.grid().lines),
+            None => return,
+        };
+        let col = col.min(grid_cols.saturating_sub(1));
+        let line = line.min(grid_lines.saturating_sub(1));
+
+        let abs_row = match self.tabs.get(&tab_id) {
+            Some(tab) => Self::viewport_to_absolute(tab.grid(), line),
+            None => return,
+        };
+
+        let click_count = self.detect_click_count(window_id, col, line);
+        let shift = self.modifiers.shift_key();
+        let alt = self.modifiers.alt_key();
+
+        // Shift+click: extend existing selection
+        if shift {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                if tab.selection.is_some() {
+                    if let Some(ref mut sel) = tab.selection {
+                        sel.end = SelectionPoint { row: abs_row, col, side };
+                    }
+                    self.left_mouse_down = true;
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Create new selection based on click count
+        let new_selection = match click_count {
+            2 => {
+                // Double-click: word selection
+                if let Some(tab) = self.tabs.get(&tab_id) {
+                    let (word_start, word_end) = selection::word_boundaries(tab.grid(), abs_row, col);
+                    let anchor = SelectionPoint { row: abs_row, col: word_start, side: Side::Left };
+                    let pivot = SelectionPoint { row: abs_row, col: word_end, side: Side::Right };
+                    Some(Selection::new_word(anchor, pivot))
+                } else {
+                    None
+                }
+            }
+            3 => {
+                // Triple-click: line selection
+                if let Some(tab) = self.tabs.get(&tab_id) {
+                    let line_start_row = selection::logical_line_start(tab.grid(), abs_row);
+                    let line_end_row = selection::logical_line_end(tab.grid(), abs_row);
+                    let anchor = SelectionPoint { row: line_start_row, col: 0, side: Side::Left };
+                    let pivot = SelectionPoint {
+                        row: line_end_row,
+                        col: grid_cols.saturating_sub(1),
+                        side: Side::Right,
+                    };
+                    Some(Selection::new_line(anchor, pivot))
+                } else {
+                    None
+                }
+            }
+            _ => {
+                // Single click: char selection (or block if Alt held)
+                let mut sel = Selection::new_char(abs_row, col, side);
+                if alt {
+                    sel.mode = SelectionMode::Block;
+                }
+                Some(sel)
+            }
+        };
+
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.selection = new_selection;
+        }
+        self.left_mouse_down = true;
+
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+    }
+
+    fn paste_from_clipboard(&mut self, window_id: WindowId) {
+        let tab_id = match self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
+            Some(id) => id,
+            None => return,
+        };
+        if let Some(text) = clipboard::get_text() {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                if tab.mode.contains(TermMode::BRACKETED_PASTE) {
+                    tab.send_pty(b"\x1b[200~");
+                    tab.send_pty(text.as_bytes());
+                    tab.send_pty(b"\x1b[201~");
+                } else {
+                    tab.send_pty(text.as_bytes());
                 }
             }
         }
@@ -553,7 +793,7 @@ impl App {
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
 
-        // Update cursor icon for resize borders
+        // Update cursor icon for resize borders only
         let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
             dir.into()
         } else {
@@ -561,6 +801,90 @@ impl App {
         };
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.set_cursor(cursor_icon);
+        }
+
+        // Selection drag: update selection end point
+        if self.left_mouse_down {
+            if let Some((col, line)) = self.pixel_to_cell(position) {
+                let side = self.pixel_to_side(position);
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid_cols = tab.grid().cols;
+                        let grid_lines = tab.grid().lines;
+                        let col = col.min(grid_cols.saturating_sub(1));
+                        let line = line.min(grid_lines.saturating_sub(1));
+                        let abs_row = Self::viewport_to_absolute(tab.grid(), line);
+
+                        // Compute new end point based on selection mode.
+                        // Pre-compute boundary data from grid before mutating selection.
+                        let sel_mode = tab.selection.as_ref().map(|s| s.mode);
+                        let sel_anchor_row = tab.selection.as_ref().map(|s| s.anchor.row);
+                        let new_end = match sel_mode {
+                            Some(SelectionMode::Word) => {
+                                let (w_start, w_end) = selection::word_boundaries(tab.grid(), abs_row, col);
+                                let anchor = tab.selection.as_ref().map(|s| s.anchor);
+                                let start_pt = SelectionPoint { row: abs_row, col: w_start, side: Side::Left };
+                                let end_pt = SelectionPoint { row: abs_row, col: w_end, side: Side::Right };
+                                if anchor.is_some_and(|a| start_pt < a) {
+                                    Some(start_pt)
+                                } else {
+                                    Some(end_pt)
+                                }
+                            }
+                            Some(SelectionMode::Line) => {
+                                let drag_line_start = selection::logical_line_start(tab.grid(), abs_row);
+                                let drag_line_end = selection::logical_line_end(tab.grid(), abs_row);
+                                if sel_anchor_row.is_some_and(|ar| abs_row < ar) {
+                                    Some(SelectionPoint { row: drag_line_start, col: 0, side: Side::Left })
+                                } else {
+                                    Some(SelectionPoint {
+                                        row: drag_line_end,
+                                        col: grid_cols.saturating_sub(1),
+                                        side: Side::Right,
+                                    })
+                                }
+                            }
+                            Some(_) => Some(SelectionPoint { row: abs_row, col, side }),
+                            None => None,
+                        };
+
+                        if let (Some(new_end), Some(sel)) = (new_end, &mut tab.selection) {
+                            sel.end = new_end;
+                        }
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            } else {
+                // Mouse outside grid — auto-scroll
+                let y = position.y as usize;
+                let grid_top = TAB_BAR_HEIGHT + 10;
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if y < grid_top {
+                        // Above grid: scroll up into history
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            let grid = tab.grid_mut();
+                            let max = grid.scrollback.len();
+                            grid.display_offset = (grid.display_offset + 1).min(max);
+                        }
+                    }
+                    // Below grid: scroll down toward live
+                    // (Only if display_offset > 0)
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let ch = self.glyphs.cell_height;
+                        let grid_bottom = grid_top + tab.grid().lines * ch;
+                        if y >= grid_bottom && tab.grid().display_offset > 0 {
+                            tab.grid_mut().display_offset = tab.grid().display_offset.saturating_sub(1);
+                        }
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
         }
 
         // Update hover state for tab bar
@@ -950,7 +1274,66 @@ impl ApplicationHandler<TermEvent> for App {
                     return;
                 }
 
-                // Any keyboard input to PTY — scroll to live
+                // Ctrl+Shift+C or Ctrl+Insert — copy selection
+                if (ctrl && shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "C" || c.as_str() == "c"))
+                    || (ctrl && matches!(event.logical_key, Key::Named(NamedKey::Insert)))
+                {
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                    if let Some(tid) = tab_id {
+                        if let Some(tab) = self.tabs.get(&tid) {
+                            if let Some(ref sel) = tab.selection {
+                                let text = selection::extract_text(tab.grid(), sel);
+                                if !text.is_empty() {
+                                    clipboard::set_text(&text);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Ctrl+Shift+V or Shift+Insert — paste
+                if (ctrl && shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "V" || c.as_str() == "v"))
+                    || (shift && matches!(event.logical_key, Key::Named(NamedKey::Insert)))
+                {
+                    self.paste_from_clipboard(window_id);
+                    return;
+                }
+
+                // Smart Ctrl+C: if selection exists, copy; else send ^C
+                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "c") {
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                    if let Some(tid) = tab_id {
+                        let has_selection = self.tabs.get(&tid)
+                            .is_some_and(|t| t.selection.is_some());
+                        if has_selection {
+                            if let Some(tab) = self.tabs.get(&tid) {
+                                if let Some(ref sel) = tab.selection {
+                                    let text = selection::extract_text(tab.grid(), sel);
+                                    if !text.is_empty() {
+                                        clipboard::set_text(&text);
+                                    }
+                                }
+                            }
+                            if let Some(tab) = self.tabs.get_mut(&tid) {
+                                tab.selection = None;
+                            }
+                            if let Some(tw) = self.windows.get(&window_id) {
+                                tw.window.request_redraw();
+                            }
+                            return;
+                        }
+                        // No selection — fall through to send ^C via normal PTY path
+                    }
+                }
+
+                // Smart Ctrl+V: paste (without Shift)
+                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "v") {
+                    self.paste_from_clipboard(window_id);
+                    return;
+                }
+
+                // Any keyboard input to PTY — scroll to live and clear selection
                 let tab_id = self
                     .windows
                     .get(&window_id)
@@ -959,6 +1342,10 @@ impl ApplicationHandler<TermEvent> for App {
                     // Scroll to live on any PTY input
                     if let Some(tab) = self.tabs.get_mut(&tid) {
                         tab.grid_mut().display_offset = 0;
+                        // Clear selection on keyboard input to PTY
+                        if tab.selection.is_some() {
+                            tab.selection = None;
+                        }
                     }
 
                     if let Some(tab) = self.tabs.get_mut(&tid) {

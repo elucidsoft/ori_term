@@ -84,6 +84,16 @@ impl Grid {
         &self.rows[offset_line as usize]
     }
 
+    /// Access a row by absolute index (scrollback row 0 = oldest).
+    pub fn absolute_row(&self, abs_row: usize) -> Option<&Row> {
+        let sb_len = self.scrollback.len();
+        if abs_row < sb_len {
+            Some(&self.scrollback[abs_row])
+        } else {
+            self.rows.get(abs_row - sb_len)
+        }
+    }
+
     // --- Character output ---
 
     pub fn put_char(&mut self, c: char) {

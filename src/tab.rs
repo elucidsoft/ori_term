@@ -2,11 +2,13 @@ use std::io::{Read, Write};
 use std::thread;
 
 use vte::ansi::{CharsetIndex, CursorShape, StandardCharset};
+use vte::Perform;
 use winit::event_loop::EventLoopProxy;
 
 use crate::grid::Grid;
 use crate::log;
 use crate::palette::Palette;
+use crate::selection::Selection;
 use crate::term_handler::TermHandler;
 use crate::term_mode::TermMode;
 
@@ -41,6 +43,96 @@ impl CharsetState {
     }
 }
 
+/// OSC 133 semantic prompt state.
+///
+/// Shell integration uses these markers to distinguish prompt, command input,
+/// and command output regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptState {
+    /// No prompt markers received yet or after command output completes.
+    #[default]
+    None,
+    /// `OSC 133;A` — prompt has started (user sees the prompt).
+    PromptStart,
+    /// `OSC 133;B` — command input has started (user is typing).
+    CommandStart,
+    /// `OSC 133;C` — command output has started (command is running).
+    OutputStart,
+}
+
+/// Raw VTE `Perform` implementation that intercepts sequences the high-level
+/// `vte::ansi::Processor` drops: OSC 7 (CWD), OSC 133 (prompt markers),
+/// and XTVERSION (CSI > q).
+struct RawInterceptor<'a> {
+    pty_writer: &'a mut Option<Box<dyn Write + Send>>,
+    cwd: &'a mut Option<String>,
+    prompt_state: &'a mut PromptState,
+}
+
+impl Perform for RawInterceptor<'_> {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.is_empty() || params[0].is_empty() {
+            return;
+        }
+        match params[0] {
+            // OSC 7 — Current working directory.
+            // Format: OSC 7 ; file://hostname/path ST
+            b"7" => {
+                if params.len() >= 2 {
+                    let uri = std::str::from_utf8(params[1]).unwrap_or_default();
+                    // Strip file:// prefix and optional hostname to get the path.
+                    let path = uri
+                        .strip_prefix("file://")
+                        .map_or(uri, |rest| {
+                            // Skip hostname (everything before the next /)
+                            if let Some(slash) = rest.find('/') {
+                                rest.split_at(slash).1
+                            } else {
+                                rest
+                            }
+                        });
+                    if !path.is_empty() {
+                        *self.cwd = Some(path.to_owned());
+                    }
+                }
+            }
+            // OSC 133 — Semantic prompt markers.
+            // Format: OSC 133 ; <type>[;extras] ST
+            b"133" => {
+                if params.len() >= 2 && !params[1].is_empty() {
+                    match params[1][0] {
+                        b'A' => *self.prompt_state = PromptState::PromptStart,
+                        b'B' => *self.prompt_state = PromptState::CommandStart,
+                        b'C' => *self.prompt_state = PromptState::OutputStart,
+                        b'D' => *self.prompt_state = PromptState::None,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        _params: &vte::Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        // XTVERSION: CSI > q — report terminal name and version.
+        if action == 'q' && intermediates == [b'>'] {
+            let version = env!("CARGO_PKG_VERSION");
+            // Response: DCS > | terminal-name(version) ST
+            let response = format!("\x1bP>|oriterm({version})\x1b\\");
+            if let Some(w) = self.pty_writer.as_mut() {
+                let _ = w.write_all(response.as_bytes());
+                let _ = w.flush();
+            }
+        }
+    }
+}
+
 pub struct Tab {
     pub id: TabId,
     primary_grid: Grid,
@@ -54,6 +146,10 @@ pub struct Tab {
     pub cursor_shape: CursorShape,
     pub charset: CharsetState,
     pub title_stack: Vec<String>,
+    pub cwd: Option<String>,
+    pub prompt_state: PromptState,
+    pub selection: Option<Selection>,
+    raw_parser: vte::Parser,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
@@ -125,6 +221,10 @@ impl Tab {
             cursor_shape: CursorShape::default(),
             charset: CharsetState::default(),
             title_stack: Vec::new(),
+            cwd: None,
+            prompt_state: PromptState::default(),
+            selection: None,
+            raw_parser: vte::Parser::new(),
             pty_master: pair.master,
             _child: child,
         })
@@ -139,6 +239,16 @@ impl Tab {
     }
 
     pub fn process_output(&mut self, data: &[u8]) {
+        // Run the raw interceptor first to capture OSC 7/133/XTVERSION
+        // (sequences that vte::ansi::Processor silently drops).
+        let mut interceptor = RawInterceptor {
+            pty_writer: &mut self.pty_writer,
+            cwd: &mut self.cwd,
+            prompt_state: &mut self.prompt_state,
+        };
+        self.raw_parser.advance(&mut interceptor, data);
+
+        // Then run the normal high-level Processor for everything else.
         let mut handler = TermHandler::new(
             &mut self.primary_grid,
             &mut self.alt_grid,
