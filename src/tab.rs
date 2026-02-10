@@ -1,15 +1,16 @@
 use std::io::{Read, Write};
 use std::thread;
 
-use vte::ansi::{CharsetIndex, CursorShape, StandardCharset};
+use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
 use vte::Perform;
 use winit::event_loop::EventLoopProxy;
 
 use crate::grid::Grid;
 use crate::log;
 use crate::palette::Palette;
+use crate::search::SearchState;
 use crate::selection::Selection;
-use crate::term_handler::TermHandler;
+use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,14 +151,19 @@ pub struct Tab {
     pub cwd: Option<String>,
     pub prompt_state: PromptState,
     pub selection: Option<Selection>,
+    pub search: Option<SearchState>,
     raw_parser: vte::Parser,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
-    _child: Box<dyn portable_pty::Child + Send + Sync>,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    grapheme_state: GraphemeState,
+    pub keyboard_mode_stack: Vec<KeyboardModes>,
+    inactive_keyboard_mode_stack: Vec<KeyboardModes>,
 }
 
 #[derive(Debug)]
 pub enum TermEvent {
     PtyOutput(TabId, Vec<u8>),
+    ConfigReload,
 }
 
 impl Tab {
@@ -166,6 +172,9 @@ impl Tab {
         cols: usize,
         rows: usize,
         proxy: EventLoopProxy<TermEvent>,
+        shell: Option<&str>,
+        max_scrollback: usize,
+        initial_cursor_shape: CursorShape,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log(&format!("Tab::spawn start for {:?}", id));
 
@@ -178,9 +187,10 @@ impl Tab {
         })?;
         log("  pty opened");
 
-        let cmd = portable_pty::CommandBuilder::new("cmd.exe");
+        let shell_program = shell.map_or_else(Self::default_shell, String::from);
+        let cmd = portable_pty::CommandBuilder::new(&shell_program);
         let child = pair.slave.spawn_command(cmd)?;
-        log("  cmd.exe spawned");
+        log(&format!("  {} spawned", shell_program));
         drop(pair.slave);
 
         let mut reader = pair.master.try_clone_reader()?;
@@ -211,24 +221,49 @@ impl Tab {
         log(&format!("Tab::spawn done for {:?}", id));
         Ok(Self {
             id,
-            primary_grid: Grid::new(cols, rows),
-            alt_grid: Grid::new(cols, rows),
+            primary_grid: Grid::with_max_scrollback(cols, rows, max_scrollback),
+            alt_grid: Grid::new(cols, rows),  // alt screen has no scrollback
             active_is_alt: false,
             pty_writer: Some(writer),
             processor: vte::ansi::Processor::new(),
             title: format!("Tab {}", id.0),
             palette: Palette::new(),
             mode: TermMode::default(),
-            cursor_shape: CursorShape::default(),
+            cursor_shape: initial_cursor_shape,
             charset: CharsetState::default(),
             title_stack: Vec::new(),
             cwd: None,
             prompt_state: PromptState::default(),
             selection: None,
+            search: None,
             raw_parser: vte::Parser::new(),
             pty_master: pair.master,
-            _child: child,
+            child,
+            grapheme_state: GraphemeState::default(),
+            keyboard_mode_stack: Vec::new(),
+            inactive_keyboard_mode_stack: Vec::new(),
         })
+    }
+
+    /// Kill the child process and close PTY handles.
+    /// Must be called before dropping to avoid `ClosePseudoConsole` blocking
+    /// on Windows (the `ConPTY` reader thread holds a pipe handle).
+    pub fn shutdown(&mut self) {
+        // Close writer first so the child sees EOF on stdin
+        self.pty_writer.take();
+        // Kill the child process so ClosePseudoConsole returns quickly
+        let _ = self.child.kill();
+    }
+
+    fn default_shell() -> String {
+        #[cfg(target_os = "windows")]
+        {
+            "cmd.exe".to_owned()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned())
+        }
     }
 
     pub fn grid(&self) -> &Grid {
@@ -261,6 +296,9 @@ impl Tab {
             &mut self.cursor_shape,
             &mut self.charset,
             &mut self.title_stack,
+            &mut self.grapheme_state,
+            &mut self.keyboard_mode_stack,
+            &mut self.inactive_keyboard_mode_stack,
         );
         self.processor.advance(&mut handler, data);
     }

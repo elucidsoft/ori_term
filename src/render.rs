@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::cell::CellFlags;
-use crate::grid::Grid;
-use crate::palette::{Palette, rgb_to_u32};
-use crate::selection::Selection;
-use crate::term_mode::TermMode;
 
 pub const FONT_SIZE: f32 = 16.0;
 const MIN_FONT_SIZE: f32 = 8.0;
@@ -193,11 +191,20 @@ pub struct FontSet {
 
 impl FontSet {
     /// Load a font set at the given size, trying font families in priority order.
-    pub fn load(size: f32) -> Self {
+    /// If `family` is specified, attempt to load that font first before the
+    /// platform auto-detect list.
+    pub fn load(size: f32, family: Option<&str>) -> Self {
         let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
 
-        for family in FONT_FAMILIES {
-            if let Some(fs) = Self::try_load_family(family, size) {
+        if let Some(name) = family {
+            if let Some(fs) = Self::try_load_by_name(name, size) {
+                return fs;
+            }
+            crate::log(&format!("font: custom family {name:?} not found, using platform default"));
+        }
+
+        for fam in FONT_FAMILIES {
+            if let Some(fs) = Self::try_load_family(fam, size) {
                 return fs;
             }
         }
@@ -263,6 +270,49 @@ impl FontSet {
 
         let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], size);
 
+        let fallback_fonts = Self::load_fallback_fonts();
+
+        let mut fs = Self {
+            fonts,
+            has_variant,
+            fallback_fonts,
+            size,
+            cell_width,
+            cell_height,
+            baseline,
+            cache: HashMap::new(),
+        };
+        fs.precache_ascii();
+        Some(fs)
+    }
+
+    /// Try to load a font by a user-specified name or path.
+    /// On Windows, treats the name as a filename under `C:\Windows\Fonts\`.
+    /// On Linux, searches font directories for the filename.
+    fn try_load_by_name(name: &str, size: f32) -> Option<Self> {
+        #[cfg(target_os = "windows")]
+        let regular_data = {
+            let path = if std::path::Path::new(name).is_absolute() {
+                std::path::PathBuf::from(name)
+            } else {
+                std::path::PathBuf::from(r"C:\Windows\Fonts").join(name)
+            };
+            std::fs::read(&path).ok()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let regular_data = {
+            if std::path::Path::new(name).is_absolute() {
+                std::fs::read(name).ok()
+            } else {
+                find_font_file(name)
+            }
+        };
+
+        let regular_data = regular_data?;
+        let regular = parse_font(&regular_data)?;
+        let fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
+        let has_variant = [true, false, false, false];
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], size);
         let fallback_fonts = Self::load_fallback_fonts();
 
         let mut fs = Self {
@@ -372,51 +422,6 @@ impl FontSet {
     }
 }
 
-// --- Drawing helpers ---
-
-fn set_pixel(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, color: u32) {
-    if x < buf_w {
-        let idx = y * buf_w + x;
-        if idx < buffer.len() {
-            buffer[idx] = color;
-        }
-    }
-}
-
-fn draw_hline(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, w: usize, color: u32) {
-    for dx in 0..w {
-        set_pixel(buffer, buf_w, x + dx, y, color);
-    }
-}
-
-fn draw_dotted_hline(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, w: usize, color: u32) {
-    for dx in (0..w).step_by(2) {
-        set_pixel(buffer, buf_w, x + dx, y, color);
-    }
-}
-
-fn draw_dashed_hline(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, w: usize, color: u32) {
-    for dx in 0..w {
-        // 3px on, 2px off pattern
-        if dx % 5 < 3 {
-            set_pixel(buffer, buf_w, x + dx, y, color);
-        }
-    }
-}
-
-fn draw_undercurl(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, w: usize, color: u32) {
-    // Sine wave approximation: 2px amplitude, period = cell width
-    // Use a lookup pattern for a smooth curl across the cell width
-    for dx in 0..w {
-        let phase = (dx as f32 / w as f32) * std::f32::consts::TAU;
-        let offset = (phase.sin() * 2.0).round() as i32;
-        let py = y as i32 + offset;
-        if py >= 0 {
-            set_pixel(buffer, buf_w, x + dx, py as usize, color);
-        }
-    }
-}
-
 /// Alpha-blend a glyph pixel onto the buffer.
 #[inline]
 fn blend_pixel(buffer: &mut [u32], pidx: usize, alpha: u32, draw_r: u32, draw_g: u32, draw_b: u32, draw_u32: u32) {
@@ -475,175 +480,6 @@ fn render_glyph(
     }
 }
 
-// --- Grid rendering ---
-
-/// Render a grid into a pixel buffer at the given offsets (in pixels).
-/// The buffer is assumed to be `buf_w` pixels wide.
-#[allow(clippy::too_many_arguments)]
-pub fn render_grid(
-    glyphs: &mut FontSet,
-    grid: &Grid,
-    palette: &Palette,
-    mode: TermMode,
-    selection: Option<&Selection>,
-    buffer: &mut [u32],
-    buf_w: usize,
-    buf_h: usize,
-    x_offset: usize,
-    y_offset: usize,
-) {
-    let cw = glyphs.cell_width;
-    let cell_h = glyphs.cell_height;
-    let baseline = glyphs.baseline;
-    let synthetic_bold = glyphs.needs_synthetic_bold();
-
-    // Pre-cache visible chars with correct font style
-    for line in 0..grid.lines {
-        let row = grid.visible_row(line);
-        for col in 0..grid.cols {
-            let cell = &row[col];
-            if cell.c != ' ' && cell.c != '\0' && !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                let style = FontStyle::from_cell_flags(cell.flags);
-                glyphs.ensure(cell.c, style);
-            }
-        }
-    }
-
-    let default_bg_u32 = rgb_to_u32(palette.default_bg());
-
-    for line in 0..grid.lines {
-        let row = grid.visible_row(line);
-        for col in 0..grid.cols {
-            let cell = &row[col];
-            let x0 = col * cw + x_offset;
-            let y0 = line * cell_h + y_offset;
-
-            if x0 >= buf_w || y0 >= buf_h {
-                continue;
-            }
-
-            // Skip wide char spacer cells
-            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-
-            // Resolve colors
-            let mut fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
-            let mut bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
-
-            // Selection highlight: invert fg/bg for selected cells
-            let is_selected = selection.is_some_and(|sel| {
-                let abs_row = grid.scrollback.len()
-                    .saturating_sub(grid.display_offset)
-                    + line;
-                sel.contains(abs_row, col)
-            });
-            if is_selected {
-                std::mem::swap(&mut fg_rgb, &mut bg_rgb);
-            }
-
-            let bg_u32 = rgb_to_u32(bg_rgb);
-            let fg_u32 = rgb_to_u32(fg_rgb);
-
-            // Draw cell background if non-default or selected
-            let cell_w = if cell.flags.contains(CellFlags::WIDE_CHAR) { cw * 2 } else { cw };
-            if bg_u32 != default_bg_u32 || is_selected {
-                for dy in 0..cell_h.min(buf_h - y0) {
-                    for dx in 0..cell_w.min(buf_w - x0) {
-                        buffer[(y0 + dy) * buf_w + (x0 + dx)] = bg_u32;
-                    }
-                }
-            }
-
-            // Draw cursor block (only on live viewport)
-            if grid.display_offset == 0
-                && mode.contains(TermMode::SHOW_CURSOR)
-                && line == grid.cursor.row
-                && col == grid.cursor.col
-            {
-                let cursor_u32 = rgb_to_u32(palette.cursor_color());
-                for dy in 0..cell_h.min(buf_h - y0) {
-                    for dx in 0..cw.min(buf_w - x0) {
-                        buffer[(y0 + dy) * buf_w + (x0 + dx)] = cursor_u32;
-                    }
-                }
-            }
-
-            // Resolve underline color (SGR 58 override or fg)
-            let ul_u32 = if let Some(ul_color) = cell.underline_color() {
-                rgb_to_u32(palette.resolve(ul_color, CellFlags::empty()))
-            } else {
-                fg_u32
-            };
-
-            // Draw underline decorations (before glyph so glyph renders on top for undercurl)
-            if cell.flags.intersects(CellFlags::ANY_UNDERLINE) {
-                let underline_y = y0 + cell_h.saturating_sub(2);
-                if underline_y < buf_h {
-                    let draw_w = cell_w.min(buf_w.saturating_sub(x0));
-                    if cell.flags.contains(CellFlags::UNDERCURL) {
-                        draw_undercurl(buffer, buf_w, x0, underline_y, draw_w, ul_u32);
-                    } else if cell.flags.contains(CellFlags::DOUBLE_UNDERLINE) {
-                        draw_hline(buffer, buf_w, x0, underline_y, draw_w, ul_u32);
-                        if underline_y >= 2 {
-                            draw_hline(buffer, buf_w, x0, underline_y - 2, draw_w, ul_u32);
-                        }
-                    } else if cell.flags.contains(CellFlags::DOTTED_UNDERLINE) {
-                        draw_dotted_hline(buffer, buf_w, x0, underline_y, draw_w, ul_u32);
-                    } else if cell.flags.contains(CellFlags::DASHED_UNDERLINE) {
-                        draw_dashed_hline(buffer, buf_w, x0, underline_y, draw_w, ul_u32);
-                    } else if cell.flags.contains(CellFlags::UNDERLINE) {
-                        draw_hline(buffer, buf_w, x0, underline_y, draw_w, ul_u32);
-                    } else {
-                        // No recognized underline variant — shouldn't reach here
-                    }
-                }
-            }
-
-            // Draw strikethrough
-            if cell.flags.contains(CellFlags::STRIKEOUT) {
-                let strike_y = y0 + cell_h / 2;
-                if strike_y < buf_h {
-                    let draw_w = cell_w.min(buf_w.saturating_sub(x0));
-                    draw_hline(buffer, buf_w, x0, strike_y, draw_w, fg_u32);
-                }
-            }
-
-            if cell.c == ' ' || cell.c == '\0' {
-                continue;
-            }
-
-            let style = FontStyle::from_cell_flags(cell.flags);
-            if let Some((metrics, bitmap)) = glyphs.get(cell.c, style) {
-                let gx = x0 as i32 + metrics.xmin;
-                let gy = y0 as i32 + baseline as i32 - metrics.height as i32 - metrics.ymin;
-
-                // If cursor is on this cell, use dark text for contrast
-                let (draw_r, draw_g, draw_b, draw_u32) =
-                    if grid.display_offset == 0
-                        && mode.contains(TermMode::SHOW_CURSOR)
-                        && line == grid.cursor.row
-                        && col == grid.cursor.col
-                    {
-                        let dark = palette.default_bg();
-                        let du32 = rgb_to_u32(dark);
-                        ((du32 >> 16) & 0xFF, (du32 >> 8) & 0xFF, du32 & 0xFF, du32)
-                    } else {
-                        ((fg_u32 >> 16) & 0xFF, (fg_u32 >> 8) & 0xFF, fg_u32 & 0xFF, fg_u32)
-                    };
-
-                let use_synthetic = synthetic_bold
-                    && (style == FontStyle::Bold || style == FontStyle::BoldItalic);
-                render_glyph(
-                    buffer, buf_w, buf_h, metrics, bitmap,
-                    gx, gy, draw_r, draw_g, draw_b, draw_u32,
-                    use_synthetic,
-                );
-            }
-        }
-    }
-}
-
 /// Render a single text string into the buffer at pixel position (x, y).
 /// Used for tab bar labels, etc. Always uses Regular style.
 #[allow(clippy::many_single_char_names)]
@@ -667,7 +503,9 @@ pub fn render_text(
     let fg_b = fg & 0xFF;
 
     for ch in text.chars() {
-        if cx + cw > buf_w {
+        let char_cells = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+        let advance = cw * char_cells;
+        if cx + advance > buf_w {
             break;
         }
         glyphs.ensure(ch, FontStyle::Regular);
@@ -681,6 +519,6 @@ pub fn render_text(
                 false,
             );
         }
-        cx += cw;
+        cx += advance;
     }
 }

@@ -1,33 +1,33 @@
 ---
 section: "06"
 title: Font System
-status: not-started
+status: complete
 goal: Replace single-font GlyphCache with FontSet supporting 4 style variants, fallback chains, underline/strikethrough rendering, dynamic font size, and cross-platform font discovery
 sections:
   - id: "06.1"
     title: FontStyle enum & FontSet struct
-    status: not-started
+    status: complete
   - id: "06.2"
     title: Cross-platform font discovery & loading
-    status: not-started
+    status: complete
   - id: "06.3"
     title: Font fallback chain
-    status: not-started
+    status: complete
   - id: "06.4"
     title: Style-aware glyph lookup & synthetic bold
-    status: not-started
+    status: complete
   - id: "06.5"
     title: Render underlines & strikethrough
-    status: not-started
+    status: complete
   - id: "06.6"
     title: Dynamic font size (Ctrl+=/Ctrl+-)
-    status: not-started
+    status: complete
   - id: "06.7"
     title: Update app.rs & tab_bar.rs
-    status: not-started
+    status: complete
   - id: "06.8"
     title: Completion checklist
-    status: not-started
+    status: complete
   - id: "06.9"
     title: "Color Emoji (after Section 07: GPU Rendering)"
     status: not-started
@@ -35,7 +35,7 @@ sections:
 
 # Section 06: Font System
 
-**Status:** Not Started
+**Status:** Complete (06.1–06.8 implemented; 06.9 Color Emoji deferred to post-GPU)
 **Goal:** Build a multi-font system with style variants, fallback chains, text decorations,
 dynamic sizing, and cross-platform font discovery. Replace the current single-font
 `GlyphCache` with `FontSet`.
@@ -45,11 +45,22 @@ dynamic sizing, and cross-platform font discovery. Replace the current single-fo
 - Alacritty's `crossfont` crate with platform-specific font discovery and synthetic bold
 - WezTerm's font configuration, fallback system, and underline rendering
 
-**Current state:** Single hardcoded font loaded via `load_font()` trying Windows paths
-(CascadiaMono, Consola, Courier). fontdue does rasterization. No fallback, no
-bold/italic, no text decorations. `GlyphCache` is a simple `HashMap<char, (Metrics, Vec<u8>)>`.
-Bold, italic, underline, and strikethrough cell flags are parsed from VTE and stored in cells
-but completely ignored during rendering.
+**Implemented in:** `src/render.rs` (FontSet struct, FontStyle enum, glyph cache,
+fallback chain, render_grid with style-aware glyphs, underline decorations, strikethrough,
+synthetic bold), `src/app.rs` (Ctrl+=/Ctrl+-/Ctrl+0 zoom, change_font_size/reset_font_size)
+
+**What was built:**
+- FontSet with Regular/Bold/Italic/BoldItalic font variants (fontdue)
+- Cross-platform font discovery: Windows (CascadiaMonoNF > CascadiaMono > Consolas > Courier)
+  and Linux (JetBrainsMono > UbuntuMono > DejaVuSansMono > LiberationMono)
+- Fallback font chain: Windows (Segoe UI Symbol, MS Gothic, Segoe UI), Linux (NotoSansMono,
+  NotoSansSymbols2, NotoSansCJK, DejaVuSans)
+- Style-aware glyph rasterization with (char, FontStyle) cache key
+- Synthetic bold (double-strike at +1px) when real bold font unavailable
+- Five underline styles: single, double, dotted, dashed, undercurl
+- Strikethrough rendering
+- Dynamic font zoom: Ctrl+= (+1px), Ctrl+- (-1px), Ctrl+0 (reset to 16px), clamped 8-32px
+- ASCII pre-caching at startup for Regular style
 
 ---
 

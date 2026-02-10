@@ -2,10 +2,13 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
+use vte::ansi::CursorShape;
+
 use crate::cell::CellFlags;
 use crate::grid::Grid;
 use crate::palette::Palette;
 use crate::render::{FontSet, FontStyle};
+use crate::search::{MatchType, SearchState};
 use crate::selection::Selection;
 use crate::tab::TabId;
 use crate::palette::BUILTIN_SCHEMES;
@@ -116,12 +119,16 @@ pub struct FrameParams<'a> {
     pub grid: &'a Grid,
     pub palette: &'a Palette,
     pub mode: TermMode,
+    pub cursor_shape: CursorShape,
     pub selection: Option<&'a Selection>,
+    pub search: Option<&'a SearchState>,
     pub tab_info: &'a [(TabId, String)],
     pub active_tab: usize,
     pub hover_hit: TabBarHit,
     pub is_maximized: bool,
     pub dropdown_open: bool,
+    pub opacity: f32,
+    pub tab_bar_opacity: f32,
 }
 
 /// GPU state shared across all windows.
@@ -136,20 +143,50 @@ pub struct GpuState {
 
 impl GpuState {
     /// Initialize GPU: create instance, surface, adapter, device, queue.
-    /// The initial window is needed to create a compatible surface for adapter selection.
-    pub fn new(window: &Arc<Window>) -> Self {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    /// When `transparent` is true, prefer DX12 with `DirectComposition`
+    /// (`DxgiFromVisual`) — the only path that gives `PreMultiplied` alpha
+    /// on Windows HWND swapchains.
+    pub fn new(window: &Arc<Window>, transparent: bool) -> Self {
+        if transparent {
+            // DX12 + DirectComposition: supports PreMultiplied alpha for transparency
+            if let Some(state) = Self::try_init(window, wgpu::Backends::DX12, true) {
+                return state;
+            }
+            crate::log("DX12 DComp init failed, falling back to standard backends");
+        }
+        // Vulkan first, then any backend (opaque only)
+        if let Some(state) = Self::try_init(window, wgpu::Backends::VULKAN, false) {
+            return state;
+        }
+        Self::try_init(window, wgpu::Backends::all(), false)
+            .expect("failed to initialize GPU with any backend")
+    }
 
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("failed to create initial wgpu surface");
+    fn try_init(window: &Arc<Window>, backends: wgpu::Backends, dcomp: bool) -> Option<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            backend_options: wgpu::BackendOptions {
+                dx12: wgpu::Dx12BackendOptions {
+                    presentation_system: if dcomp {
+                        wgpu::Dx12SwapchainKind::DxgiFromVisual
+                    } else {
+                        wgpu::Dx12SwapchainKind::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let surface = instance.create_surface(window.clone()).ok()?;
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .expect("failed to find GPU adapter");
+        .ok()?;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -159,7 +196,8 @@ impl GpuState {
                 ..Default::default()
             },
         ))
-        .expect("failed to create GPU device");
+        .map_err(|e| crate::log(&format!("GPU device request failed: {e}")))
+        .ok()?;
 
         let caps = surface.get_capabilities(&adapter);
         // Use a non-sRGB format so our sRGB color values pass through without
@@ -170,7 +208,21 @@ impl GpuState {
             .find(|f| !f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
-        let surface_alpha_mode = caps.alpha_modes[0];
+        // Prefer a non-opaque alpha mode so the compositor can see our
+        // transparent pixels and show blur/acrylic through them.
+        let surface_alpha_mode = if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PostMultiplied
+        } else {
+            caps.alpha_modes[0]
+        };
 
         // Configure the initial surface (it will be used by the first window)
         let size = window.inner_size();
@@ -188,19 +240,21 @@ impl GpuState {
             },
         );
 
+        let info = adapter.get_info();
         crate::log(&format!(
-            "GPU init: adapter={}, format={surface_format:?}",
-            adapter.get_info().name,
+            "GPU init: adapter={}, backend={:?}, format={surface_format:?}, \
+             alpha_mode={surface_alpha_mode:?} (available: {:?})",
+            info.name, info.backend, caps.alpha_modes,
         ));
 
-        Self {
+        Some(Self {
             instance,
             adapter,
             device,
             queue,
             surface_format,
             surface_alpha_mode,
-        }
+        })
     }
 
     /// Create and configure a new surface for a window.
@@ -223,6 +277,21 @@ impl GpuState {
         surface.configure(&self.device, &config);
         Some((surface, config))
     }
+}
+
+/// Pre-built frame data ready for a render pass.
+struct PreparedFrame {
+    default_bg: [f32; 4],
+    opacity: f32,
+    bg_buffer: wgpu::Buffer,
+    bg_count: u32,
+    fg_buffer: wgpu::Buffer,
+    fg_count: u32,
+    overlay_bg_buffer: wgpu::Buffer,
+    overlay_bg_count: u32,
+    overlay_fg_buffer: wgpu::Buffer,
+    overlay_fg_count: u32,
+    has_overlay: bool,
 }
 
 /// The GPU renderer: owns pipelines, atlas, bind groups.
@@ -334,11 +403,13 @@ impl GpuRenderer {
     }
 
     /// Render a single clear frame to eliminate the white flash on startup.
+    /// `opacity` premultiplies the clear color for transparent windows.
     pub fn clear_surface(
         &self,
         gpu: &GpuState,
         surface: &wgpu::Surface<'_>,
         bg: [f32; 4],
+        opacity: f32,
     ) {
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
@@ -357,10 +428,10 @@ impl GpuRenderer {
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(bg[0]),
-                            g: f64::from(bg[1]),
-                            b: f64::from(bg[2]),
-                            a: 1.0,
+                            r: f64::from(bg[0]) * f64::from(opacity),
+                            g: f64::from(bg[1]) * f64::from(opacity),
+                            b: f64::from(bg[2]) * f64::from(opacity),
+                            a: f64::from(opacity),
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -375,7 +446,7 @@ impl GpuRenderer {
         frame.present();
     }
 
-    /// Render a full frame to the given surface.
+    /// Render a full frame to the given surface (normal swapchain path).
     #[allow(clippy::too_many_lines)]
     pub fn draw_frame(
         &mut self,
@@ -385,6 +456,46 @@ impl GpuRenderer {
         params: &FrameParams<'_>,
         glyphs: &mut FontSet,
     ) {
+        let prepared = self.prepare_frame(gpu, params, glyphs);
+        let Some(prepared) = prepared else { return };
+
+        // Get surface texture
+        let frame = match surface.get_current_texture() {
+            Ok(f) => f,
+            Err(wgpu::SurfaceError::Lost) => {
+                surface.configure(&gpu.device, config);
+                return;
+            }
+            Err(e) => {
+                crate::log(&format!("surface error: {e}"));
+                return;
+            }
+        };
+
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame_encoder"),
+            });
+
+        self.encode_render_pass(&mut encoder, &view, &prepared);
+
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+    }
+
+    /// Build all instance data for a frame. Returns `None` if nothing to draw.
+    #[allow(clippy::too_many_lines)]
+    fn prepare_frame(
+        &mut self,
+        gpu: &GpuState,
+        params: &FrameParams<'_>,
+        glyphs: &mut FontSet,
+    ) -> Option<PreparedFrame> {
         let w = params.width as f32;
         let h = params.height as f32;
 
@@ -393,20 +504,30 @@ impl GpuRenderer {
         gpu.queue
             .write_buffer(&self.uniform_buffer, 0, &projection);
 
-        // Build instance data
+        // Build instance data.
+        // Tab bar and window border are fully opaque (opacity=1.0).
+        // Grid cells use the configured opacity for transparency.
         let mut bg = InstanceWriter::new();
         let mut fg = InstanceWriter::new();
 
         // Default background color
         let default_bg = palette_to_rgba(params.palette.default_bg());
 
-        // 1. Tab bar
+        // 1. Tab bar (uses configured tab_bar_opacity)
+        bg.opacity = params.tab_bar_opacity;
         self.build_tab_bar_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue);
 
-        // 2. Grid cells
+        // Switch to transparent for grid content
+        bg.opacity = params.opacity;
+
+        // 2. Grid cells (semi-transparent — glass shows through)
         self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg);
 
-        // 3. Window border
+        // 3. Search bar overlay (at bottom of grid, same opacity as grid)
+        self.build_search_bar_overlay(&mut bg, &mut fg, params, glyphs, &gpu.queue);
+
+        // 4. Window border (opaque)
+        bg.opacity = 1.0;
         if !params.is_maximized {
             let border_color = u32_to_rgba(WINDOW_BORDER_COLOR);
             let bw = WINDOW_BORDER_WIDTH as f32;
@@ -416,7 +537,7 @@ impl GpuRenderer {
             bg.push_rect(w - bw, 0.0, bw, h, border_color);
         }
 
-        // 4. Dropdown overlay (separate buffers — drawn after main bg+fg)
+        // 5. Dropdown overlay (separate buffers — drawn after main bg+fg, opaque)
         let mut overlay_bg = InstanceWriter::new();
         let mut overlay_fg = InstanceWriter::new();
         self.build_dropdown_overlay(
@@ -428,7 +549,7 @@ impl GpuRenderer {
         let fg_bytes = fg.as_bytes();
 
         if bg_bytes.is_empty() && fg_bytes.is_empty() {
-            return;
+            return None;
         }
 
         let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -489,89 +610,79 @@ impl GpuRenderer {
             });
         }
 
-        // Get surface texture
-        let frame = match surface.get_current_texture() {
-            Ok(f) => f,
-            Err(wgpu::SurfaceError::Lost) => {
-                surface.configure(&gpu.device, config);
-                return;
-            }
-            Err(e) => {
-                crate::log(&format!("surface error: {e}"));
-                return;
-            }
-        };
+        Some(PreparedFrame {
+            default_bg,
+            opacity: params.opacity,
+            bg_buffer, bg_count: bg.count(),
+            fg_buffer, fg_count: fg.count(),
+            overlay_bg_buffer, overlay_bg_count: overlay_bg.count(),
+            overlay_fg_buffer, overlay_fg_count: overlay_fg.count(),
+            has_overlay,
+        })
+    }
 
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    /// Issue the render pass draw calls to the given texture view.
+    fn encode_render_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        p: &PreparedFrame,
+    ) {
+        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("main_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(p.default_bg[0]) * f64::from(p.opacity),
+                        g: f64::from(p.default_bg[1]) * f64::from(p.opacity),
+                        b: f64::from(p.default_bg[2]) * f64::from(p.opacity),
+                        a: f64::from(p.opacity),
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
 
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame_encoder"),
-            });
+        // Background pass
+        if p.bg_count > 0 {
+            rpass.set_pipeline(&self.bg_pipeline);
+            rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rpass.set_vertex_buffer(0, p.bg_buffer.slice(..));
+            rpass.draw(0..4, 0..p.bg_count);
+        }
 
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(default_bg[0]),
-                            g: f64::from(default_bg[1]),
-                            b: f64::from(default_bg[2]),
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+        // Foreground pass
+        if p.fg_count > 0 {
+            rpass.set_pipeline(&self.fg_pipeline);
+            rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            rpass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            rpass.set_vertex_buffer(0, p.fg_buffer.slice(..));
+            rpass.draw(0..4, 0..p.fg_count);
+        }
 
-            // Background pass
-            if bg.count() > 0 {
+        // Overlay pass (dropdown menu on top of everything)
+        if p.has_overlay {
+            if p.overlay_bg_count > 0 {
                 rpass.set_pipeline(&self.bg_pipeline);
                 rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                rpass.set_vertex_buffer(0, bg_buffer.slice(..));
-                rpass.draw(0..4, 0..bg.count());
+                rpass.set_vertex_buffer(0, p.overlay_bg_buffer.slice(..));
+                rpass.draw(0..4, 0..p.overlay_bg_count);
             }
-
-            // Foreground pass
-            if fg.count() > 0 {
+            if p.overlay_fg_count > 0 {
                 rpass.set_pipeline(&self.fg_pipeline);
                 rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 rpass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                rpass.set_vertex_buffer(0, fg_buffer.slice(..));
-                rpass.draw(0..4, 0..fg.count());
-            }
-
-            // Overlay pass (dropdown menu on top of everything)
-            if has_overlay {
-                if overlay_bg.count() > 0 {
-                    rpass.set_pipeline(&self.bg_pipeline);
-                    rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    rpass.set_vertex_buffer(0, overlay_bg_buffer.slice(..));
-                    rpass.draw(0..4, 0..overlay_bg.count());
-                }
-                if overlay_fg.count() > 0 {
-                    rpass.set_pipeline(&self.fg_pipeline);
-                    rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    rpass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    rpass.set_vertex_buffer(0, overlay_fg_buffer.slice(..));
-                    rpass.draw(0..4, 0..overlay_fg.count());
-                }
+                rpass.set_vertex_buffer(0, p.overlay_fg_buffer.slice(..));
+                rpass.draw(0..4, 0..p.overlay_fg_count);
             }
         }
-
-        gpu.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
     }
 
     // --- Instance building: Tab bar ---
@@ -847,6 +958,73 @@ impl GpuRenderer {
         );
     }
 
+    // --- Instance building: Search bar ---
+
+    fn build_search_bar_overlay(
+        &mut self,
+        bg: &mut InstanceWriter,
+        fg: &mut InstanceWriter,
+        params: &FrameParams<'_>,
+        glyphs: &mut FontSet,
+        queue: &wgpu::Queue,
+    ) {
+        let search = match params.search {
+            Some(s) => s,
+            None => return,
+        };
+
+        let w = params.width as f32;
+        let h = params.height as f32;
+        let cell_h = glyphs.cell_height;
+        let cell_w = glyphs.cell_width;
+
+        let bar_h = cell_h as f32 + 12.0; // cell height + padding
+        let bar_y = h - bar_h;
+
+        let tc = TabBarColors::from_palette(params.palette);
+
+        // Bar background
+        bg.push_rect(0.0, bar_y, w, bar_h, tc.bar_bg);
+
+        // Top border
+        let border_c = lighten(tc.bar_bg, 0.25);
+        bg.push_rect(0.0, bar_y, w, 1.0, border_c);
+
+        let text_y = bar_y + (bar_h - cell_h as f32) / 2.0;
+
+        // Search icon ">" prefix
+        let prefix = "> ";
+        let prefix_x = 8.0;
+        self.push_text_instances(fg, prefix, prefix_x, text_y, tc.inactive_text, glyphs, queue);
+
+        // Query text
+        let query_x = prefix_x + (prefix.len() * cell_w) as f32;
+        if !search.query.is_empty() {
+            self.push_text_instances(fg, &search.query, query_x, text_y, tc.text_fg, glyphs, queue);
+        }
+
+        // Cursor (blinking rect after query text)
+        let cursor_x = query_x + (search.query.chars().count() * cell_w) as f32;
+        bg.push_rect(cursor_x, text_y, 2.0, cell_h as f32, tc.text_fg);
+
+        // Match count on the right
+        let count_text = if search.matches.is_empty() {
+            if search.query.is_empty() {
+                String::new()
+            } else {
+                "No matches".to_owned()
+            }
+        } else {
+            format!("{} of {}", search.focused + 1, search.matches.len())
+        };
+
+        if !count_text.is_empty() {
+            let count_w = (count_text.len() * cell_w) as f32;
+            let count_x = w - count_w - 12.0;
+            self.push_text_instances(fg, &count_text, count_x, text_y, tc.inactive_text, glyphs, queue);
+        }
+    }
+
     // --- Instance building: Grid ---
 
     #[allow(clippy::too_many_lines)]
@@ -886,13 +1064,29 @@ impl GpuRenderer {
                 let mut fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
                 let mut bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
 
+                // Compute absolute row for search/selection
+                let abs_row = grid
+                    .scrollback
+                    .len()
+                    .saturating_sub(grid.display_offset)
+                    + line;
+
+                // Search match highlighting
+                if let Some(search) = params.search {
+                    match search.cell_match_type(abs_row, col) {
+                        MatchType::FocusedMatch => {
+                            bg_rgb = vte::ansi::Rgb { r: 200, g: 120, b: 30 };
+                            fg_rgb = vte::ansi::Rgb { r: 0, g: 0, b: 0 };
+                        }
+                        MatchType::Match => {
+                            bg_rgb = vte::ansi::Rgb { r: 80, g: 80, b: 20 };
+                        }
+                        MatchType::None => {}
+                    }
+                }
+
                 // Selection highlight
                 let is_selected = params.selection.is_some_and(|sel| {
-                    let abs_row = grid
-                        .scrollback
-                        .len()
-                        .saturating_sub(grid.display_offset)
-                        + line;
                     sel.contains(abs_row, col)
                 });
                 if is_selected {
@@ -914,14 +1108,27 @@ impl GpuRenderer {
                     bg.push_rect(x0, y0, cell_w, ch as f32, bg_rgba);
                 }
 
-                // Cursor block
+                // Cursor
                 let is_cursor = grid.display_offset == 0
                     && params.mode.contains(TermMode::SHOW_CURSOR)
                     && line == grid.cursor.row
                     && col == grid.cursor.col;
                 if is_cursor {
                     let cursor_color = vte_rgb_to_rgba(palette.cursor_color());
-                    bg.push_rect(x0, y0, cw as f32, ch as f32, cursor_color);
+                    match params.cursor_shape {
+                        CursorShape::Beam => {
+                            // 2px vertical bar at left edge
+                            bg.push_rect(x0, y0, 2.0, ch as f32, cursor_color);
+                        }
+                        CursorShape::Underline => {
+                            // 2px horizontal bar at bottom
+                            bg.push_rect(x0, y0 + ch as f32 - 2.0, cw as f32, 2.0, cursor_color);
+                        }
+                        _ => {
+                            // Block (default): filled rect
+                            bg.push_rect(x0, y0, cw as f32, ch as f32, cursor_color);
+                        }
+                    }
                 }
 
                 // Underline decorations
@@ -1005,8 +1212,8 @@ impl GpuRenderer {
                 let gy = y0 + baseline as f32 - entry.metrics.height as f32
                     - entry.metrics.ymin as f32;
 
-                // Use dark text under cursor for contrast
-                let glyph_fg = if is_cursor {
+                // Only invert text color for block cursor (beam/underline don't cover the glyph)
+                let glyph_fg = if is_cursor && matches!(params.cursor_shape, CursorShape::Block) {
                     *default_bg
                 } else {
                     fg_rgba
@@ -1033,6 +1240,28 @@ impl GpuRenderer {
                         entry.metrics.height as f32,
                         entry.uv_pos,
                         entry.uv_size,
+                        glyph_fg,
+                    );
+                }
+
+                // Overlay combining marks (zerowidth characters stored in CellExtra)
+                for &zw in cell.zerowidth() {
+                    let zw_entry =
+                        self.atlas
+                            .get_or_insert(zw, style, glyphs, queue);
+                    if zw_entry.metrics.width == 0 || zw_entry.metrics.height == 0 {
+                        continue;
+                    }
+                    let zx = x0 + zw_entry.metrics.xmin as f32;
+                    let zy = y0 + baseline as f32 - zw_entry.metrics.height as f32
+                        - zw_entry.metrics.ymin as f32;
+                    fg.push_glyph(
+                        zx,
+                        zy,
+                        zw_entry.metrics.width as f32,
+                        zw_entry.metrics.height as f32,
+                        zw_entry.uv_pos,
+                        zw_entry.uv_size,
                         glyph_fg,
                     );
                 }
@@ -1292,24 +1521,37 @@ impl GpuRenderer {
 /// Writes cell instance data to a byte buffer without unsafe code.
 struct InstanceWriter {
     data: Vec<u8>,
+    opacity: f32,
 }
 
 impl InstanceWriter {
     fn new() -> Self {
         Self {
             data: Vec::with_capacity(4096),
+            opacity: 1.0,
         }
     }
 
     /// Push a colored background rectangle (no texture).
+    /// When opacity < 1.0, the color is premultiplied by opacity.
     fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, bg_color: [f32; 4]) {
+        let color = if self.opacity < 1.0 {
+            [
+                bg_color[0] * self.opacity,
+                bg_color[1] * self.opacity,
+                bg_color[2] * self.opacity,
+                bg_color[3] * self.opacity,
+            ]
+        } else {
+            bg_color
+        };
         self.push_raw(
             [x, y],
             [w, h],
             [0.0, 0.0],
             [0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
-            bg_color,
+            color,
             0,
         );
     }

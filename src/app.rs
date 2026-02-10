@@ -10,24 +10,26 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::clipboard;
+use crate::search::SearchState;
+use crate::config::{self, Config};
+use crate::config_monitor::ConfigMonitor;
+use crate::keybindings::{self, Action, KeyBinding};
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
+use crate::key_encoding::{self, KeyEventType, Modifiers};
 use crate::gpu::renderer::{FrameParams, GpuRenderer, GpuState};
 use crate::log;
-use crate::render::{self, FontSet};
+use crate::palette::{self, ColorScheme, BUILTIN_SCHEMES};
+use crate::render::FontSet;
 use crate::selection::{
     self, Selection, SelectionMode, SelectionPoint, Side,
 };
 use crate::tab::{Tab, TabId, TermEvent};
-use crate::palette::{ColorScheme, BUILTIN_SCHEMES};
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
     GRID_PADDING_LEFT, GRID_PADDING_BOTTOM,
 };
 use crate::term_mode::TermMode;
 use crate::window::TermWindow;
-
-const DEFAULT_COLS: usize = 120;
-const DEFAULT_ROWS: usize = 30;
 
 // Resize border thickness in pixels
 const RESIZE_BORDER: f64 = 8.0;
@@ -39,6 +41,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 const SCROLL_LINES: usize = 3;
 
 pub struct App {
+    config: Config,
     windows: HashMap<WindowId, TermWindow>,
     tabs: HashMap<TabId, Tab>,
     glyphs: FontSet,
@@ -57,10 +60,16 @@ pub struct App {
     left_mouse_down: bool,
     last_grid_click_pos: Option<(usize, usize)>,
     click_count: u8,
+    // Mouse reporting dedup
+    last_mouse_cell: Option<(usize, usize)>,
+    // Search
+    search_active: Option<WindowId>,
     // Dropdown menu & settings
     dropdown_open: Option<WindowId>,
     settings_window: Option<WindowId>,
     active_scheme: &'static str,
+    _config_monitor: Option<ConfigMonitor>,
+    bindings: Vec<KeyBinding>,
 }
 
 impl App {
@@ -72,18 +81,38 @@ impl App {
         let _ = std::fs::remove_file(crate::log_path());
         log("starting");
 
-        let glyphs = FontSet::load(render::FONT_SIZE);
+        let config = Config::load();
+        log(&format!(
+            "config: font_size={}, scheme={}, shell={:?}, scrollback={}, cols={}, rows={}, \
+             opacity={}, tab_bar_opacity={}, blur={}, cursor={}, copy_on_select={}, bold_is_bright={}",
+            config.font.size, config.colors.scheme, config.terminal.shell,
+            config.terminal.scrollback, config.window.columns, config.window.rows,
+            config.window.effective_opacity(), config.window.effective_tab_bar_opacity(),
+            config.window.blur,
+            config.terminal.cursor_style, config.behavior.copy_on_select,
+            config.behavior.bold_is_bright,
+        ));
+
+        let glyphs = FontSet::load(config.font.size, config.font.family.as_deref());
         log(&format!(
             "font loaded: cell={}x{}, baseline={}, size={}",
             glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size
         ));
+
+        let bindings = keybindings::merge_bindings(&config.keybind);
+
+        let active_scheme = palette::find_scheme(&config.colors.scheme)
+            .map_or("Catppuccin Mocha", |s| s.name);
 
         let event_loop = EventLoop::<TermEvent>::with_user_event()
             .build()
             .expect("event loop");
         let proxy = event_loop.create_proxy();
 
+        let config_monitor = ConfigMonitor::new(proxy.clone());
+
         let mut app = Self {
+            config,
             windows: HashMap::new(),
             tabs: HashMap::new(),
             glyphs,
@@ -101,9 +130,13 @@ impl App {
             left_mouse_down: false,
             last_grid_click_pos: None,
             click_count: 0,
+            last_mouse_cell: None,
+            search_active: None,
             dropdown_open: None,
             settings_window: None,
-            active_scheme: "Catppuccin Mocha",
+            active_scheme,
+            _config_monitor: config_monitor,
+            bindings,
         };
 
         event_loop.run_app(&mut app)?;
@@ -121,8 +154,8 @@ impl App {
         let ch = self.glyphs.cell_height;
         let grid_w = (width as usize).saturating_sub(GRID_PADDING_LEFT);
         let grid_h = (height as usize).saturating_sub(TAB_BAR_HEIGHT + 10 + GRID_PADDING_BOTTOM);
-        let cols = if cw > 0 { grid_w / cw } else { DEFAULT_COLS };
-        let rows = if ch > 0 { grid_h / ch } else { DEFAULT_ROWS };
+        let cols = if cw > 0 { grid_w / cw } else { self.config.window.columns };
+        let rows = if ch > 0 { grid_h / ch } else { self.config.window.rows };
         (cols.max(2), rows.max(1))
     }
 
@@ -141,7 +174,7 @@ impl App {
     }
 
     fn reset_font_size(&mut self, window_id: WindowId) {
-        self.glyphs = self.glyphs.resize(render::FONT_SIZE);
+        self.glyphs = self.glyphs.resize(self.config.font.size);
         log(&format!(
             "font reset: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -174,18 +207,192 @@ impl App {
         }
     }
 
+    /// Execute a keybinding action. Returns `true` if consumed, `false` to
+    /// fall through to the PTY (e.g. `SmartCopy` with no selection).
+    fn execute_action(
+        &mut self,
+        action: &Action,
+        window_id: WindowId,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        match action {
+            Action::ZoomIn => {
+                self.change_font_size(window_id, 1.0);
+            }
+            Action::ZoomOut => {
+                self.change_font_size(window_id, -1.0);
+            }
+            Action::ZoomReset => {
+                self.reset_font_size(window_id);
+            }
+            Action::NewTab => {
+                self.new_tab_in_window(window_id);
+            }
+            Action::CloseTab => {
+                let tab_id = self
+                    .windows
+                    .get(&window_id)
+                    .and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    self.close_tab(tid, event_loop);
+                }
+            }
+            Action::NextTab => {
+                if let Some(tw) = self.windows.get_mut(&window_id) {
+                    let n = tw.tabs.len();
+                    if n > 1 {
+                        tw.active_tab = (tw.active_tab + 1) % n;
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::PrevTab => {
+                if let Some(tw) = self.windows.get_mut(&window_id) {
+                    let n = tw.tabs.len();
+                    if n > 1 {
+                        tw.active_tab = (tw.active_tab + n - 1) % n;
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::ScrollPageUp => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid = tab.grid_mut();
+                        let page = grid.lines;
+                        let max = grid.scrollback.len();
+                        grid.display_offset = (grid.display_offset + page).min(max);
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::ScrollPageDown => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid = tab.grid_mut();
+                        let page = grid.lines;
+                        grid.display_offset = grid.display_offset.saturating_sub(page);
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::ScrollToTop => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid = tab.grid_mut();
+                        grid.display_offset = grid.scrollback.len();
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::ScrollToBottom => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        tab.grid_mut().display_offset = 0;
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::Copy => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get(&tid) {
+                        if let Some(ref sel) = tab.selection {
+                            let text = selection::extract_text(tab.grid(), sel);
+                            if !text.is_empty() {
+                                clipboard::set_text(&text);
+                            }
+                        }
+                    }
+                }
+            }
+            Action::Paste | Action::SmartPaste => {
+                self.paste_from_clipboard(window_id);
+            }
+            Action::SmartCopy => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    let has_selection = self.tabs.get(&tid)
+                        .is_some_and(|t| t.selection.is_some());
+                    if has_selection {
+                        if let Some(tab) = self.tabs.get(&tid) {
+                            if let Some(ref sel) = tab.selection {
+                                let text = selection::extract_text(tab.grid(), sel);
+                                if !text.is_empty() {
+                                    clipboard::set_text(&text);
+                                }
+                            }
+                        }
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            tab.selection = None;
+                        }
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    } else {
+                        // No selection — fall through to PTY.
+                        return false;
+                    }
+                }
+            }
+            Action::ReloadConfig => {
+                self.apply_config_reload();
+            }
+            Action::OpenSearch => {
+                self.open_search(window_id);
+            }
+            Action::SendText(text) => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        tab.send_pty(text.as_bytes());
+                    }
+                }
+            }
+            Action::None => {
+                // Explicitly unbound — should not appear after merge, but
+                // consume the key if it does.
+            }
+        }
+        true
+    }
+
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
     ) -> Option<WindowId> {
-        let win_w = (self.glyphs.cell_width * DEFAULT_COLS) as u32 + GRID_PADDING_LEFT as u32;
-        let win_h = (self.glyphs.cell_height * DEFAULT_ROWS) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
+        let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32 + GRID_PADDING_LEFT as u32;
+        let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
 
-        let attrs = Window::default_attributes()
+        let use_transparent = self.config.window.effective_opacity() < 1.0;
+
+        #[allow(unused_mut)]
+        let mut attrs = Window::default_attributes()
             .with_title("oriterm")
             .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
             .with_decorations(false)
-            .with_visible(false);
+            .with_visible(false)
+            .with_transparent(use_transparent);
+
+        // On Windows, DX12 + DirectComposition needs WS_EX_NOREDIRECTIONBITMAP
+        // so the compositor reads alpha from our swapchain.
+        #[cfg(target_os = "windows")]
+        if use_transparent {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_no_redirection_bitmap(true);
+        }
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -197,7 +404,7 @@ impl App {
 
         // Initialize GPU on first window creation
         if self.gpu.is_none() {
-            let gpu = GpuState::new(&window);
+            let gpu = GpuState::new(&window, use_transparent);
             let renderer = GpuRenderer::new(&gpu, &mut self.glyphs);
             self.gpu = Some(gpu);
             self.renderer = Some(renderer);
@@ -206,16 +413,16 @@ impl App {
         let gpu = self.gpu.as_ref().expect("GPU initialized");
         let id = window.id();
 
-        let Some(tw) = TermWindow::new(window.clone(), gpu) else {
-            log("failed to create TermWindow (surface creation failed)");
-            return None;
-        };
+        let tw = TermWindow::new(window.clone(), gpu)?;
 
         // Render a dark clear frame before showing the window
         if let Some(renderer) = &self.renderer {
             let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
-            renderer.clear_surface(gpu, &tw.surface, bg);
+            renderer.clear_surface(gpu, &tw.surface, bg, self.config.window.effective_opacity());
         }
+
+        // Apply compositor blur/vibrancy + layered window transparency
+        apply_window_effects(&window, &self.config.window);
 
         // Now show the window with the dark frame already rendered
         window.set_visible(true);
@@ -230,14 +437,25 @@ impl App {
         window_id: WindowId,
     ) -> Option<TabId> {
         // Compute grid size from window
+        let default_cols = self.config.window.columns;
+        let default_rows = self.config.window.rows;
         let (cols, rows) = self.windows.get(&window_id)
-            .map_or((DEFAULT_COLS, DEFAULT_ROWS), |tw| {
+            .map_or((default_cols, default_rows), |tw| {
                 let size = tw.window.inner_size();
                 self.grid_dims_for_size(size.width, size.height)
             });
 
         let tab_id = self.alloc_tab_id();
-        let tab = match Tab::spawn(tab_id, cols, rows, self.proxy.clone()) {
+        let cursor_shape = config::parse_cursor_style(&self.config.terminal.cursor_style);
+        let tab = match Tab::spawn(
+            tab_id,
+            cols,
+            rows,
+            self.proxy.clone(),
+            self.config.terminal.shell.as_deref(),
+            self.config.terminal.scrollback,
+            cursor_shape,
+        ) {
             Ok(t) => t,
             Err(e) => {
                 log(&format!("failed to spawn tab: {e}"));
@@ -246,6 +464,14 @@ impl App {
         };
 
         self.tabs.insert(tab_id, tab);
+
+        // Apply the active color scheme and behavior settings to the new tab
+        if let Some(t) = self.tabs.get_mut(&tab_id) {
+            if let Some(scheme) = palette::find_scheme(self.active_scheme) {
+                t.palette.set_scheme(scheme);
+            }
+            t.palette.bold_is_bright = self.config.behavior.bold_is_bright;
+        }
 
         if let Some(tw) = self.windows.get_mut(&window_id) {
             tw.add_tab(tab_id);
@@ -256,10 +482,8 @@ impl App {
         Some(tab_id)
     }
 
-    fn close_tab(&mut self, tab_id: TabId, event_loop: &ActiveEventLoop) {
-        self.tabs.remove(&tab_id);
-
-        // Find the window containing this tab and remove it
+    fn close_tab(&mut self, tab_id: TabId, _event_loop: &ActiveEventLoop) {
+        // Remove the tab from its window first
         let mut empty_windows = Vec::new();
         for (wid, tw) in &mut self.windows {
             if tw.remove_tab(tab_id) {
@@ -269,41 +493,65 @@ impl App {
             }
         }
 
-        // Close windows that have no tabs left
-        for wid in empty_windows {
+        // If this leaves a window with no tabs AND it's the last one, force-exit
+        // BEFORE dropping the Tab (ClosePseudoConsole would block).
+        for wid in &empty_windows {
             if self.windows.len() <= 1 {
-                // Last window — exit
-                event_loop.exit();
-                return;
+                self.exit_app();
             }
-            self.windows.remove(&wid);
+            self.windows.remove(wid);
         }
+
+        // Safe to drop now — only reached for non-last windows
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.shutdown();
+        }
+        self.tabs.remove(&tab_id);
     }
 
-    fn close_window(&mut self, window_id: WindowId, event_loop: &ActiveEventLoop) {
+    fn close_window(&mut self, window_id: WindowId, _event_loop: &ActiveEventLoop) {
         // If closing the settings window, just remove it — don't exit
         if self.settings_window == Some(window_id) {
             self.close_settings_window();
             return;
         }
 
+        // Check if this is the last terminal window BEFORE dropping anything.
+        let other_terminal_windows = self.windows.keys()
+            .any(|wid| *wid != window_id && self.settings_window != Some(*wid));
+
+        if !other_terminal_windows {
+            // Last terminal window — force-exit before Tab drops block.
+            self.exit_app();
+        }
+
+        // Non-last window: safe to do normal cleanup
         let tab_ids: Vec<TabId> = self
             .windows
             .get(&window_id)
             .map(|tw| tw.tabs.clone())
             .unwrap_or_default();
+        for tid in &tab_ids {
+            if let Some(tab) = self.tabs.get_mut(tid) {
+                tab.shutdown();
+            }
+        }
         for tid in tab_ids {
             self.tabs.remove(&tid);
         }
         self.windows.remove(&window_id);
+    }
 
-        // Also close settings window if no terminal windows remain
-        let terminal_windows = self.windows.keys()
-            .any(|wid| self.settings_window != Some(*wid));
-        if !terminal_windows {
-            self.close_settings_window();
-            event_loop.exit();
+    /// Shut everything down and exit the process immediately.
+    /// `ClosePseudoConsole` (`ConPTY` cleanup) blocks indefinitely when the
+    /// PTY reader thread still holds a pipe handle, so we kill children and
+    /// force-exit before any `Tab` drop runs. Same approach as Alacritty.
+    fn exit_app(&mut self) {
+        for tab in self.tabs.values_mut() {
+            tab.shutdown();
         }
+        // Don't join threads — process::exit will clean them up.
+        std::process::exit(0);
     }
 
     fn render_window(&mut self, window_id: WindowId) {
@@ -352,22 +600,20 @@ impl App {
                 grid: tab.grid(),
                 palette: &tab.palette,
                 mode: tab.mode,
+                cursor_shape: tab.cursor_shape,
                 selection: tab.selection.as_ref(),
+                search: tab.search.as_ref(),
                 tab_info: &tab_info,
                 active_tab: active_idx,
                 hover_hit: hover,
                 is_maximized,
                 dropdown_open,
+                opacity: self.config.window.effective_opacity(),
+                tab_bar_opacity: self.config.window.effective_tab_bar_opacity(),
             });
 
         let Some(frame_params) = frame_params else {
             return;
-        };
-
-        // Get surface and config from the window
-        let tw = match self.windows.get(&window_id) {
-            Some(tw) => tw,
-            None => return,
         };
 
         let gpu = match &self.gpu {
@@ -380,6 +626,10 @@ impl App {
             None => return,
         };
 
+        let tw = match self.windows.get(&window_id) {
+            Some(tw) => tw,
+            None => return,
+        };
         renderer.draw_frame(
             gpu,
             &tw.surface,
@@ -521,6 +771,63 @@ impl App {
         count
     }
 
+    /// Encode and send a mouse report to the PTY.
+    ///
+    /// `button` is the base button code (0=left, 1=middle, 2=right, 3=release,
+    /// 64=scroll-up, 65=scroll-down; add 32 for motion events).
+    fn send_mouse_report(
+        &mut self,
+        tab_id: TabId,
+        button: u8,
+        col: usize,
+        line: usize,
+        pressed: bool,
+    ) {
+        let tab = match self.tabs.get_mut(&tab_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Add modifier bits
+        let mut code = button;
+        if self.modifiers.shift_key() {
+            code += 4;
+        }
+        if self.modifiers.alt_key() {
+            code += 8;
+        }
+        if self.modifiers.control_key() {
+            code += 16;
+        }
+
+        if tab.mode.contains(TermMode::SGR_MOUSE) {
+            // SGR encoding: CSI < code ; col+1 ; line+1 M/m
+            let suffix = if pressed { 'M' } else { 'm' };
+            let seq = format!("\x1b[<{code};{};{}{suffix}", col + 1, line + 1);
+            tab.send_pty(seq.as_bytes());
+        } else if tab.mode.contains(TermMode::UTF8_MOUSE) {
+            // UTF-8 encoding: like normal but coordinates are UTF-8 encoded
+            let encode_utf8 = |v: u32| -> Vec<u8> {
+                let mut buf = [0u8; 4];
+                let c = char::from_u32(v).unwrap_or(' ');
+                let s = c.encode_utf8(&mut buf);
+                s.as_bytes().to_vec()
+            };
+            let mut seq = vec![0x1b, b'[', b'M'];
+            seq.extend_from_slice(&encode_utf8(u32::from(code) + 32));
+            seq.extend_from_slice(&encode_utf8(col as u32 + 1 + 32));
+            seq.extend_from_slice(&encode_utf8(line as u32 + 1 + 32));
+            tab.send_pty(&seq);
+        } else {
+            // Normal encoding: ESC [ M Cb Cx Cy (clamp coords to 223 max)
+            let cb = 32 + code;
+            let cx = ((col + 1).min(223) + 32) as u8;
+            let cy = ((line + 1).min(223) + 32) as u8;
+            let seq = [0x1b, b'[', b'M', cb, cx, cy];
+            tab.send_pty(&seq);
+        }
+    }
+
     fn handle_mouse_input(
         &mut self,
         window_id: WindowId,
@@ -537,6 +844,37 @@ impl App {
         let x = pos.x as usize;
         let y = pos.y as usize;
 
+        // Mouse reporting: if any mouse mode is active and Shift is NOT held,
+        // report to PTY and skip normal handling (Shift overrides mouse reporting
+        // so the user can still select text).
+        if !self.modifiers.shift_key() && !self.is_settings_window(window_id) {
+            let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+            if let Some(tid) = tab_id {
+                let mouse_active = self.tabs.get(&tid)
+                    .is_some_and(|t| t.mode.intersects(TermMode::ANY_MOUSE));
+                if mouse_active {
+                    if let Some((col, line)) = self.pixel_to_cell(pos) {
+                        let btn_code = match button {
+                            MouseButton::Left => 0u8,
+                            MouseButton::Middle => 1,
+                            MouseButton::Right => 2,
+                            _ => return,
+                        };
+                        let pressed = state == ElementState::Pressed;
+                        let report_code = if pressed { btn_code } else { 3 };
+                        // Reset motion dedup on press/release
+                        self.last_mouse_cell = if pressed { Some((col, line)) } else { None };
+                        // Track left_mouse_down for motion reporting
+                        if button == MouseButton::Left {
+                            self.left_mouse_down = pressed;
+                        }
+                        self.send_mouse_report(tid, report_code, col, line, pressed);
+                    }
+                    return;
+                }
+            }
+        }
+
         // Right-click: copy if selection exists, paste if not
         if button == MouseButton::Right {
             if state == ElementState::Released {
@@ -545,7 +883,7 @@ impl App {
                     let has_selection = self.tabs.get(&tid)
                         .is_some_and(|t| t.selection.is_some());
                     if has_selection {
-                        // Copy and clear selection
+                        // Right-click with selection: always copy (explicit action)
                         if let Some(tab) = self.tabs.get(&tid) {
                             if let Some(ref sel) = tab.selection {
                                 let text = selection::extract_text(tab.grid(), sel);
@@ -698,13 +1036,15 @@ impl App {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             if tab.selection.as_ref().is_some_and(Selection::is_empty) {
                                 tab.selection = None;
-                            } else if let Some(ref sel) = tab.selection {
-                                let text = selection::extract_text(tab.grid(), sel);
-                                if !text.is_empty() {
-                                    clipboard::set_text(&text);
+                            } else if self.config.behavior.copy_on_select {
+                                if let Some(ref sel) = tab.selection {
+                                    let text = selection::extract_text(tab.grid(), sel);
+                                    if !text.is_empty() {
+                                        clipboard::set_text(&text);
+                                    }
                                 }
                             } else {
-                                // No selection — nothing to finalize
+                                // copy_on_select disabled — keep selection visible
                             }
                         }
                     }
@@ -864,21 +1204,66 @@ impl App {
 
         let tab_id = self.windows.get(&window_id)
             .and_then(TermWindow::active_tab_id);
-        if let Some(tid) = tab_id {
-            if let Some(tab) = self.tabs.get_mut(&tid) {
-                let grid = tab.grid_mut();
-                if lines > 0 {
-                    // Scroll up (into history)
-                    let max = grid.scrollback.len();
-                    grid.display_offset = (grid.display_offset + lines as usize).min(max);
-                } else {
-                    // Scroll down (toward live)
-                    grid.display_offset = grid.display_offset.saturating_sub((-lines) as usize);
+        let Some(tid) = tab_id else { return };
+
+        // Mouse reporting: scroll events sent to PTY when mouse mode active
+        if !self.modifiers.shift_key() {
+            let mouse_active = self.tabs.get(&tid)
+                .is_some_and(|t| t.mode.intersects(TermMode::ANY_MOUSE));
+            if mouse_active {
+                let pos = self.cursor_pos.get(&window_id)
+                    .copied()
+                    .unwrap_or(PhysicalPosition::new(0.0, 0.0));
+                if let Some((col, line)) = self.pixel_to_cell(pos) {
+                    let btn = if lines > 0 { 64u8 } else { 65 };
+                    let count = lines.unsigned_abs() as usize;
+                    for _ in 0..count {
+                        self.send_mouse_report(tid, btn, col, line, true);
+                    }
                 }
+                return;
             }
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.request_redraw();
+        }
+
+        // Alternate scroll: convert scroll to arrow keys in alt screen
+        if !self.modifiers.shift_key() {
+            let alt_scroll = self.tabs.get(&tid).is_some_and(|t| {
+                t.mode.contains(TermMode::ALT_SCREEN)
+                    && t.mode.contains(TermMode::ALTERNATE_SCROLL)
+            });
+            if alt_scroll {
+                let app_cursor = self.tabs.get(&tid)
+                    .is_some_and(|t| t.mode.contains(TermMode::APP_CURSOR));
+                let (up, down) = if app_cursor {
+                    (b"\x1bOA" as &[u8], b"\x1bOB" as &[u8])
+                } else {
+                    (b"\x1b[A" as &[u8], b"\x1b[B" as &[u8])
+                };
+                let seq = if lines > 0 { up } else { down };
+                let count = lines.unsigned_abs() as usize;
+                if let Some(tab) = self.tabs.get_mut(&tid) {
+                    for _ in 0..count {
+                        tab.send_pty(seq);
+                    }
+                }
+                return;
             }
+        }
+
+        // Normal scrollback
+        if let Some(tab) = self.tabs.get_mut(&tid) {
+            let grid = tab.grid_mut();
+            if lines > 0 {
+                // Scroll up (into history)
+                let max = grid.scrollback.len();
+                grid.display_offset = (grid.display_offset + lines as usize).min(max);
+            } else {
+                // Scroll down (toward live)
+                grid.display_offset = grid.display_offset.saturating_sub((-lines) as usize);
+            }
+        }
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
         }
     }
 
@@ -895,8 +1280,35 @@ impl App {
             tw.window.set_cursor(cursor_icon);
         }
 
-        // Selection drag: update selection end point
-        if self.left_mouse_down {
+        // Mouse motion reporting (before selection drag).
+        // When mouse reporting is active, motion in the grid is sent to PTY
+        // and selection drag is suppressed. Tab bar hover and drag still work.
+        let mut mouse_motion_reported = false;
+        if !self.is_settings_window(window_id) && !self.modifiers.shift_key() {
+            let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+            if let Some(tid) = tab_id {
+                let report_all = self.tabs.get(&tid)
+                    .is_some_and(|t| t.mode.contains(TermMode::MOUSE_ALL));
+                let report_motion = self.tabs.get(&tid)
+                    .is_some_and(|t| t.mode.contains(TermMode::MOUSE_MOTION));
+
+                if report_all || (report_motion && self.left_mouse_down) {
+                    if let Some((col, line)) = self.pixel_to_cell(position) {
+                        let cell = (col, line);
+                        if self.last_mouse_cell != Some(cell) {
+                            self.last_mouse_cell = Some(cell);
+                            // Motion code: 32 + button (32 for left drag, 35 for no button)
+                            let code = if self.left_mouse_down { 32 } else { 35 };
+                            self.send_mouse_report(tid, code, col, line, true);
+                        }
+                        mouse_motion_reported = true;
+                    }
+                }
+            }
+        }
+
+        // Selection drag: update selection end point (skip when mouse reporting handled motion)
+        if self.left_mouse_down && !mouse_motion_reported {
             if let Some((col, line)) = self.pixel_to_cell(position) {
                 let side = self.pixel_to_side(position);
                 let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
@@ -1180,6 +1592,127 @@ impl App {
         None
     }
 
+    // --- Search helpers ---
+
+    fn open_search(&mut self, window_id: WindowId) {
+        let tab_id = match self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
+            Some(id) => id,
+            None => return,
+        };
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.search = Some(SearchState::new());
+        }
+        self.search_active = Some(window_id);
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+    }
+
+    fn close_search(&mut self, window_id: WindowId) {
+        let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+        if let Some(tid) = tab_id {
+            if let Some(tab) = self.tabs.get_mut(&tid) {
+                tab.search = None;
+            }
+        }
+        self.search_active = None;
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+    }
+
+    fn handle_search_key(&mut self, window_id: WindowId, event: &winit::event::KeyEvent) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_search(window_id);
+            }
+            Key::Named(NamedKey::Enter) => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        if let Some(ref mut search) = tab.search {
+                            if self.modifiers.shift_key() {
+                                search.prev_match();
+                            } else {
+                                search.next_match();
+                            }
+                        }
+                    }
+                    self.scroll_to_search_match(tid);
+                }
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        if let Some(ref mut search) = tab.search {
+                            search.query.pop();
+                        }
+                    }
+                    self.update_search(tid);
+                }
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+            }
+            Key::Character(c) => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    let text = c.as_str().to_owned();
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        if let Some(ref mut search) = tab.search {
+                            search.query.push_str(&text);
+                        }
+                    }
+                    self.update_search(tid);
+                }
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn update_search(&mut self, tab_id: TabId) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            // Take search out temporarily to avoid borrow conflict with grid
+            if let Some(mut search) = tab.search.take() {
+                search.update_query(tab.grid());
+                tab.search = Some(search);
+            }
+        }
+        self.scroll_to_search_match(tab_id);
+    }
+
+    fn scroll_to_search_match(&mut self, tab_id: TabId) {
+        // Read the focused match position first
+        let match_row = self.tabs.get(&tab_id).and_then(|tab| {
+            tab.search.as_ref()?.focused_match().map(|m| m.start_row)
+        });
+
+        if let Some(target_row) = match_row {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                let grid = tab.grid_mut();
+                let sb_len = grid.scrollback.len();
+                let lines = grid.lines;
+
+                // Check if target_row is visible in the current viewport
+                let viewport_start = sb_len.saturating_sub(grid.display_offset);
+                let viewport_end = viewport_start + lines;
+
+                if target_row < viewport_start || target_row >= viewport_end {
+                    // Scroll so the match is roughly centered in the viewport
+                    let center_offset = sb_len.saturating_sub(target_row).saturating_sub(lines / 2);
+                    grid.display_offset = center_offset.min(sb_len);
+                }
+            }
+        }
+    }
+
     // --- Dropdown menu helpers ---
 
     /// Compute the dropdown menu rectangle (x, y, w, h) in the given window.
@@ -1283,10 +1816,10 @@ impl App {
             return;
         };
 
-        // Render a dark clear frame
+        // Render a dark clear frame (settings window is always opaque)
         if let Some(renderer) = &self.renderer {
             let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
-            renderer.clear_surface(gpu, &tw.surface, bg);
+            renderer.clear_surface(gpu, &tw.surface, bg, 1.0);
         }
 
         window.set_visible(true);
@@ -1369,10 +1902,79 @@ impl App {
         for tab in self.tabs.values_mut() {
             tab.palette.set_scheme(scheme);
         }
+        // Persist the scheme change
+        scheme.name.clone_into(&mut self.config.colors.scheme);
+        self.config.save();
         // Redraw all windows
         for tw in self.windows.values() {
             tw.window.request_redraw();
         }
+    }
+
+    fn apply_config_reload(&mut self) {
+        let new_config = match Config::try_load() {
+            Ok(c) => c,
+            Err(e) => {
+                log(&format!("config reload: {e}"));
+                return;
+            }
+        };
+
+        // Color scheme
+        if new_config.colors.scheme != self.config.colors.scheme {
+            if let Some(scheme) = palette::find_scheme(&new_config.colors.scheme) {
+                self.active_scheme = scheme.name;
+                for tab in self.tabs.values_mut() {
+                    tab.palette.set_scheme(scheme);
+                }
+            }
+        }
+
+        // Font size or family change
+        let font_changed = (new_config.font.size - self.config.font.size).abs() > f32::EPSILON
+            || new_config.font.family != self.config.font.family;
+        if font_changed {
+            self.glyphs = FontSet::load(new_config.font.size, new_config.font.family.as_deref());
+            log(&format!(
+                "config reload: font size={}, cell={}x{}",
+                self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+            ));
+            if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+                renderer.rebuild_atlas(gpu, &mut self.glyphs);
+            }
+            let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+            for wid in window_ids {
+                if !self.is_settings_window(wid) {
+                    self.resize_all_tabs_in_window(wid);
+                }
+            }
+        }
+
+        // Cursor style
+        let new_cursor = config::parse_cursor_style(&new_config.terminal.cursor_style);
+        if new_config.terminal.cursor_style != self.config.terminal.cursor_style {
+            for tab in self.tabs.values_mut() {
+                tab.cursor_shape = new_cursor;
+            }
+        }
+
+        // Bold is bright
+        if new_config.behavior.bold_is_bright != self.config.behavior.bold_is_bright {
+            for tab in self.tabs.values_mut() {
+                tab.palette.bold_is_bright = new_config.behavior.bold_is_bright;
+            }
+        }
+
+        // Keybindings
+        self.bindings = keybindings::merge_bindings(&new_config.keybind);
+
+        self.config = new_config;
+
+        // Redraw all windows
+        for tw in self.windows.values() {
+            tw.window.request_redraw();
+        }
+        log("config reload: applied successfully");
     }
 }
 
@@ -1405,6 +2007,9 @@ impl ApplicationHandler<TermEvent> for App {
                         }
                     }
                 }
+            }
+            TermEvent::ConfigReload => {
+                self.apply_config_reload();
             }
         }
     }
@@ -1448,20 +2053,37 @@ impl ApplicationHandler<TermEvent> for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                // Allow key release through only when Kitty REPORT_EVENT_TYPES is active.
                 if event.state != ElementState::Pressed {
-                    return;
+                    let has_kitty_events = self.windows.get(&window_id)
+                        .and_then(TermWindow::active_tab_id)
+                        .and_then(|tid| self.tabs.get(&tid))
+                        .is_some_and(|tab| tab.mode.contains(TermMode::REPORT_EVENT_TYPES));
+                    if !has_kitty_events {
+                        return;
+                    }
                 }
 
+                let is_pressed = event.state == ElementState::Pressed;
+
                 // Settings window: Escape closes it, all other keys ignored
-                if self.is_settings_window(window_id) {
+                if is_pressed && self.is_settings_window(window_id) {
                     if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                         self.close_settings_window();
                     }
                     return;
                 }
 
+                // Search mode: intercept all keys when search is active
+                if self.search_active == Some(window_id) {
+                    if is_pressed {
+                        self.handle_search_key(window_id, &event);
+                    }
+                    return;
+                }
+
                 // Escape: close dropdown if open
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     if self.dropdown_open.is_some() {
                         let wid = self.dropdown_open.take();
                         if let Some(wid) = wid {
@@ -1474,7 +2096,7 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 // Handle Escape during drag
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
                     if self.drag.is_some() {
                         // Cancel drag — revert to original state
                         self.drag = None;
@@ -1486,177 +2108,20 @@ impl ApplicationHandler<TermEvent> for App {
                     }
                 }
 
-                let ctrl = self.modifiers.control_key();
-                let shift = self.modifiers.shift_key();
-
-                // Ctrl+= or Ctrl++ — zoom in
-                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "=" || c.as_str() == "+") {
-                    self.change_font_size(window_id, 1.0);
-                    return;
-                }
-
-                // Ctrl+- — zoom out
-                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "-") {
-                    self.change_font_size(window_id, -1.0);
-                    return;
-                }
-
-                // Ctrl+0 — reset zoom
-                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "0") {
-                    self.reset_font_size(window_id);
-                    return;
-                }
-
-                // Ctrl+T — new tab
-                if ctrl && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "t") {
-                    self.new_tab_in_window(window_id);
-                    return;
-                }
-
-                // Ctrl+W — close active tab
-                if ctrl && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "w") {
-                    let tab_id = self
-                        .windows
-                        .get(&window_id)
-                        .and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        self.close_tab(tid, event_loop);
-                    }
-                    return;
-                }
-
-                // Ctrl+Tab / Ctrl+Shift+Tab — cycle tabs
-                if ctrl && matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
-                    if let Some(tw) = self.windows.get_mut(&window_id) {
-                        let n = tw.tabs.len();
-                        if n > 1 {
-                            if shift {
-                                tw.active_tab = (tw.active_tab + n - 1) % n;
-                            } else {
-                                tw.active_tab = (tw.active_tab + 1) % n;
+                // Keybinding lookup
+                let mods = build_modifiers(self.modifiers);
+                if let Some(binding_key) = keybindings::key_to_binding_key(&event.logical_key) {
+                    if let Some(action) = keybindings::find_binding(&self.bindings, &binding_key, mods) {
+                        let action = action.clone();
+                        if is_pressed {
+                            if self.execute_action(&action, window_id, event_loop) {
+                                return;
                             }
-                            tw.window.request_redraw();
+                            // SmartCopy with no selection — fall through to PTY
+                        } else {
+                            return; // matched binding on key release — consume
                         }
                     }
-                    return;
-                }
-
-                // Shift+PageUp/PageDown — page scroll through scrollback
-                if shift && matches!(event.logical_key, Key::Named(NamedKey::PageUp)) {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            let grid = tab.grid_mut();
-                            let page = grid.lines;
-                            let max = grid.scrollback.len();
-                            grid.display_offset = (grid.display_offset + page).min(max);
-                        }
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
-                    }
-                    return;
-                }
-
-                if shift && matches!(event.logical_key, Key::Named(NamedKey::PageDown)) {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            let grid = tab.grid_mut();
-                            let page = grid.lines;
-                            grid.display_offset = grid.display_offset.saturating_sub(page);
-                        }
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
-                    }
-                    return;
-                }
-
-                if shift && matches!(event.logical_key, Key::Named(NamedKey::Home)) {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            let grid = tab.grid_mut();
-                            grid.display_offset = grid.scrollback.len();
-                        }
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
-                    }
-                    return;
-                }
-
-                if shift && matches!(event.logical_key, Key::Named(NamedKey::End)) {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            tab.grid_mut().display_offset = 0;
-                        }
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
-                    }
-                    return;
-                }
-
-                // Ctrl+Shift+C or Ctrl+Insert — copy selection
-                if (ctrl && shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "C" || c.as_str() == "c"))
-                    || (ctrl && matches!(event.logical_key, Key::Named(NamedKey::Insert)))
-                {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get(&tid) {
-                            if let Some(ref sel) = tab.selection {
-                                let text = selection::extract_text(tab.grid(), sel);
-                                if !text.is_empty() {
-                                    clipboard::set_text(&text);
-                                }
-                            }
-                        }
-                    }
-                    return;
-                }
-
-                // Ctrl+Shift+V or Shift+Insert — paste
-                if (ctrl && shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "V" || c.as_str() == "v"))
-                    || (shift && matches!(event.logical_key, Key::Named(NamedKey::Insert)))
-                {
-                    self.paste_from_clipboard(window_id);
-                    return;
-                }
-
-                // Smart Ctrl+C: if selection exists, copy; else send ^C
-                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "c") {
-                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        let has_selection = self.tabs.get(&tid)
-                            .is_some_and(|t| t.selection.is_some());
-                        if has_selection {
-                            if let Some(tab) = self.tabs.get(&tid) {
-                                if let Some(ref sel) = tab.selection {
-                                    let text = selection::extract_text(tab.grid(), sel);
-                                    if !text.is_empty() {
-                                        clipboard::set_text(&text);
-                                    }
-                                }
-                            }
-                            if let Some(tab) = self.tabs.get_mut(&tid) {
-                                tab.selection = None;
-                            }
-                            if let Some(tw) = self.windows.get(&window_id) {
-                                tw.window.request_redraw();
-                            }
-                            return;
-                        }
-                        // No selection — fall through to send ^C via normal PTY path
-                    }
-                }
-
-                // Smart Ctrl+V: paste (without Shift)
-                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "v") {
-                    self.paste_from_clipboard(window_id);
-                    return;
                 }
 
                 // Any keyboard input to PTY — scroll to live and clear selection
@@ -1665,67 +2130,50 @@ impl ApplicationHandler<TermEvent> for App {
                     .get(&window_id)
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
-                    // Scroll to live on any PTY input
-                    if let Some(tab) = self.tabs.get_mut(&tid) {
-                        tab.grid_mut().display_offset = 0;
-                        // Clear selection on keyboard input to PTY
-                        if tab.selection.is_some() {
-                            tab.selection = None;
+                    // Scroll to live on press (not release).
+                    if is_pressed {
+                        if let Some(tab) = self.tabs.get_mut(&tid) {
+                            tab.grid_mut().display_offset = 0;
+                            if tab.selection.is_some() {
+                                tab.selection = None;
+                            }
                         }
                     }
 
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let app_cursor = tab.mode.contains(TermMode::APP_CURSOR);
-                        match &event.logical_key {
-                            Key::Named(NamedKey::Enter) => tab.send_pty(b"\r"),
-                            Key::Named(NamedKey::Backspace) => tab.send_pty(&[0x7f]),
-                            Key::Named(NamedKey::Tab) => tab.send_pty(b"\t"),
-                            Key::Named(NamedKey::Escape) => tab.send_pty(&[0x1b]),
-                            Key::Named(NamedKey::ArrowUp) => {
-                                if app_cursor { tab.send_pty(b"\x1bOA") }
-                                else { tab.send_pty(b"\x1b[A") }
-                            }
-                            Key::Named(NamedKey::ArrowDown) => {
-                                if app_cursor { tab.send_pty(b"\x1bOB") }
-                                else { tab.send_pty(b"\x1b[B") }
-                            }
-                            Key::Named(NamedKey::ArrowRight) => {
-                                if app_cursor { tab.send_pty(b"\x1bOC") }
-                                else { tab.send_pty(b"\x1b[C") }
-                            }
-                            Key::Named(NamedKey::ArrowLeft) => {
-                                if app_cursor { tab.send_pty(b"\x1bOD") }
-                                else { tab.send_pty(b"\x1b[D") }
-                            }
-                            Key::Named(NamedKey::Home) => {
-                                if app_cursor { tab.send_pty(b"\x1bOH") }
-                                else { tab.send_pty(b"\x1b[H") }
-                            }
-                            Key::Named(NamedKey::End) => {
-                                if app_cursor { tab.send_pty(b"\x1bOF") }
-                                else { tab.send_pty(b"\x1b[F") }
-                            }
-                            Key::Named(NamedKey::Delete) => tab.send_pty(b"\x1b[3~"),
-                            Key::Named(NamedKey::PageUp) => tab.send_pty(b"\x1b[5~"),
-                            Key::Named(NamedKey::PageDown) => tab.send_pty(b"\x1b[6~"),
-                            Key::Named(NamedKey::Insert) => tab.send_pty(b"\x1b[2~"),
-                            Key::Named(NamedKey::F1) => tab.send_pty(b"\x1bOP"),
-                            Key::Named(NamedKey::F2) => tab.send_pty(b"\x1bOQ"),
-                            Key::Named(NamedKey::F3) => tab.send_pty(b"\x1bOR"),
-                            Key::Named(NamedKey::F4) => tab.send_pty(b"\x1bOS"),
-                            Key::Named(NamedKey::F5) => tab.send_pty(b"\x1b[15~"),
-                            Key::Named(NamedKey::F6) => tab.send_pty(b"\x1b[17~"),
-                            Key::Named(NamedKey::F7) => tab.send_pty(b"\x1b[18~"),
-                            Key::Named(NamedKey::F8) => tab.send_pty(b"\x1b[19~"),
-                            Key::Named(NamedKey::F9) => tab.send_pty(b"\x1b[20~"),
-                            Key::Named(NamedKey::F10) => tab.send_pty(b"\x1b[21~"),
-                            Key::Named(NamedKey::F11) => tab.send_pty(b"\x1b[23~"),
-                            Key::Named(NamedKey::F12) => tab.send_pty(b"\x1b[24~"),
-                            _ => {
-                                if let Some(text) = &event.text {
-                                    tab.send_pty(text.as_bytes());
-                                }
-                            }
+                        let mods = build_modifiers(self.modifiers);
+                        let evt = if event.repeat {
+                            KeyEventType::Repeat
+                        } else if event.state == ElementState::Pressed {
+                            KeyEventType::Press
+                        } else {
+                            KeyEventType::Release
+                        };
+                        let bytes = key_encoding::encode_key(
+                            &event.logical_key,
+                            mods,
+                            tab.mode,
+                            event.text.as_ref().map(winit::keyboard::SmolStr::as_str),
+                            event.location,
+                            evt,
+                        );
+                        if !bytes.is_empty() {
+                            tab.send_pty(&bytes);
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::Focused(focused) => {
+                // Skip settings window — no PTY to send to
+                if self.is_settings_window(window_id) {
+                    return;
+                }
+                if let Some(tid) = self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        if tab.mode.contains(TermMode::FOCUS_IN_OUT) {
+                            let seq = if focused { b"\x1b[I" as &[u8] } else { b"\x1b[O" };
+                            tab.send_pty(seq);
                         }
                     }
                 }
@@ -1734,4 +2182,62 @@ impl ApplicationHandler<TermEvent> for App {
             _ => {}
         }
     }
+}
+
+/// Apply compositor blur/vibrancy when opacity < 1.0.
+/// With DX12 + `DirectComposition` (`DxgiFromVisual`), the swapchain supports
+/// `PreMultiplied` alpha — the compositor reads our alpha channel directly.
+/// Acrylic/vibrancy provides the frosted glass blur behind transparent areas.
+fn apply_window_effects(window: &Window, wc: &config::WindowConfig) {
+    let opacity = wc.effective_opacity();
+    if opacity >= 1.0 {
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if wc.blur {
+            let alpha = (opacity * 255.0) as u8;
+            let color = Some((30_u8, 30, 46, alpha));
+            if let Err(e) = window_vibrancy::apply_acrylic(window, color) {
+                log(&format!("vibrancy: acrylic failed: {e}"));
+            } else {
+                log("vibrancy: acrylic applied");
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Err(e) = window_vibrancy::apply_vibrancy(
+            window,
+            window_vibrancy::NSVisualEffectMaterial::HudWindow,
+            None,
+            None,
+        ) {
+            log(&format!("vibrancy: macOS vibrancy failed: {e}"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        window.set_blur(true);
+    }
+}
+
+fn build_modifiers(m: ModifiersState) -> Modifiers {
+    let mut mods = Modifiers::empty();
+    if m.shift_key() {
+        mods |= Modifiers::SHIFT;
+    }
+    if m.alt_key() {
+        mods |= Modifiers::ALT;
+    }
+    if m.control_key() {
+        mods |= Modifiers::CONTROL;
+    }
+    if m.super_key() {
+        mods |= Modifiers::SUPER;
+    }
+    mods
 }

@@ -188,7 +188,7 @@ pub fn create_atlas_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
     })
 }
 
-/// Background pipeline: renders opaque colored quads.
+/// Background pipeline: renders colored quads with premultiplied alpha blending.
 pub fn create_bg_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
@@ -220,7 +220,18 @@ pub fn create_bg_pipeline(
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: None, // opaque — no blending
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),

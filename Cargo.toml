@@ -11,7 +11,6 @@ unicode-width = "0.2"
 unicode-segmentation = "1.12"
 strip-ansi-escapes = "0.2"
 winit = "0.30"
-softbuffer = { version = "0.4", optional = true }
 wgpu = "28"
 pollster = "0.4"
 fontdue = "0.9.3"
@@ -20,20 +19,26 @@ vte = { version = "0.15.0", features = ["ansi"] }
 bitflags = "2"
 log = "0.4"
 base64 = "0.22"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+notify = "8"
+regex = "1"
+window-vibrancy = "0.7"
 
 [features]
 default = []
-software-rendering = ["softbuffer"]
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
+windows-sys = { version = "0.60", features = ["Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [[bin]]
 name = "oriterm"
 path = "src/main.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
+dead_code = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
 future_incompatible = { level = "warn", priority = -1 }
 unused_import_braces = "warn"

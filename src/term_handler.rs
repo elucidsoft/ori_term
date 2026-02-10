@@ -5,8 +5,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use unicode_width::UnicodeWidthChar;
 use vte::ansi::{
     Attr, CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, Hyperlink,
-    LineClearMode, Mode, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset, TabulationClearMode,
+    KeyboardModes, KeyboardModesApplyBehavior, LineClearMode, Mode, NamedColor, NamedMode,
+    NamedPrivateMode, PrivateMode, Rgb, StandardCharset, TabulationClearMode,
 };
 
 use crate::cell::CellFlags;
@@ -14,6 +14,21 @@ use crate::grid::Grid;
 use crate::palette::Palette;
 use crate::tab::CharsetState;
 use crate::term_mode::TermMode;
+
+/// Tracks grapheme cluster continuation for ZWJ emoji sequences.
+///
+/// When a Zero-Width Joiner (U+200D) is attached to a cell, the next
+/// printable character should be attached to the same base cell as a
+/// zero-width character rather than starting a new cell.
+#[derive(Debug, Default)]
+pub struct GraphemeState {
+    /// True when the last zero-width character was ZWJ (U+200D).
+    after_zwj: bool,
+    /// Row of the base cell that started this grapheme cluster.
+    base_row: usize,
+    /// Column of the base cell that started this grapheme cluster.
+    base_col: usize,
+}
 
 pub struct TermHandler<'a> {
     grid: &'a mut Grid,
@@ -26,9 +41,13 @@ pub struct TermHandler<'a> {
     cursor_shape: &'a mut CursorShape,
     charset: &'a mut CharsetState,
     title_stack: &'a mut Vec<String>,
+    grapheme: &'a mut GraphemeState,
+    keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
+    inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
 }
 
 impl<'a> TermHandler<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         grid: &'a mut Grid,
         alt_grid: &'a mut Grid,
@@ -40,6 +59,9 @@ impl<'a> TermHandler<'a> {
         cursor_shape: &'a mut CursorShape,
         charset: &'a mut CharsetState,
         title_stack: &'a mut Vec<String>,
+        grapheme: &'a mut GraphemeState,
+        keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
+        inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
     ) -> Self {
         Self {
             grid,
@@ -52,6 +74,19 @@ impl<'a> TermHandler<'a> {
             cursor_shape,
             charset,
             title_stack,
+            grapheme,
+            keyboard_mode_stack,
+            inactive_keyboard_mode_stack,
+        }
+    }
+
+    /// Apply the top of the keyboard mode stack to `TermMode`.
+    fn apply_keyboard_mode(&mut self) {
+        // Clear all Kitty bits first.
+        self.mode.remove(TermMode::KITTY_KEYBOARD_PROTOCOL);
+        // Apply the top of the stack.
+        if let Some(&top) = self.keyboard_mode_stack.last() {
+            self.mode.insert(TermMode::from(top));
         }
     }
 
@@ -71,6 +106,10 @@ impl<'a> TermHandler<'a> {
             *self.active_is_alt = true;
             self.alt_grid.clear_all();
             self.mode.insert(TermMode::ALT_SCREEN);
+            // Save and clear keyboard mode stack for alt screen.
+            std::mem::swap(self.keyboard_mode_stack, self.inactive_keyboard_mode_stack);
+            self.keyboard_mode_stack.clear();
+            self.apply_keyboard_mode();
         }
     }
 
@@ -81,7 +120,37 @@ impl<'a> TermHandler<'a> {
                 self.grid.restore_cursor();
             }
             self.mode.remove(TermMode::ALT_SCREEN);
+            // Restore keyboard mode stack from primary screen.
+            std::mem::swap(self.keyboard_mode_stack, self.inactive_keyboard_mode_stack);
+            self.apply_keyboard_mode();
         }
+    }
+
+}
+
+/// Find the column of the previous base cell (skipping wide char spacers).
+///
+/// Accounts for `input_needs_wrap`: when true, cursor.col already points
+/// at the last written cell rather than the cell after it.
+fn prev_base_col(grid: &Grid) -> Option<usize> {
+    let row = grid.cursor.row;
+    let col = if grid.cursor.input_needs_wrap {
+        grid.cursor.col
+    } else if grid.cursor.col > 0 {
+        grid.cursor.col - 1
+    } else {
+        return None;
+    };
+
+    if row >= grid.lines || col >= grid.cols {
+        return None;
+    }
+
+    // Skip wide char spacer to find the base cell
+    if grid.row(row)[col].flags.contains(CellFlags::WIDE_CHAR_SPACER) && col > 0 {
+        Some(col - 1)
+    } else {
+        Some(col)
     }
 }
 
@@ -90,14 +159,57 @@ impl Handler for TermHandler<'_> {
         // Apply charset mapping (e.g., DEC Special Graphics for box-drawing)
         let c = self.charset.map(c);
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
-        match UnicodeWidthChar::width(c) {
+        let width = UnicodeWidthChar::width(c);
+
+
+        // ZWJ continuation: after a ZWJ, the next printable char joins the cluster
+        // (e.g., family emoji: 👩 + ZWJ + 👩 + ZWJ + 👧 + ZWJ + 👦)
+        if self.grapheme.after_zwj {
+            if let Some(w) = width {
+                if w > 0 {
+                    self.grapheme.after_zwj = false;
+                    let row = self.grapheme.base_row;
+                    let col = self.grapheme.base_col;
+                    if row < grid.lines && col < grid.cols {
+                        grid.row_mut(row)[col].push_zerowidth(c);
+                    }
+                    return;
+                }
+            } else {
+                // None width (control char) — abandon ZWJ state
+                self.grapheme.after_zwj = false;
+            }
+        }
+
+        // Emoji skin tone modifiers (U+1F3FB-U+1F3FF): attach to previous wide
+        // char (emoji) as zerowidth rather than occupying a new cell.
+        if matches!(c, '\u{1F3FB}'..='\u{1F3FF}') {
+            if let Some(prev_col) = prev_base_col(grid) {
+                let row = grid.cursor.row;
+                if grid.row(row)[prev_col].flags.contains(CellFlags::WIDE_CHAR) {
+                    grid.row_mut(row)[prev_col].push_zerowidth(c);
+                    return;
+                }
+            }
+            // Not following a wide char — fall through to normal handling
+        }
+
+        match width {
             Some(2) => grid.put_wide_char(c),
             Some(0) => {
-                // Zero-width: attach to previous cell
-                if grid.cursor.col > 0 {
-                    let col = grid.cursor.col - 1;
+                // Zero-width: attach to previous cell, skipping wide char spacers.
+                // When input_needs_wrap is true, cursor.col points at the cell
+                // we just wrote (it was clamped back after advancing past the end).
+                if let Some(col) = prev_base_col(grid) {
                     let row = grid.cursor.row;
                     grid.row_mut(row)[col].push_zerowidth(c);
+
+                    // Track ZWJ for grapheme cluster continuation
+                    if c == '\u{200D}' {
+                        self.grapheme.after_zwj = true;
+                        self.grapheme.base_row = row;
+                        self.grapheme.base_col = col;
+                    }
                 }
             }
             _ => grid.put_char(c),
@@ -105,49 +217,58 @@ impl Handler for TermHandler<'_> {
     }
 
     fn goto(&mut self, line: i32, col: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         let row = if line < 0 { 0 } else { line as usize };
         grid.goto(row, col);
     }
 
     fn goto_line(&mut self, line: i32) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         let row = if line < 0 { 0 } else { line as usize };
         grid.goto_line(row);
     }
 
     fn goto_col(&mut self, col: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.goto_col(col);
     }
 
     fn move_up(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_up(n);
     }
 
     fn move_down(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_down(n);
     }
 
     fn move_forward(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_forward(n);
     }
 
     fn move_backward(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_backward(n);
     }
 
     fn move_down_and_cr(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_down(n);
         grid.carriage_return();
     }
 
     fn move_up_and_cr(&mut self, n: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.move_up(n);
         grid.carriage_return();
@@ -210,11 +331,13 @@ impl Handler for TermHandler<'_> {
     }
 
     fn clear_screen(&mut self, mode: ClearMode) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.erase_display(mode);
     }
 
     fn clear_line(&mut self, mode: LineClearMode) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.erase_line(mode);
     }
@@ -225,26 +348,31 @@ impl Handler for TermHandler<'_> {
     }
 
     fn erase_chars(&mut self, count: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.erase_chars(count);
     }
 
     fn delete_chars(&mut self, count: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.delete_chars(count);
     }
 
     fn insert_blank(&mut self, count: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.insert_blank_chars(count);
     }
 
     fn insert_blank_lines(&mut self, count: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.insert_lines(count);
     }
 
     fn delete_lines(&mut self, count: usize) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.delete_lines(count);
     }
@@ -272,6 +400,7 @@ impl Handler for TermHandler<'_> {
     }
 
     fn linefeed(&mut self) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.linefeed();
         if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) {
@@ -280,16 +409,19 @@ impl Handler for TermHandler<'_> {
     }
 
     fn carriage_return(&mut self) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.carriage_return();
     }
 
     fn backspace(&mut self) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.backspace();
     }
 
     fn newline(&mut self) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.linefeed();
         grid.carriage_return();
@@ -467,6 +599,7 @@ impl Handler for TermHandler<'_> {
             PrivateMode::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor) => {
                 self.swap_alt_screen(true);
             }
+            // SyncUpdate (mode 2026): handled by vte Processor internally
             _ => {}
         }
     }
@@ -512,6 +645,7 @@ impl Handler for TermHandler<'_> {
             PrivateMode::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor) => {
                 self.restore_primary_screen(true);
             }
+            // SyncUpdate (mode 2026): handled by vte Processor internally
             _ => {}
         }
     }
@@ -568,11 +702,13 @@ impl Handler for TermHandler<'_> {
     }
 
     fn reset_state(&mut self) {
+        self.grapheme.after_zwj = false;
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.clear_all();
         grid.cursor.reset_attrs();
         *self.mode = TermMode::default();
         *self.active_is_alt = false;
+        self.keyboard_mode_stack.clear();
     }
 
     fn set_keypad_application_mode(&mut self) {
@@ -650,5 +786,38 @@ impl Handler for TermHandler<'_> {
         // SUB — treated as a space character
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         grid.put_char(' ');
+    }
+
+    fn report_keyboard_mode(&mut self) {
+        let bits = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
+        let response = format!("\x1b[?{}u", bits.bits());
+        self.write_pty(response.as_bytes());
+    }
+
+    fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
+        self.keyboard_mode_stack.push(mode);
+        self.apply_keyboard_mode();
+    }
+
+    fn pop_keyboard_modes(&mut self, to_pop: u16) {
+        let to_pop = (to_pop as usize).min(self.keyboard_mode_stack.len());
+        let new_len = self.keyboard_mode_stack.len() - to_pop;
+        self.keyboard_mode_stack.truncate(new_len);
+        self.apply_keyboard_mode();
+    }
+
+    fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior) {
+        let current = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
+        let new_mode = match behavior {
+            KeyboardModesApplyBehavior::Replace => mode,
+            KeyboardModesApplyBehavior::Union => current | mode,
+            KeyboardModesApplyBehavior::Difference => current & !mode,
+        };
+        if let Some(top) = self.keyboard_mode_stack.last_mut() {
+            *top = new_mode;
+        } else {
+            self.keyboard_mode_stack.push(new_mode);
+        }
+        self.apply_keyboard_mode();
     }
 }

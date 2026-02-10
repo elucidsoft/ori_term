@@ -154,6 +154,10 @@ impl Selection {
 
 /// Find word boundaries around (`abs_row`, `col`) in the grid.
 /// Returns (`start_col`, `end_col`) inclusive.
+///
+/// Wide char spacers are redirected to their base cell and skipped
+/// during scanning so that double-clicking a CJK character selects
+/// the full character including its spacer column.
 pub fn word_boundaries(grid: &Grid, abs_row: usize, col: usize) -> (usize, usize) {
     let row = match grid.absolute_row(abs_row) {
         Some(r) => r,
@@ -165,19 +169,48 @@ pub fn word_boundaries(grid: &Grid, abs_row: usize, col: usize) -> (usize, usize
         return (col, col);
     }
 
-    let ch = row[col].c;
+    // If clicked on a wide char spacer, redirect to the base cell
+    let click_col = if row[col].flags.contains(CellFlags::WIDE_CHAR_SPACER) && col > 0 {
+        col - 1
+    } else {
+        col
+    };
+
+    let ch = row[click_col].c;
     let class = char_class(ch);
 
-    // Scan left
-    let mut start = col;
-    while start > 0 && char_class(row[start - 1].c) == class {
-        start -= 1;
+    // Scan left, skipping wide char spacers
+    let mut start = click_col;
+    while start > 0 {
+        let prev = start - 1;
+        if row[prev].flags.contains(CellFlags::WIDE_CHAR_SPACER) && prev > 0 {
+            // Spacer: check the base cell before it
+            if char_class(row[prev - 1].c) == class {
+                start = prev - 1;
+            } else {
+                break;
+            }
+        } else if char_class(row[prev].c) == class {
+            start = prev;
+        } else {
+            break;
+        }
     }
 
-    // Scan right
-    let mut end = col;
-    while end + 1 < cols && char_class(row[end + 1].c) == class {
-        end += 1;
+    // Scan right, skipping wide char spacers
+    let mut end = click_col;
+    while end + 1 < cols {
+        let next = end + 1;
+        if row[next].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+            // Spacer belongs to the wide char at `end` — include it
+            end = next;
+            continue;
+        }
+        if char_class(row[next].c) == class {
+            end = next;
+        } else {
+            break;
+        }
     }
 
     (start, end)
@@ -419,6 +452,66 @@ mod tests {
         let (s, e) = word_boundaries(&grid, 0, 5);
         assert_eq!(s, 5);
         assert_eq!(e, 5);
+    }
+
+    #[test]
+    fn word_boundaries_wide_char() {
+        // Grid: "漢字 test" = [漢, spacer, 字, spacer, space, t, e, s, t]
+        // CJK characters are alphanumeric in Unicode, so they group with ASCII
+        // as word chars (class 0). A space separates the two word groups.
+        let mut grid = Grid::new(20, 1);
+        grid.put_wide_char('漢');
+        grid.put_wide_char('字');
+        grid.put_char(' ');
+        for c in "test".chars() {
+            grid.put_char(c);
+        }
+        // Double-click on 漢 (col 0): should select "漢字" (cols 0-3)
+        let (s, e) = word_boundaries(&grid, 0, 0);
+        assert_eq!(s, 0);
+        assert_eq!(e, 3); // includes both wide chars + spacers
+
+        // Double-click on spacer of 漢 (col 1): same result
+        let (s, e) = word_boundaries(&grid, 0, 1);
+        assert_eq!(s, 0);
+        assert_eq!(e, 3);
+
+        // Double-click on 't' (col 5): should select "test" (cols 5-8)
+        let (s, e) = word_boundaries(&grid, 0, 5);
+        assert_eq!(s, 5);
+        assert_eq!(e, 8);
+    }
+
+    #[test]
+    fn word_boundaries_single_wide_char() {
+        // Grid: "漢 A" = [漢, spacer, space, A]
+        let mut grid = Grid::new(20, 1);
+        grid.put_wide_char('漢');
+        grid.put_char(' ');
+        grid.put_char('A');
+
+        // Double-click on 漢: should select just 漢 (cols 0-1)
+        let (s, e) = word_boundaries(&grid, 0, 0);
+        assert_eq!(s, 0);
+        assert_eq!(e, 1); // wide char + its spacer
+    }
+
+    #[test]
+    fn extract_text_with_zerowidth() {
+        let mut grid = Grid::new(10, 1);
+        grid.put_char('e');
+        // Attach combining acute accent
+        grid.row_mut(0)[0].push_zerowidth('\u{0301}');
+        grid.put_char('x');
+
+        let sel = Selection {
+            mode: SelectionMode::Char,
+            anchor: SelectionPoint { row: 0, col: 0, side: Side::Left },
+            pivot: SelectionPoint { row: 0, col: 0, side: Side::Left },
+            end: SelectionPoint { row: 0, col: 1, side: Side::Right },
+        };
+        let text = extract_text(&grid, &sel);
+        assert_eq!(text, "e\u{0301}x");
     }
 
     #[test]

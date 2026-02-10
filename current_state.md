@@ -5,10 +5,15 @@
 ori_term (binary name: `oriterm`) is a terminal emulator written in Rust with
 Chrome-style tab tear-off and a custom frameless window chrome. It opens a native
 window using winit (with OS decorations disabled), renders a terminal character grid
-with a custom title bar using softbuffer (CPU pixel buffer) and fontdue (CPU glyph
-rasterization), and runs shell processes (`cmd.exe`) through ConPTY via the
-`portable-pty` crate. It is cross-compiled from WSL targeting `x86_64-pc-windows-gnu`
-and runs on Windows.
+with a custom title bar using wgpu (GPU-accelerated instanced rendering with glyph
+texture atlas) and fontdue (CPU glyph rasterization), and runs shell processes
+(configurable, default `cmd.exe`) through ConPTY via the `portable-pty` crate.
+It is cross-compiled from WSL targeting `x86_64-pc-windows-gnu` and runs on Windows.
+
+The window supports compositor-backed transparency with DX12 DirectComposition
+swapchains (`DxgiFromVisual`), premultiplied alpha blending, and Windows Acrylic
+blur via `window-vibrancy`. Background opacity and tab bar opacity are independently
+configurable.
 
 The core features under development are Chrome-style tab management (multiple tabs per
 window, tab reordering by drag, tearing a tab off into its own floating window) and a
@@ -28,7 +33,7 @@ src/
                                frameless window creation, resize handling, keyboard/mouse input,
                                scrollback scroll shortcuts, drag state machine, font zoom,
                                mouse selection, clipboard integration
-  window.rs                    TermWindow (winit Window + softbuffer Surface + tab list + is_maximized)
+  window.rs                    TermWindow (winit Window + wgpu Surface + tab list + is_maximized)
   tab.rs                       Tab (dual Grid primary+alt, PTY writer+master, VTE Processor,
                                Palette, TermMode, title, CharsetState, cursor shape,
                                selection, CWD, prompt state); TabId; TermEvent; resize
@@ -57,11 +62,30 @@ src/
   term_mode.rs                 TermMode bitflags (16 terminal modes)
   palette.rs                   270-entry color palette, resolve fg/bg with attributes,
                                bold-bright, dim, inverse, hidden, set/reset color
+  config.rs                    Config struct (TOML), FontConfig, TerminalConfig, ColorConfig,
+                               WindowConfig (opacity, tab_bar_opacity, blur), BehaviorConfig,
+                               platform-specific config_dir/config_path, load/save with serde,
+                               sensible defaults, parse_cursor_style() helper
+  key_encoding.rs              Key encoding: encode_key() dispatches to Kitty protocol
+                               (CSI u) or legacy xterm encoding. Handles all named keys,
+                               modifiers, APP_CURSOR/APP_KEYPAD modes, numpad, F1-F12.
+                               Pure functions, fully unit-tested (40+ tests).
   render.rs                    FontSet (fontdue) with Regular/Bold/Italic/BoldItalic variants
-                               and fallback font chain, render_grid() with per-cell color
-                               resolution, underline decorations (single/double/dotted/dashed/
-                               undercurl), strikethrough, cursor rendering, alpha blending,
-                               synthetic bold, render_text() for tab bar labels
+                               and fallback font chain, render_text() for tab bar labels,
+                               render_glyph(), blend_pixel(), FontStyle enum
+  gpu/
+    mod.rs                     GPU module re-exports (atlas, pipeline, renderer)
+    atlas.rs                   GlyphAtlas: 1024x1024 R8Unorm texture, row-based shelf packing,
+                               lazy glyph rasterization via FontSet, ASCII pre-cache,
+                               HashMap<(char, FontStyle), AtlasEntry> with UV coords
+    pipeline.rs                Two WGSL shader pipelines: background (premultiplied alpha
+                               quads) and foreground (alpha-blended glyph textures). 80-byte
+                               instance stride. Triangle strip topology, instance-driven.
+    renderer.rs                GpuState (wgpu init with DX12 DComp for transparency),
+                               GpuRenderer (per-window), draw_frame(): tab bar (configurable
+                               opacity), grid cells (configurable opacity), cursor,
+                               decorations, window border, settings dropdown overlay.
+                               InstanceWriter with per-element opacity. ~1680 lines.
 
   (Library scaffolding modules -- present but not used by the terminal emulator yet)
   color/                       Color types, profile detection (NO_COLOR, CLICOLOR, COLORTERM)
@@ -95,14 +119,17 @@ src/
    update the palette, toggle terminal modes, and set tab title. Then the window
    containing the active tab is asked to redraw.
 
-4. **Rendering** (`render_window`): Resizes the softbuffer surface, fills with background
-   color, calls `tab_bar::render_tab_bar()` for the custom title bar with tabs and
-   window controls, then `render::render_grid()` for the active tab's grid (using
-   `visible_row()` for scrollback-aware rendering, with per-cell color resolution via
-   `Palette::resolve_fg/resolve_bg` applying bold-bright, dim, inverse, hidden, then
-   rendering underline decorations, strikethrough, and glyphs with style-appropriate
-   font variants and fallback chain). Finally draws a 1px window border (skipped when
-   maximized) and calls `buffer.present()`.
+4. **Rendering** (`render_window`): `GpuRenderer::draw_frame()` builds instance
+   buffers for the full frame. Background pass renders premultiplied alpha quads
+   (cell backgrounds, tab bar, decorations) with per-element opacity control.
+   Foreground pass renders alpha-blended glyph textures from the atlas. Overlay
+   pass renders the settings dropdown (if open). Tab bar rendered at configurable
+   `tab_bar_opacity` (palette-derived colors). Grid cells rendered at configurable
+   `opacity` with per-cell color resolution via `Palette::resolve_fg/resolve_bg`
+   (bold-bright, dim, inverse, hidden), underline decorations (5 styles),
+   strikethrough, cursor shapes, selection highlight, and combining marks. Window
+   border (1px, opaque, skipped when maximized). Clear color premultiplied by
+   opacity for compositor transparency. Frame presented via wgpu surface.
 
 5. **Input**: Keyboard events are intercepted for built-in shortcuts (Ctrl+T new tab,
    Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, Escape cancel drag,
@@ -167,8 +194,8 @@ Terminal style):
 - **Window resizing**: 8px resize borders on all edges and corners with appropriate cursor
   icons and native OS resize via `drag_resize_window()`.
 
-- **No white flash on startup**: Surface is pre-filled with background color immediately
-  after window creation.
+- **No white flash on startup**: GPU surface is pre-filled with background color
+  immediately after window creation.
 
 - **Multi-tab support**: Ctrl+T creates new tabs, Ctrl+W closes them, Ctrl+Tab /
   Ctrl+Shift+Tab cycles between them. Each tab has its own Grid, PTY, and VTE parser.
@@ -266,14 +293,18 @@ Terminal style):
   writes to clipboard. `clipboard_load` reads clipboard, encodes to base64, and sends
   the response back to the PTY.
 
-- **Cursor style tracking**: DECSCUSR (CSI Ps SP q) sets cursor shape (Block/Underline/
-  Beam). The `cursor_shape` field is stored per-tab. (Rendering currently always draws
-  a block cursor regardless of the tracked shape.)
+- **Cursor style rendering**: DECSCUSR (CSI Ps SP q) sets cursor shape (Block/Underline/
+  Beam). The `cursor_shape` field is stored per-tab. GPU renderer draws all three
+  shapes: Block (filled rectangle with text inversion), Bar (2px vertical at left),
+  Underline (2px horizontal at bottom).
 
-- **Keyboard input forwarding**: Enter, Backspace, Tab, Escape, arrow keys (with
-  APP_CURSOR mode support), Home, End, Delete, Insert, PageUp/Down, F1-F12, and
-  printable text are all forwarded to the PTY with correct escape sequences. The
-  shell is interactive -- cmd.exe works.
+- **Keyboard input forwarding**: Comprehensive key encoding via `key_encoding.rs`.
+  Legacy xterm-style encoding for all standard keys (Enter, Backspace, Tab, Escape,
+  arrows with APP_CURSOR, Home/End, Delete, Insert, PageUp/Down, F1-F12, printable
+  text). Kitty keyboard protocol (CSI u) with progressive enhancement flags, event
+  type reporting (press/repeat/release), and mode stack management. Application
+  keypad mode (numpad via SS3 sequences). All modifier combinations (Ctrl+letter
+  C0 codes, Alt ESC prefix, Shift+Tab backtab). 40+ unit tests.
 
 - **Tab reordering**: While dragging within the tab bar (before tear-off), tabs can
   be reordered by horizontal cursor position.
@@ -287,6 +318,51 @@ Terminal style):
 - **Panic/error logging**: Panics are caught and written to `oriterm_panic.log`.
   Runtime trace goes to `oriterm_debug.log`. Top-level errors go to
   `oriterm_error.log`.
+
+- **Mouse reporting to applications**: Full mouse reporting for vim, tmux, htop, etc.
+  Normal tracking (1000), button-event tracking (1002), any-event tracking (1003).
+  SGR encoding (1006), UTF-8 encoding (1005), and default encoding. Modifier bits
+  (Shift+4, Alt+8, Ctrl+16). Wheel events as button 64/65. Alternate scroll mode
+  converts wheel to arrow keys in alt screen. Shift+click bypasses reporting for
+  selection. Motion dedup with `last_mouse_cell`.
+
+- **Focus events**: DECSET 1004 sends `ESC[I` on focus gain and `ESC[O` on focus
+  loss to the PTY. Settings window excluded from focus reporting.
+
+- **Synchronized output**: Mode 2026 handled internally by vte 0.15 Processor.
+  Buffers handler calls between BSU/ESU and dispatches as one batch.
+
+- **GPU-accelerated rendering**: Full wgpu rendering pipeline. Two-pass architecture:
+  background pipeline (premultiplied alpha quads) then foreground pipeline
+  (alpha-blended glyph textures). Instance-driven rendering with 80-byte stride per
+  quad. 1024x1024 R8Unorm glyph texture atlas with row-based shelf packing and lazy
+  rasterization. `GpuState` (singleton) + `GpuRenderer` (per-window). Settings
+  dropdown overlay with theme selector rendered as third pass.
+
+- **Window transparency and blur**: DX12 DirectComposition swapchain
+  (`Dx12SwapchainKind::DxgiFromVisual`) provides native `PreMultiplied` alpha mode
+  for compositor transparency on Windows. `window-vibrancy` crate applies Acrylic
+  blur behind the window. Per-element opacity: tab bar and grid content have
+  independently configurable opacity (`tab_bar_opacity` and `opacity`). When opacity
+  is < 1.0, background colors are premultiplied by the opacity value so the
+  compositor sees transparent pixels and shows the blur effect through them. Fully
+  opaque (1.0) skips the DComp path entirely for maximum performance.
+
+- **Configuration (TOML)**: Config loaded from `%APPDATA%\ori_term\config.toml`
+  (Windows) or `$XDG_CONFIG_HOME/ori_term/config.toml` (Linux). Sections: font
+  (size, family), terminal (shell, scrollback, cursor_style), colors (scheme),
+  window (columns, rows, opacity, tab_bar_opacity, blur), behavior (copy_on_select,
+  bold_is_bright). All fields optional with sensible defaults via `#[serde(default)]`.
+  Load/save with error fallback to defaults.
+
+- **Color scheme switching**: 7 built-in color schemes (Catppuccin Mocha/Latte,
+  One Dark, Solarized Dark/Light, Gruvbox Dark, Tokyo Night). Runtime switching via
+  settings dropdown menu. Selected scheme persisted to config file. Tab bar colors
+  derived dynamically from palette background.
+
+- **Tab title truncation (Unicode-aware)**: Uses `UnicodeWidthChar::width()` for
+  proper display width calculation. Handles CJK (width 2) and uses Unicode ellipsis
+  character (U+2026).
 
 ## What's Not Working Yet / Known Issues
 
@@ -303,39 +379,24 @@ Terminal style):
   which shifts as the window moves. A more robust approach would use absolute screen
   coordinates or platform-specific drag APIs.
 
-- **Hardcoded shell**: Always spawns `cmd.exe`. No configuration for PowerShell,
-  WSL, or other shells.
-
-- **No mouse reporting to applications**: Terminal modes for mouse reporting
-  (1000/1002/1003/1006) are tracked in TermMode bitflags but mouse events are
-  not forwarded to the PTY. vim/htop/tmux mouse interaction won't work.
-
-- **No color scheme configuration**: Only Catppuccin Mocha is available. No
-  built-in scheme switching or custom color scheme loading.
-
-- **Tab title truncation uses byte length**: In `tab_bar.rs`, `title.len()` is
-  compared against a character count, which is incorrect for multi-byte or wide
-  characters.
-
-- **Cursor rendering ignores cursor shape**: DECSCUSR cursor shape changes are
-  tracked per-tab (`cursor_shape` field) but the renderer always draws a filled
-  block cursor. Bar and underline cursor shapes are not rendered.
-
-- **No focus events**: DECSET 1004 tracked but focus in/out events not sent to
-  PTY when window gains/loses focus.
-
-- **No synchronized output**: DCS synchronized output protocol not implemented.
-  Rapid terminal output may cause partial frame rendering.
-
-- **CPU rendering only**: softbuffer pixel-by-pixel rendering with no damage
-  tracking. Full redraw every frame. No GPU acceleration.
-
 - **Vec-based scrollback**: Scrollback uses `Vec<Row>` with O(n) removal at front.
   Should be upgraded to ring buffer for O(1) rotation (performance optimization).
 
 - **Clipboard stubs on non-Windows**: The `clipboard.rs` module uses `clipboard-win`
   on Windows but provides no-op stubs on other platforms. Needs arboard or similar
   for cross-platform clipboard support.
+
+- **No HiDPI / display scaling**: GPU renderer does not account for DPI scaling.
+
+- **No damage tracking**: Full instance buffer rebuild every frame. Works correctly
+  but is an optimization opportunity.
+
+- **No cursor blinking**: Cursor shape changes work but blinking is not implemented.
+
+- **No search**: No Ctrl+F search through scrollback history.
+
+- **Transparency only on Windows**: DX12 DirectComposition path is Windows-only.
+  macOS vibrancy and Linux compositor blur are coded but untested.
 
 ## Key Data Structures
 
@@ -356,10 +417,10 @@ that enables tab tear-off: moving a tab between windows is just updating two
 
 ### `TermWindow` (window.rs)
 
-Per-window state: an `Arc<Window>` (winit), a softbuffer `Context` and `Surface`
-for pixel rendering, a `Vec<TabId>` of tabs in display order, the `active_tab`
-index, and `is_maximized` for tracking maximize state. Methods: `add_tab`,
-`remove_tab`, `active_tab_id`, `tab_index`.
+Per-window state: an `Arc<Window>` (winit), a wgpu `Surface` and
+`SurfaceConfiguration` for GPU rendering, a `Vec<TabId>` of tabs in display order,
+the `active_tab` index, and `is_maximized` for tracking maximize state. Methods:
+`add_tab`, `remove_tab`, `active_tab_id`, `tab_index`.
 
 ### `Tab` / `TabId` (tab.rs)
 
@@ -542,19 +603,16 @@ winit EventLoop<TermEvent>
   +-- window_event(window_id, event)
         |
         +-- RedrawRequested           render_window():
-        |                               1. Resize softbuffer surface
-        |                               2. Fill background
-        |                               3. render_tab_bar() with hover state + is_maximized
-        |                               4. render_grid() for active tab:
-        |                                  - Pre-cache visible glyphs with font style
-        |                                  - Per-cell: resolve colors, selection highlight
-        |                                  - Draw cell backgrounds
-        |                                  - Draw cursor block
-        |                                  - Draw underline decorations (5 styles)
-        |                                  - Draw strikethrough
-        |                                  - Render glyphs with style + synthetic bold
-        |                               5. render_window_border() (1px, skipped when maximized)
-        |                               6. buffer.present()
+        |                               1. Build FrameParams (opacity, tab_bar_opacity)
+        |                               2. GpuRenderer::draw_frame():
+        |                                  a. Tab bar (tab_bar_opacity)
+        |                                  b. Grid cells (opacity, per-cell colors,
+        |                                     selection, cursor, decorations, glyphs)
+        |                                  c. Search bar overlay
+        |                                  d. Window border (opaque, skipped when maximized)
+        |                                  e. Dropdown overlay (if open)
+        |                               3. Clear color premultiplied by opacity
+        |                               4. frame.present()
         |
         +-- KeyboardInput             Intercept shortcuts:
         |                               Ctrl+=       -> zoom in (change_font_size +1)
@@ -663,15 +721,19 @@ The app writes log files next to the executable:
 | Crate | Version | Purpose |
 |---|---|---|
 | `winit` | 0.30 | Window creation, event loop, input events |
-| `softbuffer` | 0.4 | CPU pixel buffer presented to the OS window |
+| `wgpu` | 28 | GPU rendering (DX12 DComp for transparency, Vulkan/Metal fallback) |
+| `window-vibrancy` | 0.7 | Compositor blur (Windows Acrylic, macOS Vibrancy) |
+| `windows-sys` | 0.60 | Win32 API bindings (DWM, GDI, WM) |
 | `fontdue` | 0.9.3 | Font parsing and glyph rasterization |
 | `portable-pty` | 0.9.0 | Cross-platform PTY (ConPTY on Windows) |
 | `vte` | 0.15 (ansi feature) | ANSI/VT escape sequence parser with high-level Handler trait |
 | `bitflags` | 2 | CellFlags and TermMode bitflags |
 | `log` | 0.4 | Logging macros |
 | `base64` | 0.22 | OSC 52 clipboard payload encoding/decoding |
+| `toml` | 0.8 | TOML config file parsing/serialization |
+| `serde` | 1 (derive) | Config struct serialization/deserialization |
 | `clipboard-win` | 5.4 | Windows clipboard access (cfg(windows) only) |
-| `unicode-width` | 0.2 | Wide character width detection in term_handler |
+| `unicode-width` | 0.2 | Wide character width detection in term_handler and tab_bar |
 | `crossterm` | 0.28 | Library scaffolding modules (not used by emulator yet) |
 | `unicode-segmentation` | 1.12 | Library scaffolding (not used by emulator yet) |
 | `strip-ansi-escapes` | 0.2 | Library scaffolding (not used by emulator yet) |

@@ -1,4 +1,5 @@
 use bitflags::bitflags;
+use vte::ansi::KeyboardModes;
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,6 +20,46 @@ bitflags! {
         const ALTERNATE_SCROLL    = 1 << 13;
         const LINE_FEED_NEW_LINE  = 1 << 14;
         const UTF8_MOUSE          = 1 << 15;
+
+        // Kitty keyboard protocol flags (bits 16-20).
+        const DISAMBIGUATE_ESC_CODES  = 1 << 16;
+        const REPORT_EVENT_TYPES      = 1 << 17;
+        const REPORT_ALTERNATE_KEYS   = 1 << 18;
+        const REPORT_ALL_KEYS_AS_ESC  = 1 << 19;
+        const REPORT_ASSOCIATED_TEXT   = 1 << 20;
+
+        const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
+            | Self::REPORT_EVENT_TYPES.bits()
+            | Self::REPORT_ALTERNATE_KEYS.bits()
+            | Self::REPORT_ALL_KEYS_AS_ESC.bits()
+            | Self::REPORT_ASSOCIATED_TEXT.bits();
+    }
+}
+
+impl TermMode {
+    /// Any mouse reporting mode is active.
+    pub const ANY_MOUSE: Self = Self::MOUSE_REPORT.union(Self::MOUSE_MOTION).union(Self::MOUSE_ALL);
+}
+
+impl From<KeyboardModes> for TermMode {
+    fn from(km: KeyboardModes) -> Self {
+        let mut mode = Self::empty();
+        if km.contains(KeyboardModes::DISAMBIGUATE_ESC_CODES) {
+            mode |= Self::DISAMBIGUATE_ESC_CODES;
+        }
+        if km.contains(KeyboardModes::REPORT_EVENT_TYPES) {
+            mode |= Self::REPORT_EVENT_TYPES;
+        }
+        if km.contains(KeyboardModes::REPORT_ALTERNATE_KEYS) {
+            mode |= Self::REPORT_ALTERNATE_KEYS;
+        }
+        if km.contains(KeyboardModes::REPORT_ALL_KEYS_AS_ESC) {
+            mode |= Self::REPORT_ALL_KEYS_AS_ESC;
+        }
+        if km.contains(KeyboardModes::REPORT_ASSOCIATED_TEXT) {
+            mode |= Self::REPORT_ASSOCIATED_TEXT;
+        }
+        mode
     }
 }
 

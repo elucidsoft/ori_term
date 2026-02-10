@@ -26,6 +26,10 @@ pub struct Grid {
 
 impl Grid {
     pub fn new(cols: usize, lines: usize) -> Self {
+        Self::with_max_scrollback(cols, lines, 10_000)
+    }
+
+    pub fn with_max_scrollback(cols: usize, lines: usize, max_scrollback: usize) -> Self {
         let rows = (0..lines).map(|_| Row::new(cols)).collect();
         let tab_stops = Self::build_tab_stops(cols);
 
@@ -39,7 +43,7 @@ impl Grid {
             scroll_bottom: lines.saturating_sub(1),
             tab_stops,
             scrollback: Vec::new(),
-            max_scrollback: 10_000,
+            max_scrollback,
             display_offset: 0,
         }
     }
@@ -1131,5 +1135,59 @@ mod tests {
         // Total 3 rows for 2 visible lines -> 1 goes to scrollback
         assert_eq!(g.scrollback.len(), 1);
         assert_eq!(g.scrollback[0][0].c, 'A');
+    }
+
+    #[test]
+    fn wide_char_occupies_two_cells() {
+        let mut g = Grid::new(10, 1);
+        g.put_wide_char('漢');
+        assert_eq!(g.row(0)[0].c, '漢');
+        assert!(g.row(0)[0].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(g.row(0)[1].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+        assert_eq!(g.cursor.col, 2);
+    }
+
+    #[test]
+    fn wide_char_at_end_of_line_wraps() {
+        let mut g = Grid::new(5, 2);
+        g.cursor.col = 4; // Last column
+        g.put_wide_char('漢');
+        // Should place LEADING_WIDE_CHAR_SPACER at col 4 and wrap
+        assert!(g.row(0)[4].flags.contains(CellFlags::LEADING_WIDE_CHAR_SPACER));
+        assert_eq!(g.row(1)[0].c, '漢');
+        assert!(g.row(1)[0].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(g.row(1)[1].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+    }
+
+    #[test]
+    fn overwrite_wide_char_clears_spacer() {
+        let mut g = Grid::new(10, 1);
+        g.put_wide_char('漢');
+        g.cursor.col = 0;
+        g.put_char('a');
+        assert_eq!(g.row(0)[0].c, 'a');
+        assert!(!g.row(0)[0].flags.contains(CellFlags::WIDE_CHAR));
+        assert!(!g.row(0)[1].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+    }
+
+    #[test]
+    fn combining_mark_stored_in_cell() {
+        let mut g = Grid::new(10, 1);
+        g.put_char('e');
+        // Attach combining acute accent to previous cell
+        let col = g.cursor.col - 1;
+        g.row_mut(0)[col].push_zerowidth('\u{0301}');
+        assert_eq!(g.row(0)[0].c, 'e');
+        assert_eq!(g.row(0)[0].zerowidth(), &['\u{0301}']);
+    }
+
+    #[test]
+    fn zerowidth_on_wide_char() {
+        let mut g = Grid::new(10, 1);
+        g.put_wide_char('漢');
+        // Attach zerowidth to the base cell (not the spacer)
+        g.row_mut(0)[0].push_zerowidth('\u{0301}');
+        assert_eq!(g.row(0)[0].zerowidth(), &['\u{0301}']);
+        assert!(g.row(0)[1].zerowidth().is_empty());
     }
 }

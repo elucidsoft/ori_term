@@ -200,10 +200,19 @@ pub const BUILTIN_SCHEMES: &[&ColorScheme] = &[
     &TOKYO_NIGHT,
 ];
 
+/// Look up a built-in color scheme by name (case-insensitive).
+pub fn find_scheme(name: &str) -> Option<&'static ColorScheme> {
+    BUILTIN_SCHEMES
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .copied()
+}
+
 #[derive(Debug, Clone)]
 pub struct Palette {
     colors: [Rgb; NUM_COLORS],
     defaults: [Rgb; NUM_COLORS],
+    pub bold_is_bright: bool,
 }
 
 impl Palette {
@@ -255,10 +264,11 @@ impl Palette {
         colors[NamedColor::DimForeground as usize] = dim_color(scheme.fg);
 
         let defaults = colors;
-        Self { colors, defaults }
+        Self { colors, defaults, bold_is_bright: true }
     }
 
     /// Replace the palette with a new color scheme. Resets all colors.
+    /// Preserves the `bold_is_bright` setting.
     pub fn set_scheme(&mut self, scheme: &ColorScheme) {
         let fresh = Self::from_scheme(scheme);
         self.colors = fresh.colors;
@@ -273,7 +283,7 @@ impl Palette {
                 let idx = name as usize;
                 if idx < NUM_COLORS {
                     // Bold-as-bright: for standard colors 0-7, promote to 8-15
-                    if flags.contains(CellFlags::BOLD) && idx < 8 {
+                    if self.bold_is_bright && flags.contains(CellFlags::BOLD) && idx < 8 {
                         self.colors[idx + 8]
                     } else {
                         self.colors[idx]
@@ -382,6 +392,17 @@ mod tests {
         let bold = p.resolve(Color::Named(NamedColor::Black), CellFlags::BOLD);
         assert_eq!(normal, CATPPUCCIN_MOCHA.ansi[0]); // Black
         assert_eq!(bold, CATPPUCCIN_MOCHA.ansi[8]); // BrightBlack
+    }
+
+    #[test]
+    fn resolve_bold_bright_disabled() {
+        let mut p = Palette::new();
+        p.bold_is_bright = false;
+        let normal = p.resolve(Color::Named(NamedColor::Black), CellFlags::empty());
+        let bold = p.resolve(Color::Named(NamedColor::Black), CellFlags::BOLD);
+        // When disabled, bold should NOT promote to bright
+        assert_eq!(normal, CATPPUCCIN_MOCHA.ansi[0]);
+        assert_eq!(bold, CATPPUCCIN_MOCHA.ansi[0]);
     }
 
     #[test]

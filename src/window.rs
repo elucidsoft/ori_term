@@ -21,11 +21,11 @@ impl TermWindow {
         window: Arc<Window>,
         gpu: &GpuState,
     ) -> Option<Self> {
-        let (surface, surface_config) = gpu.create_surface(&window)?;
+        let (surface, config) = gpu.create_surface(&window)?;
         Some(Self {
             window,
             surface,
-            surface_config,
+            surface_config: config,
             tabs: Vec::new(),
             active_tab: 0,
             tab_bar_height: TAB_BAR_HEIGHT,
@@ -34,11 +34,12 @@ impl TermWindow {
     }
 
     pub fn resize_surface(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.surface_config.width = width;
-            self.surface_config.height = height;
-            self.surface.configure(device, &self.surface_config);
+        if width == 0 || height == 0 {
+            return;
         }
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(device, &self.surface_config);
     }
 
     pub fn active_tab_id(&self) -> Option<TabId> {

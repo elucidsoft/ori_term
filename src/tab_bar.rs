@@ -1,3 +1,5 @@
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use crate::render::{FontSet, render_text};
 use crate::tab::TabId;
 
@@ -214,12 +216,10 @@ pub fn render_tab_bar(
             }
         }
 
-        // Tab title — truncate to fit
-        let max_text_chars = (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / glyphs.cell_width;
-        let display_title: String = if title.len() > max_text_chars {
-            let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
-            t.push('\u{2026}'); // ellipsis
-            t
+        // Tab title — truncate to fit (width-aware for CJK/emoji)
+        let max_text_cells = (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / glyphs.cell_width;
+        let display_title: String = if UnicodeWidthStr::width(title.as_str()) > max_text_cells {
+            truncate_to_width(title, max_text_cells)
         } else {
             title.clone()
         };
@@ -450,5 +450,63 @@ fn draw_x(buffer: &mut [u32], buf_w: usize, x: usize, y: usize, size: usize, col
         set_pixel(buffer, buf_w, x + i, y + i, color);
         // Anti-diagonal (/)
         set_pixel(buffer, buf_w, x + size - 1 - i, y + i, color);
+    }
+}
+
+/// Truncate a string to fit within `max_width` display cells, appending an
+/// ellipsis if truncated. Correctly handles CJK (width 2) and won't split a
+/// wide character at the boundary.
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let mut width = 0;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + cw + 1 > max_width {
+            result.push('\u{2026}'); // …
+            return result;
+        }
+        width += cw;
+        result.push(c);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_ascii_short() {
+        // Fits within limit — no truncation
+        assert_eq!(truncate_to_width("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_long() {
+        // "abcdefghij" is 10 chars, limit 7 → fit 6 chars + ellipsis
+        assert_eq!(truncate_to_width("abcdefghij", 7), "abcdef\u{2026}");
+    }
+
+    #[test]
+    fn truncate_cjk() {
+        // 5 CJK chars, display width 10, limit 7 → 3 CJK (width 6) + ellipsis (1) = 7
+        assert_eq!(truncate_to_width("漢字テスト", 7), "漢字テ\u{2026}");
+    }
+
+    #[test]
+    fn truncate_cjk_boundary() {
+        // Limit 6: can fit 2 CJK (width 4) + ellipsis (1) = 5, but 3 CJK (6) + ellipsis (1) = 7 > 6
+        assert_eq!(truncate_to_width("漢字テスト", 6), "漢字\u{2026}");
+    }
+
+    #[test]
+    fn truncate_mixed() {
+        // "aあb" = widths 1+2+1 = 4, limit 4 → fits without truncation
+        assert_eq!(truncate_to_width("aあb", 10), "aあb");
+    }
+
+    #[test]
+    fn truncate_empty() {
+        assert_eq!(truncate_to_width("", 5), "");
     }
 }

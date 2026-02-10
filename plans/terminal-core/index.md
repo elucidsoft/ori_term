@@ -46,7 +46,7 @@ line feed, carriage return, newline mode
 ---
 
 ### Section 03: Scrollback Buffer
-**File:** `section-03-scrollback.md` | **Status:** In Progress
+**File:** `section-03-scrollback.md` | **Status:** Complete (ring buffer optimization deferred)
 
 ```
 scrollback, history, scroll, ring buffer, rotation
@@ -60,7 +60,7 @@ mouse wheel, scroll event, scroll bar
 ---
 
 ### Section 04: Resize Handling
-**File:** `section-04-resize.md` | **Status:** In Progress
+**File:** `section-04-resize.md` | **Status:** Complete
 
 ```
 resize, reflow, column change, line change
@@ -73,7 +73,7 @@ wide character wrap, line wrap, WRAPLINE flag
 ---
 
 ### Section 05: Color System
-**File:** `section-05-color.md` | **Status:** In Progress
+**File:** `section-05-color.md` | **Status:** Complete
 
 ```
 color, palette, ANSI, 256 color, truecolor, RGB
@@ -88,7 +88,7 @@ color downgrade, nearest color, convert
 ---
 
 ### Section 06: Font System
-**File:** `section-06-font-system.md` | **Status:** Not Started
+**File:** `section-06-font-system.md` | **Status:** Complete (06.9 Color Emoji deferred)
 
 ```
 font, glyph, shaping, HarfBuzz, FreeType, fontdue
@@ -104,30 +104,37 @@ rasterization, bitmap, subpixel, antialiasing
 ---
 
 ### Section 07: GPU Rendering
-**File:** `section-07-gpu-rendering.md` | **Status:** Not Started
+**File:** `section-07-gpu-rendering.md` | **Status:** Complete (07.4 Damage Tracking deferred)
 
 ```
-GPU, wgpu, Vulkan, Metal, DirectX, OpenGL
+GPU, wgpu, Vulkan, Metal, DirectX, OpenGL, DX12
 texture atlas, glyph atlas, atlas packing
 batch rendering, draw call, instanced drawing
-shader, vertex, fragment, pipeline
-frame buffer, swap chain, vsync
-softbuffer, CPU rendering, migration
+shader, vertex, fragment, pipeline, WGSL
+frame buffer, swap chain, vsync, surface
+instance buffer, instance writer, 80-byte stride
+background pipeline, foreground pipeline, premultiplied alpha
+transparency, opacity, tab_bar_opacity, blur, acrylic, vibrancy
+DirectComposition, DxgiFromVisual, compositor, window-vibrancy
+settings dropdown, theme selector, overlay
 ```
 
 ---
 
 ### Section 08: Unicode & Graphemes
-**File:** `section-08-unicode-graphemes.md` | **Status:** Not Started
+**File:** `section-08-unicode-graphemes.md` | **Status:** Complete
 
 ```
 unicode, grapheme cluster, grapheme break
 emoji, ZWJ, zero-width joiner, variation selector
 CJK, East Asian Width, fullwidth, halfwidth
-combining mark, diacritical, accent
+combining mark, diacritical, accent, combining
 unicode width, display width, wcwidth
 UAX #11, UAX #29, Unicode 16
 supplementary plane, surrogate pair
+tab title truncation, byte length, width fix
+render combining marks, overlay, fontdue
+grapheme buffer, input buffering, flush
 ```
 
 ---
@@ -148,7 +155,7 @@ selection rotation, scroll during select
 ---
 
 ### Section 10: Keyboard Protocol
-**File:** `section-10-keyboard.md` | **Status:** Not Started
+**File:** `section-10-keyboard.md` | **Status:** Complete (10.4 IME deferred)
 
 ```
 keyboard, key event, key binding, shortcut
@@ -163,7 +170,7 @@ IME, input method, compose
 ---
 
 ### Section 11: Terminal Modes & Advanced Features
-**File:** `section-11-modes-features.md` | **Status:** Not Started
+**File:** `section-11-modes-features.md` | **Status:** Complete (11.5 Hyperlinks, 11.6 Images deferred)
 
 ```
 terminal mode, DECSET, DECRST, private mode
@@ -181,29 +188,32 @@ image, Kitty image protocol, sixel
 ---
 
 ### Section 12: Search
-**File:** `section-12-search.md` | **Status:** Not Started
+**File:** `section-12-search.md` | **Status:** Complete (wrapped line search deferred)
 
 ```
 search, find, regex, pattern match
 scrollback search, history search
-DFA, regex automata, lazy evaluation
+search bar, overlay, Ctrl+Shift+F
 highlight, match, next, previous
 incremental search, case insensitive
+match type, focused match, binary search
 ```
 
 ---
 
 ### Section 13: Configuration
-**File:** `section-13-configuration.md` | **Status:** Not Started
+**File:** `section-13-configuration.md` | **Status:** Complete (13.1-13.5 all complete)
 
 ```
 config, configuration, settings, preferences
-TOML, config file, hot reload
+TOML, config file, hot reload, file watcher, notify
 shell, default shell, PowerShell, bash, zsh, WSL
 font size, font family, font config
 color scheme, theme, custom colors
 key binding, shortcut, remap
-padding, margin, opacity, blur
+padding, margin, opacity, tab_bar_opacity, blur, transparency
+acrylic, vibrancy, compositor, DirectComposition, DxgiFromVisual
+config monitor, debounce, Ctrl+Shift+R, reload
 ```
 
 ---
@@ -241,16 +251,16 @@ throughput, latency, frame rate, FPS
 |----|-------|------|------|--------|
 | 01 | Cell & Grid Model | `section-01-cell-grid.md` | 1 | **Complete** |
 | 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **Complete** (OSC 52, OSC 7, OSC 133, XTVERSION, REP all done) |
-| 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **In Progress** (functional, ring buffer deferred) |
+| 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **Complete** (functional; ring buffer optimization deferred to Sec 15) |
 | 04 | Resize Handling | `section-04-resize.md` | 1 | **Complete** (resize + text reflow with wide char handling) |
-| 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 7 built-in color schemes) |
-| 06 | Font System | `section-06-font-system.md` | 2 | Not Started |
-| 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | Not Started |
-| 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | Not Started |
+| 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 7 built-in color schemes + runtime switching) |
+| 06 | Font System | `section-06-font-system.md` | 2 | **Complete** (06.9 Color Emoji deferred) |
+| 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | **Complete** (wgpu, glyph atlas, instanced rendering, full UI; 07.4 Damage Tracking deferred to Sec 15) |
+| 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | **Complete** (combining marks, ZWJ, variation selectors, selection) |
 | 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 | **Complete** (mouse selection, copy/paste, Windows Terminal style) |
-| 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 | Not Started |
-| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | Not Started |
-| 12 | Search | `section-12-search.md` | 3 | Not Started |
-| 13 | Configuration | `section-13-configuration.md` | 3 | Not Started |
+| 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 | **Complete** (key_encoding.rs, Kitty protocol, legacy xterm, APP_KEYPAD; 10.4 IME deferred) |
+| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | **Complete** (11.1–11.4 done; 11.5 Hyperlinks, 11.6 Images deferred) |
+| 12 | Search | `section-12-search.md` | 3 | **Complete** (scrollback search with match highlighting; wrapped line search deferred) |
+| 13 | Configuration | `section-13-configuration.md` | 3 | **Complete** (TOML config + load/save + all settings + hot reload + key bindings + opacity/blur) |
 | 14 | Cross-Platform | `section-14-cross-platform.md` | 3 | Not Started |
 | 15 | Performance | `section-15-performance.md` | 3 | Not Started |

@@ -9,7 +9,12 @@ pub mod widgets;
 
 // Terminal emulator modules
 pub mod clipboard;
+pub mod config;
+pub mod config_monitor;
 pub mod cell;
+pub mod key_encoding;
+pub mod keybindings;
+pub mod search;
 pub mod selection;
 pub mod grid;
 pub mod palette;
