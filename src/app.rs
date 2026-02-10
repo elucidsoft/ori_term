@@ -49,7 +49,7 @@ pub struct App {
 impl App {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::panic::set_hook(Box::new(|info| {
-            let _ = std::fs::write("ori_console_panic.log", format!("{info}"));
+            let _ = std::fs::write("oriterm_panic.log", format!("{info}"));
         }));
 
         let _ = std::fs::remove_file(crate::log_path());
@@ -68,7 +68,7 @@ impl App {
             .expect("event loop");
         let proxy = event_loop.create_proxy();
 
-        let mut app = App {
+        let mut app = Self {
             windows: HashMap::new(),
             tabs: HashMap::new(),
             glyphs,
@@ -111,7 +111,7 @@ impl App {
         let win_h = (self.glyphs.cell_height * DEFAULT_ROWS) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
 
         let attrs = Window::default_attributes()
-            .with_title("ori_console")
+            .with_title("oriterm")
             .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
             .with_decorations(false);
 
@@ -164,11 +164,10 @@ impl App {
     ) -> Option<TabId> {
         // Compute grid size from window
         let (cols, rows) = self.windows.get(&window_id)
-            .map(|tw| {
+            .map_or((DEFAULT_COLS, DEFAULT_ROWS), |tw| {
                 let size = tw.window.inner_size();
                 self.grid_dims_for_size(size.width, size.height)
-            })
-            .unwrap_or((DEFAULT_COLS, DEFAULT_ROWS));
+            });
 
         let tab_id = self.alloc_tab_id();
         let tab = match Tab::spawn(tab_id, cols, rows, self.proxy.clone()) {
@@ -244,9 +243,7 @@ impl App {
                 .map(|id| {
                     let title = self
                         .tabs
-                        .get(id)
-                        .map(|t| t.title.clone())
-                        .unwrap_or_else(|| "?".to_string());
+                        .get(id).map_or_else(|| "?".to_string(), |t| t.title.clone());
                     (*id, title)
                 })
                 .collect();
@@ -266,8 +263,7 @@ impl App {
 
         // Get palette info for background color
         let bg_u32 = self.tabs.values().next()
-            .map(|t| rgb_to_u32(t.palette.default_bg()))
-            .unwrap_or(0x001e1e2e);
+            .map_or(0x001e1e2e, |t| rgb_to_u32(t.palette.default_bg()));
 
         let tw = match self.windows.get_mut(&window_id) {
             Some(tw) => tw,
@@ -361,6 +357,10 @@ impl App {
 
     fn handle_resize(&mut self, window_id: WindowId, width: u32, height: u32) {
         let (cols, rows) = self.grid_dims_for_size(width, height);
+        log(&format!(
+            "handle_resize: window={width}x{height} cell={}x{} cols={cols} rows={rows}",
+            self.glyphs.cell_width, self.glyphs.cell_height
+        ));
 
         let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
@@ -448,8 +448,7 @@ impl App {
                             // Check for double-click to toggle maximize
                             let now = Instant::now();
                             let is_double = self.last_click_time
-                                .map(|t| now.duration_since(t).as_millis() < DOUBLE_CLICK_MS)
-                                .unwrap_or(false)
+                                .is_some_and(|t| now.duration_since(t).as_millis() < DOUBLE_CLICK_MS)
                                 && self.last_click_window == Some(window_id);
 
                             if is_double {
@@ -503,11 +502,8 @@ impl App {
                             }
                             // Window is already created — nothing else needed
                         }
-                        DragPhase::DraggingInBar => {
-                            // Tab reorder finalized — nothing extra needed
-                        }
-                        DragPhase::Pending => {
-                            // Was just a click — already selected on press
+                        DragPhase::DraggingInBar | DragPhase::Pending => {
+                            // Tab reorder finalized / was just a click — nothing extra needed
                         }
                     }
                 }
@@ -535,7 +531,7 @@ impl App {
         }
 
         let tab_id = self.windows.get(&window_id)
-            .and_then(|tw| tw.active_tab_id());
+            .and_then(TermWindow::active_tab_id);
         if let Some(tid) = tab_id {
             if let Some(tab) = self.tabs.get_mut(&tid) {
                 let grid = tab.grid_mut();
@@ -558,15 +554,13 @@ impl App {
         self.cursor_pos.insert(window_id, position);
 
         // Update cursor icon for resize borders
-        if let Some(dir) = self.resize_direction_at(window_id, position) {
-            let icon: CursorIcon = dir.into();
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.set_cursor(icon);
-            }
+        let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
+            dir.into()
         } else {
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.set_cursor(CursorIcon::Default);
-            }
+            CursorIcon::Default
+        };
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.set_cursor(cursor_icon);
         }
 
         // Update hover state for tab bar
@@ -633,7 +627,7 @@ impl App {
                                 let new_x = sx - grab_offset.x;
                                 let new_y = sy - grab_offset.y;
                                 tw.window.set_outer_position(
-                                    winit::dpi::PhysicalPosition::new(new_x as i32, new_y as i32),
+                                    PhysicalPosition::new(new_x as i32, new_y as i32),
                                 );
                             }
                         }
@@ -678,7 +672,7 @@ impl App {
                     let win_x = sx - grab_x as i32;
                     let win_y = sy - grab_y as i32;
                     tw.window
-                        .set_outer_position(winit::dpi::PhysicalPosition::new(win_x, win_y));
+                        .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
                 tw.window.request_redraw();
 
@@ -696,8 +690,7 @@ impl App {
         let source_empty = self
             .windows
             .get(&source_wid)
-            .map(|tw| tw.tabs.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|tw| tw.tabs.is_empty());
         if source_empty {
             self.windows.remove(&source_wid);
         }
@@ -725,8 +718,7 @@ impl App {
         let source_empty = self
             .windows
             .get(&source_wid)
-            .map(|tw| tw.tabs.is_empty())
-            .unwrap_or(false);
+            .is_some_and(|tw| tw.tabs.is_empty());
         if source_empty {
             self.windows.remove(&source_wid);
         }
@@ -876,7 +868,7 @@ impl ApplicationHandler<TermEvent> for App {
                     let tab_id = self
                         .windows
                         .get(&window_id)
-                        .and_then(|tw| tw.active_tab_id());
+                        .and_then(TermWindow::active_tab_id);
                     if let Some(tid) = tab_id {
                         self.close_tab(tid, event_loop);
                     }
@@ -901,7 +893,7 @@ impl ApplicationHandler<TermEvent> for App {
 
                 // Shift+PageUp/PageDown — page scroll through scrollback
                 if shift && matches!(event.logical_key, Key::Named(NamedKey::PageUp)) {
-                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             let grid = tab.grid_mut();
@@ -917,7 +909,7 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 if shift && matches!(event.logical_key, Key::Named(NamedKey::PageDown)) {
-                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             let grid = tab.grid_mut();
@@ -932,7 +924,7 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 if shift && matches!(event.logical_key, Key::Named(NamedKey::Home)) {
-                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             let grid = tab.grid_mut();
@@ -946,7 +938,7 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 if shift && matches!(event.logical_key, Key::Named(NamedKey::End)) {
-                    let tab_id = self.windows.get(&window_id).and_then(|tw| tw.active_tab_id());
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             tab.grid_mut().display_offset = 0;
@@ -962,7 +954,7 @@ impl ApplicationHandler<TermEvent> for App {
                 let tab_id = self
                     .windows
                     .get(&window_id)
-                    .and_then(|tw| tw.active_tab_id());
+                    .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     // Scroll to live on any PTY input
                     if let Some(tab) = self.tabs.get_mut(&tid) {

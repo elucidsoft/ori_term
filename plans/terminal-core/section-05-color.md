@@ -1,7 +1,7 @@
 ---
 section: "05"
 title: Color System
-status: in-progress
+status: complete
 goal: Full color rendering with 256-color palette, truecolor, and configurable color schemes
 sections:
   - id: "05.1"
@@ -12,15 +12,15 @@ sections:
     status: complete
   - id: "05.3"
     title: Color Schemes
-    status: not-started
+    status: complete
   - id: "05.4"
     title: Completion Checklist
-    status: in-progress
+    status: complete
 ---
 
 # Section 05: Color System
 
-**Status:** In Progress (palette + rendering complete, color schemes not yet)
+**Status:** Complete
 **Goal:** Render terminal output with full color support -- 16 named ANSI colors,
 256-color indexed palette, and 24-bit truecolor -- with configurable color schemes.
 
@@ -29,19 +29,21 @@ sections:
 - Alacritty's extended 269-entry color array with semantic colors
 - WezTerm's configurable color schemes
 
-**Implemented in:** `src/palette.rs` (236 lines), `src/render.rs` (palette-aware rendering)
+**Implemented in:** `src/palette.rs`, `src/render.rs` (palette-aware rendering)
 
 **What was built:**
-- 270-entry palette: 16 ANSI (Catppuccin Mocha), 216 color cube, 24 grayscale, semantic slots
+- 270-entry palette: 16 ANSI + 216 color cube + 24 grayscale + semantic slots
+- `ColorScheme` struct with ANSI colors, fg, bg, cursor
+- 7 built-in schemes: Catppuccin Mocha (default), Catppuccin Latte, One Dark, Solarized Dark, Solarized Light, Dracula, Tokyo Night
+- `Palette::from_scheme()` constructor, `set_scheme()` for live switching
+- `BUILTIN_SCHEMES` constant array for enumeration
 - `resolve()`, `resolve_fg()`, `resolve_bg()` with bold-as-bright, DIM, INVERSE, HIDDEN
 - `rgb_to_u32()` for softbuffer pixel buffer
 - `set_color()`/`reset_color()` for OSC 4/104
 - Per-cell color resolution in render_grid
 - Cell backgrounds rendered for non-default colors
 - Cursor uses palette cursor color with dark text for contrast
-- 7 unit tests
-
-**Remaining:** Color scheme system (05.3) — built-in schemes, scheme loading, live switching. Currently only Catppuccin Mocha hardcoded.
+- 9 unit tests (including scheme switching tests)
 
 ---
 
@@ -148,7 +150,7 @@ Support loading different color schemes.
 - [x] Cursor renders in configurable color
 - [x] OSC 4 can change palette entries (set_color implemented)
 - [x] OSC 104 resets palette (reset_color implemented)
-- [ ] Multiple color schemes built in — 05.3 not started
+- [x] Multiple color schemes built in (7 schemes: Catppuccin Mocha/Latte, One Dark, Solarized Dark/Light, Dracula, Tokyo Night)
 
 **Exit Criteria:** Terminal output renders with full color fidelity. 256-color and
 truecolor test scripts produce correct visual output.

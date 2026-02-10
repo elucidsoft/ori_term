@@ -21,10 +21,10 @@ sections:
     status: complete
   - id: "02.6"
     title: OSC Sequences
-    status: in-progress
+    status: mostly-complete
   - id: "02.7"
     title: Device Attributes & Reports
-    status: in-progress
+    status: mostly-complete
   - id: "02.8"
     title: Completion Checklist
     status: in-progress
@@ -32,7 +32,7 @@ sections:
 
 # Section 02: VTE Escape Sequences
 
-**Status:** In Progress (02.1–02.5 complete, OSC and DA partially done)
+**Status:** Mostly Complete (02.1–02.5 complete, 02.6/02.7 mostly complete)
 **Goal:** Make the VTE Performer comprehensive enough to run vim, htop, tmux, and
 other real applications -- not just cmd.exe with basic output.
 
@@ -40,20 +40,20 @@ other real applications -- not just cmd.exe with basic output.
 - Ghostty's comprehensive Terminal.zig with 100+ handled sequences
 - Alacritty's `term/mod.rs` Handler implementation (3300 lines)
 
-**Implemented in:** `src/term_handler.rs` (499 lines), `src/term_mode.rs` (29 lines)
+**Implemented in:** `src/term_handler.rs`, `src/term_mode.rs` (29 lines)
 
 **What was built:**
-- Replaced `vte_performer.rs` with `term_handler.rs` implementing `vte::ansi::Handler` trait (~40 methods)
+- Replaced `vte_performer.rs` with `term_handler.rs` implementing `vte::ansi::Handler` trait (~50 methods)
 - Uses vte's high-level `Processor` which parses SGR/CSI/OSC and calls semantic methods
 - **SGR (02.1):** All attributes (bold, dim, italic, underline variants, blink, inverse, hidden, strikeout), foreground/background/underline colors (named, indexed, RGB), reset codes
 - **Cursor/Erase (02.2):** CUP, CUU/D/F/B, CR, LF, NEL, RI, BS, HT, TBC, ED (all modes), EL (all modes), ECH, DCH, ICH, IL, DL
 - **Scroll Regions (02.3):** DECSTBM with proper boundary handling, SU/SD respecting region
 - **Alternate Screen (02.4):** DECSET/DECRST 1049 with save/restore cursor, dual grid (primary + alt)
 - **Terminal Modes (02.5):** 15 modes via TermMode bitflags (APP_CURSOR, INSERT, SHOW_CURSOR, ORIGIN, LINE_WRAP, MOUSE_REPORT/MOTION/ALL, SGR_MOUSE, UTF8_MOUSE, FOCUS_IN_OUT, BRACKETED_PASTE, ALTERNATE_SCROLL, ALT_SCREEN, LINE_FEED_NEW_LINE)
-- **OSC (02.6):** OSC 0/1/2 (set title), set_color/reset_color stubs, set_hyperlink stub
-- **DA (02.7):** DSR 6 (cursor position report), text_area_size_chars
+- **OSC (02.6):** OSC 0/1/2 (set title), OSC 4/104 (set/reset palette), OSC 10/11/12 (dynamic_color_sequence for fg/bg/cursor query), set_hyperlink stub, clipboard_store/clipboard_load stubs, push_title/pop_title (title stack)
+- **DA (02.7):** DA (identify_terminal VT220), DA2 (secondary), DSR 5 (device OK), DSR 6 (cursor position), text_area_size_chars, text_area_size_pixels, report_mode/report_private_mode (DECRQM), configure_charset/set_active_charset, substitute
 
-**Remaining:** OSC 7 (CWD), OSC 8 (hyperlinks fully wired), OSC 10/11/12 (set fg/bg/cursor color), OSC 52 (clipboard), OSC 133 (prompt markers), DA/DA2 identification responses, DSR 5, DECRQM, XTVERSION, REP (repeat char).
+**Remaining:** OSC 7 (CWD), OSC 8 (hyperlinks fully wired), OSC 52 (clipboard read/write), OSC 133 (prompt markers), XTVERSION, REP (repeat char).
 
 ---
 

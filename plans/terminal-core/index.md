@@ -240,10 +240,10 @@ throughput, latency, frame rate, FPS
 | ID | Title | File | Tier | Status |
 |----|-------|------|------|--------|
 | 01 | Cell & Grid Model | `section-01-cell-grid.md` | 1 | **Complete** |
-| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **In Progress** (02.1-02.5 done, OSC/DA partial) |
+| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **Mostly Complete** (02.1-02.7 done, OSC 7/52/133 remaining) |
 | 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **In Progress** (functional, ring buffer deferred) |
-| 04 | Resize Handling | `section-04-resize.md` | 1 | **In Progress** (resize works, text reflow not started) |
-| 05 | Color System | `section-05-color.md` | 1 | **In Progress** (palette + render done, schemes not started) |
+| 04 | Resize Handling | `section-04-resize.md` | 1 | **Complete** (resize + text reflow with wide char handling) |
+| 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 7 built-in color schemes) |
 | 06 | Font System | `section-06-font-system.md` | 2 | Not Started |
 | 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | Not Started |
 | 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | Not Started |

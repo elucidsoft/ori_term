@@ -11,10 +11,7 @@ pub fn detect_color_profile() -> ColorProfile {
     }
 
     // Rule 2: CLICOLOR_FORCE overrides TTY check
-    let force = match env::var("CLICOLOR_FORCE") {
-        Ok(v) if v != "0" => true,
-        _ => false,
-    };
+    let force = matches!(env::var("CLICOLOR_FORCE"), Ok(v) if v != "0");
 
     // CLICOLOR=0 disables color
     if let Ok(v) = env::var("CLICOLOR") {
@@ -71,7 +68,7 @@ pub fn detect_color_profile() -> ColorProfile {
     // assume TrueColor — crossterm enables VT processing automatically.
     #[cfg(windows)]
     {
-        return ColorProfile::TrueColor;
+        ColorProfile::TrueColor
     }
 
     // Fallback: if forced but no TERM, give basic ANSI; otherwise none

@@ -2,13 +2,15 @@ use std::io::Write;
 
 use unicode_width::UnicodeWidthChar;
 use vte::ansi::{
-    Attr, ClearMode, Color, CursorShape, CursorStyle, Handler, Hyperlink, LineClearMode,
-    Mode, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb, TabulationClearMode,
+    Attr, CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, Hyperlink,
+    LineClearMode, Mode, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
+    StandardCharset, TabulationClearMode,
 };
 
 use crate::cell::CellFlags;
 use crate::grid::Grid;
 use crate::palette::Palette;
+use crate::tab::CharsetState;
 use crate::term_mode::TermMode;
 
 pub struct TermHandler<'a> {
@@ -20,6 +22,8 @@ pub struct TermHandler<'a> {
     pty_writer: &'a mut Option<Box<dyn Write + Send>>,
     active_is_alt: &'a mut bool,
     cursor_shape: &'a mut CursorShape,
+    charset: &'a mut CharsetState,
+    title_stack: &'a mut Vec<String>,
 }
 
 impl<'a> TermHandler<'a> {
@@ -32,6 +36,8 @@ impl<'a> TermHandler<'a> {
         pty_writer: &'a mut Option<Box<dyn Write + Send>>,
         active_is_alt: &'a mut bool,
         cursor_shape: &'a mut CursorShape,
+        charset: &'a mut CharsetState,
+        title_stack: &'a mut Vec<String>,
     ) -> Self {
         Self {
             grid,
@@ -42,6 +48,8 @@ impl<'a> TermHandler<'a> {
             pty_writer,
             active_is_alt,
             cursor_shape,
+            charset,
+            title_stack,
         }
     }
 
@@ -77,6 +85,8 @@ impl<'a> TermHandler<'a> {
 
 impl Handler for TermHandler<'_> {
     fn input(&mut self, c: char) {
+        // Apply charset mapping (e.g., DEC Special Graphics for box-drawing)
+        let c = self.charset.map(c);
         let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
         match UnicodeWidthChar::width(c) {
             Some(2) => grid.put_wide_char(c),
@@ -354,6 +364,50 @@ impl Handler for TermHandler<'_> {
         }
     }
 
+    fn report_mode(&mut self, mode: Mode) {
+        // DECRPM response: CSI Ps; Pm $ y
+        // Pm: 1 = set, 2 = reset, 0 = not recognized
+        let (param, state) = match mode {
+            Mode::Named(NamedMode::Insert) => {
+                (4, if self.mode.contains(TermMode::INSERT) { 1 } else { 2 })
+            }
+            Mode::Named(NamedMode::LineFeedNewLine) => {
+                (20, if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) { 1 } else { 2 })
+            }
+            Mode::Unknown(n) => (n as u32, 0u8),
+        };
+        let response = format!("\x1b[{param};{state}$y");
+        self.write_pty(response.as_bytes());
+    }
+
+    fn report_private_mode(&mut self, mode: PrivateMode) {
+        // DECRPM response: CSI ? Ps; Pm $ y
+        let (param, state) = match mode {
+            PrivateMode::Named(named) => {
+                let flag = match named {
+                    NamedPrivateMode::CursorKeys => (1, TermMode::APP_CURSOR),
+                    NamedPrivateMode::Origin => (6, TermMode::ORIGIN),
+                    NamedPrivateMode::LineWrap => (7, TermMode::LINE_WRAP),
+                    NamedPrivateMode::ShowCursor => (25, TermMode::SHOW_CURSOR),
+                    NamedPrivateMode::ReportMouseClicks => (1000, TermMode::MOUSE_REPORT),
+                    NamedPrivateMode::ReportCellMouseMotion => (1002, TermMode::MOUSE_MOTION),
+                    NamedPrivateMode::ReportAllMouseMotion => (1003, TermMode::MOUSE_ALL),
+                    NamedPrivateMode::ReportFocusInOut => (1004, TermMode::FOCUS_IN_OUT),
+                    NamedPrivateMode::Utf8Mouse => (1005, TermMode::UTF8_MOUSE),
+                    NamedPrivateMode::SgrMouse => (1006, TermMode::SGR_MOUSE),
+                    NamedPrivateMode::AlternateScroll => (1007, TermMode::ALTERNATE_SCROLL),
+                    NamedPrivateMode::BracketedPaste => (2004, TermMode::BRACKETED_PASTE),
+                    NamedPrivateMode::SwapScreenAndSetRestoreCursor => (1049, TermMode::ALT_SCREEN),
+                    _ => return,
+                };
+                (flag.0, if self.mode.contains(flag.1) { 1u8 } else { 2 })
+            }
+            PrivateMode::Unknown(n) => (n as u32, 0u8),
+        };
+        let response = format!("\x1b[?{param};{state}$y");
+        self.write_pty(response.as_bytes());
+    }
+
     fn set_mode(&mut self, mode: Mode) {
         match mode {
             Mode::Named(NamedMode::Insert) => self.mode.insert(TermMode::INSERT),
@@ -460,6 +514,27 @@ impl Handler for TermHandler<'_> {
         }
     }
 
+    fn dynamic_color_sequence(&mut self, prefix: String, index: usize, terminator: &str) {
+        // OSC 10 = foreground, OSC 11 = background, OSC 12 = cursor color
+        // When the param is "?", we respond with the current color
+        let color = match index {
+            0 => Some(self.palette.default_fg()),  // OSC 10
+            1 => Some(self.palette.default_bg()),  // OSC 11
+            2 => Some(self.palette.cursor_color()), // OSC 12
+            _ => None,
+        };
+        if let Some(rgb) = color {
+            // Respond in XParseColor format: rgb:RRRR/GGGG/BBBB (16-bit per channel)
+            let response = format!(
+                "\x1b]{prefix};rgb:{:04x}/{:04x}/{:04x}{terminator}",
+                (rgb.r as u16) << 8 | rgb.r as u16,
+                (rgb.g as u16) << 8 | rgb.g as u16,
+                (rgb.b as u16) << 8 | rgb.b as u16,
+            );
+            self.write_pty(response.as_bytes());
+        }
+    }
+
     fn set_color(&mut self, index: usize, color: Rgb) {
         self.palette.set_color(index, color);
     }
@@ -514,5 +589,52 @@ impl Handler for TermHandler<'_> {
         let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
         let response = format!("\x1b[8;{};{}t", grid.lines, grid.cols);
         self.write_pty(response.as_bytes());
+    }
+
+    fn text_area_size_pixels(&mut self) {
+        // Report pixel size as CSI 4 ; height ; width t
+        // We don't track pixel size in the handler, so report character-based estimate
+        let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
+        // Approximate: 8px per col, 16px per row (common monospace metrics)
+        let response = format!("\x1b[4;{};{}t", grid.lines * 16, grid.cols * 8);
+        self.write_pty(response.as_bytes());
+    }
+
+    fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
+        let slot = match index {
+            CharsetIndex::G0 => 0,
+            CharsetIndex::G1 => 1,
+            CharsetIndex::G2 => 2,
+            CharsetIndex::G3 => 3,
+        };
+        self.charset.charsets[slot] = charset;
+    }
+
+    fn set_active_charset(&mut self, index: CharsetIndex) {
+        self.charset.active = index;
+    }
+
+    fn push_title(&mut self) {
+        self.title_stack.push(self.title.clone());
+    }
+
+    fn pop_title(&mut self) {
+        if let Some(t) = self.title_stack.pop() {
+            *self.title = t;
+        }
+    }
+
+    fn clipboard_store(&mut self, _clipboard: u8, _data: &[u8]) {
+        // OSC 52 clipboard store — requires platform clipboard integration (Section 09/14)
+    }
+
+    fn clipboard_load(&mut self, _clipboard: u8, _terminator: &str) {
+        // OSC 52 clipboard load — requires platform clipboard integration (Section 09/14)
+    }
+
+    fn substitute(&mut self) {
+        // SUB — treated as a space character
+        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        grid.put_char(' ');
     }
 }

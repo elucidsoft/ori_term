@@ -1,5 +1,5 @@
 [package]
-name = "ori_console"
+name = "ori_term"
 version = "0.1.0"
 edition = "2024"
 description = "A Rust console/TUI library that gets terminal interaction right"
@@ -21,5 +21,67 @@ log = "0.4"
 [[bin]]
 name = "oriterm"
 path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+future_incompatible = { level = "warn", priority = -1 }
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+
+[lints.clippy]
+# Deny all default clippy warnings (from Alacritty)
+all = { level = "deny", priority = -1 }
+# Pedantic as warnings (from Ratatui)
+pedantic = { level = "warn", priority = -1 }
+# Nursery as warnings
+nursery = { level = "warn", priority = -1 }
+
+# Specific denies (from Alacritty)
+enum_glob_use = "deny"
+if_not_else = "deny"
+
+# Specific warns from Ratatui (restriction group, not covered by pedantic/nursery)
+as_underscore = "warn"
+deref_by_slicing = "warn"
+else_if_without_else = "warn"
+empty_line_after_doc_comments = "warn"
+equatable_if_let = "warn"
+fn_to_numeric_cast_any = "warn"
+format_push_string = "warn"
+map_err_ignore = "warn"
+mixed_read_write_in_expression = "warn"
+needless_raw_strings = "warn"
+or_fun_call = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+string_lit_chars_any = "warn"
+string_slice = "warn"
+unnecessary_self_imports = "warn"
+
+# Allow noisy pedantic/nursery lints (from Ratatui + Alacritty common practice)
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+collapsible_if = "allow"
+manual_let_else = "allow"
+missing_const_for_fn = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+option_if_let_else = "allow"
+redundant_pub_crate = "allow"
+significant_drop_tightening = "allow"
+similar_names = "allow"
+suboptimal_flops = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+uninlined_format_args = "allow"
+unreadable_literal = "allow"
+unused_self = "allow"
 
 [dev-dependencies]

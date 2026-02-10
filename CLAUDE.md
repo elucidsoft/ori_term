@@ -1,4 +1,4 @@
-# ori_console
+# ori_term
 
 A cross-platform GPU-accelerated terminal emulator written in Rust — in the same
 category as WezTerm, Alacritty, and Ghostty. Built by studying what those projects
@@ -12,13 +12,13 @@ ratatui.
 ## Why This Exists
 
 Most terminal emulators either get the basics wrong or are too complex to extend.
-ori_console aims to be a correct, fast, cross-platform terminal emulator that respects
+ori_term aims to be a correct, fast, cross-platform terminal emulator that respects
 standards (NO_COLOR, CLICOLOR, Unicode width) by design, not by convention.
 
 ## Project Structure
 
 ```
-ori_console/
+ori_term/
   src/
     lib.rs              # Public API re-exports
     terminal/
@@ -337,9 +337,9 @@ cargo run --example hello
 
 ### Windows Cross-Compile (from WSL)
 
-Target: `x86_64-pc-windows-gnu` (mingw). Windows test binaries go to `C:\Users\ericm\ori_console\`.
+Target: `x86_64-pc-windows-gnu` (mingw). Windows test binaries go to `C:\Users\ericm\ori_term\`.
 
-Launch from Windows: `C:\Users\ericm\ori_console\hello.exe`
+Launch from Windows: `C:\Users\ericm\ori_term\hello.exe`
 
 ## Code Style
 

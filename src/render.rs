@@ -186,6 +186,7 @@ pub fn render_grid(
 
 /// Render a single text string into the buffer at pixel position (x, y).
 /// Used for tab bar labels, etc.
+#[allow(clippy::many_single_char_names)]
 pub fn render_text(
     glyphs: &mut GlyphCache,
     text: &str,

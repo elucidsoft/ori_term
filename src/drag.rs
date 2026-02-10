@@ -3,7 +3,7 @@ use winit::window::WindowId;
 
 use crate::tab::TabId;
 
-/// Chrome-style thresholds from tab_drag_controller.cc
+/// Chrome-style thresholds from `tab_drag_controller.cc`
 pub const DRAG_START_THRESHOLD: f64 = 10.0;
 pub const TEAR_OFF_THRESHOLD: f64 = 15.0;
 
@@ -51,7 +51,7 @@ impl DragState {
     pub fn distance_from_origin(&self, pos: PhysicalPosition<f64>) -> f64 {
         let dx = pos.x - self.origin.x;
         let dy = pos.y - self.origin.y;
-        (dx * dx + dy * dy).sqrt()
+        dx.hypot(dy)
     }
 
     /// Vertical distance from origin (for tear-off detection).

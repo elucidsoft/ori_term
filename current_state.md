@@ -1,8 +1,8 @@
-# ori_console -- Current State
+# ori_term -- Current State
 
 ## What the App Does
 
-ori_console (binary name: `oriterm`) is a terminal emulator written in Rust with
+ori_term (binary name: `oriterm`) is a terminal emulator written in Rust with
 Chrome-style tab tear-off and a custom frameless window chrome. It opens a native
 window using winit (with OS decorations disabled), renders a terminal character grid
 with a custom title bar using softbuffer (CPU pixel buffer) and fontdue (CPU glyph
@@ -206,9 +206,9 @@ Terminal style):
 - **Escape cancels drag**: Pressing Escape during any drag phase reverts the drag
   and redraws all windows.
 
-- **Panic/error logging**: Panics are caught and written to `ori_console_panic.log`.
-  Runtime trace goes to `ori_console_debug.log`. Top-level errors go to
-  `ori_console_error.log`.
+- **Panic/error logging**: Panics are caught and written to `ori_term_panic.log`.
+  Runtime trace goes to `ori_term_debug.log`. Top-level errors go to
+  `ori_term_error.log`.
 
 ## What's Not Working Yet / Known Issues
 
@@ -485,17 +485,17 @@ winit EventLoop<TermEvent>
 
 ```bash
 cargo build --target x86_64-pc-windows-gnu --release
-cp target/x86_64-pc-windows-gnu/release/oriterm.exe /mnt/c/Users/ericm/ori_console/oriterm.exe
+cp target/x86_64-pc-windows-gnu/release/oriterm.exe /mnt/c/Users/ericm/ori_term/oriterm.exe
 ```
 
-Launch from Windows: `C:\Users\ericm\ori_console\oriterm.exe`
+Launch from Windows: `C:\Users\ericm\ori_term\oriterm.exe`
 
 ### Debug logs
 
 The app writes log files next to the executable:
-- `ori_console_debug.log` -- runtime trace (PTY events, window creation, drag transitions)
-- `ori_console_panic.log` -- panic message if the app crashes
-- `ori_console_error.log` -- top-level error if `App::run()` returns `Err`
+- `ori_term_debug.log` -- runtime trace (PTY events, window creation, drag transitions)
+- `ori_term_panic.log` -- panic message if the app crashes
+- `ori_term_error.log` -- top-level error if `App::run()` returns `Err`
 
 ### Dependencies
 
@@ -515,7 +515,7 @@ The app writes log files next to the executable:
 
 ## Chrome Tab Drag Reference
 
-| Chrome concept | ori_console equivalent | Value |
+| Chrome concept | ori_term equivalent | Value |
 |---|---|---|
 | `TabDragController` | `DragState` + `drag.rs` | -- |
 | `kMinimumDragDistance` | `DRAG_START_THRESHOLD` | 10 px |

@@ -26,14 +26,15 @@ bitflags! {
 }
 
 impl CellFlags {
-    pub const ANY_UNDERLINE: CellFlags = CellFlags::UNDERLINE
-        .union(CellFlags::DOUBLE_UNDERLINE)
-        .union(CellFlags::UNDERCURL)
-        .union(CellFlags::DOTTED_UNDERLINE)
-        .union(CellFlags::DASHED_UNDERLINE);
+    pub const ANY_UNDERLINE: Self = Self::UNDERLINE
+        .union(Self::DOUBLE_UNDERLINE)
+        .union(Self::UNDERCURL)
+        .union(Self::DOTTED_UNDERLINE)
+        .union(Self::DASHED_UNDERLINE);
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub struct CellExtra {
     pub zerowidth: Vec<char>,
     pub underline_color: Option<Color>,
@@ -53,15 +54,6 @@ impl Clone for CellExtra {
     }
 }
 
-impl Default for CellExtra {
-    fn default() -> Self {
-        Self {
-            zerowidth: Vec::new(),
-            underline_color: None,
-            hyperlink: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Cell {
@@ -94,7 +86,7 @@ impl PartialEq for Cell {
 }
 
 impl Cell {
-    pub fn reset(&mut self, template: &Cell) {
+    pub fn reset(&mut self, template: &Self) {
         self.c = template.c;
         self.fg = template.fg;
         self.bg = template.bg;

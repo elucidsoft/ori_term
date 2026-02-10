@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::thread;
 
-use vte::ansi::CursorShape;
+use vte::ansi::{CharsetIndex, CursorShape, StandardCharset};
 use winit::event_loop::EventLoopProxy;
 
 use crate::grid::Grid;
@@ -12,6 +12,34 @@ use crate::term_mode::TermMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
+
+/// Charset state: 4 slots (G0-G3) and an active index.
+#[derive(Debug, Clone)]
+pub struct CharsetState {
+    pub charsets: [StandardCharset; 4],
+    pub active: CharsetIndex,
+}
+
+impl Default for CharsetState {
+    fn default() -> Self {
+        Self {
+            charsets: [StandardCharset::Ascii; 4],
+            active: CharsetIndex::G0,
+        }
+    }
+}
+
+impl CharsetState {
+    pub fn map(&self, c: char) -> char {
+        let idx = match self.active {
+            CharsetIndex::G0 => 0,
+            CharsetIndex::G1 => 1,
+            CharsetIndex::G2 => 2,
+            CharsetIndex::G3 => 3,
+        };
+        self.charsets[idx].map(c)
+    }
+}
 
 pub struct Tab {
     pub id: TabId,
@@ -24,6 +52,8 @@ pub struct Tab {
     pub palette: Palette,
     pub mode: TermMode,
     pub cursor_shape: CursorShape,
+    pub charset: CharsetState,
+    pub title_stack: Vec<String>,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
     _child: Box<dyn portable_pty::Child + Send + Sync>,
 }
@@ -82,7 +112,7 @@ impl Tab {
         });
 
         log(&format!("Tab::spawn done for {:?}", id));
-        Ok(Tab {
+        Ok(Self {
             id,
             primary_grid: Grid::new(cols, rows),
             alt_grid: Grid::new(cols, rows),
@@ -93,6 +123,8 @@ impl Tab {
             palette: Palette::new(),
             mode: TermMode::default(),
             cursor_shape: CursorShape::default(),
+            charset: CharsetState::default(),
+            title_stack: Vec::new(),
             pty_master: pair.master,
             _child: child,
         })
@@ -116,6 +148,8 @@ impl Tab {
             &mut self.pty_writer,
             &mut self.active_is_alt,
             &mut self.cursor_shape,
+            &mut self.charset,
+            &mut self.title_stack,
         );
         self.processor.advance(&mut handler, data);
     }
@@ -132,8 +166,10 @@ impl Tab {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize, pixel_width: u16, pixel_height: u16) {
-        self.primary_grid.resize(cols, rows);
-        self.alt_grid.resize(cols, rows);
+        // Alt screen never reflows (full-screen apps redraw themselves).
+        let reflow = true;
+        self.primary_grid.resize(cols, rows, reflow);
+        self.alt_grid.resize(cols, rows, false);
         let _ = self.pty_master.resize(portable_pty::PtySize {
             rows: rows as u16,
             cols: cols as u16,

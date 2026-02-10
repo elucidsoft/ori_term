@@ -26,8 +26,8 @@ pub fn log_path() -> std::path::PathBuf {
     std::env::current_exe()
         .unwrap_or_default()
         .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join("ori_console_debug.log")
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("oriterm_debug.log")
 }
 
 pub fn log(msg: &str) {

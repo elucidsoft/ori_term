@@ -1,8 +1,8 @@
 ---
 section: "04"
 title: Resize Handling
-status: in-progress
-goal: Dynamic grid resize with PTY notification and optional text reflow on column change
+status: complete
+goal: Dynamic grid resize with PTY notification and text reflow on column change
 sections:
   - id: "04.1"
     title: Window-to-Grid Resize
@@ -12,15 +12,15 @@ sections:
     status: complete
   - id: "04.3"
     title: Text Reflow
-    status: not-started
+    status: complete
   - id: "04.4"
     title: Completion Checklist
-    status: in-progress
+    status: complete
 ---
 
 # Section 04: Resize Handling
 
-**Status:** In Progress (basic resize works, text reflow not yet implemented)
+**Status:** Complete
 **Goal:** When the window resizes, the terminal grid resizes to match and the
 PTY is notified of the new dimensions. Text reflows intelligently on column changes.
 
@@ -28,20 +28,24 @@ PTY is notified of the new dimensions. Text reflows intelligently on column chan
 - Alacritty's grid reflow (`grid/resize.rs`) with wide-char handling
 - Ghostty's resize with semantic prompt awareness
 
-**Implemented in:** `src/grid/mod.rs` (Grid::resize), `src/app.rs` (handle_resize), `src/tab.rs` (Tab::resize)
+**Implemented in:** `src/grid/mod.rs` (Grid::resize, reflow_grow_cols, reflow_shrink_cols), `src/grid/row.rs` (content_len, split_off, append, cells, cells_mut), `src/app.rs` (handle_resize), `src/tab.rs` (Tab::resize)
 
 **What was built:**
 - Dynamic grid resize following Ghostty's approach:
   - Row shrink: trim trailing blank rows first, push excess to scrollback
   - Row grow: add empty rows (don't pull scrollback unless cursor at bottom)
-  - Column shrink: don't truncate row data (non-destructive), just update cols
-  - Column grow: extend rows with blank cells
+  - Column shrink/grow trigger text reflow
   - Reset scroll region after resize
+- Text reflow on column change (04.3):
+  - reflow_grow_cols: merges WRAPLINE-flagged rows back together when columns increase
+  - reflow_shrink_cols: re-wraps lines exceeding new width with WRAPLINE flags
+  - Wide character boundary handling (LEADING_WIDE_CHAR_SPACER at split points)
+  - Cursor position tracked through reflow
+  - Overflow rows go to scrollback
+  - 5 dedicated reflow tests
 - WindowEvent::Resized handler computes new cols/rows from pixel dimensions
 - PTY resize notification via `pty_master.resize()`
 - Both primary and alternate grids resized
-
-**Remaining:** Text reflow (04.3) — wrapped lines should unwrap on column grow and re-wrap on column shrink.
 
 ---
 
@@ -119,8 +123,8 @@ When columns change, reflow wrapped lines to fit the new width.
 - [x] Resizing the window resizes the grid
 - [x] PTY receives new dimensions on resize
 - [x] Shell prompt redraws correctly after resize
-- [ ] Text reflows when columns change (long lines wrap/unwrap) — 04.3 not started
-- [ ] Wide characters handled at reflow boundaries — 04.3 not started
+- [x] Text reflows when columns change (long lines wrap/unwrap)
+- [x] Wide characters handled at reflow boundaries
 - [x] Cursor position preserved through resize
 - [x] No crash on zero-dimension resize
 - [x] No crash on rapid resize sequences
