@@ -89,12 +89,12 @@ impl Palette {
             Color::Named(name) => {
                 let idx = name as usize;
                 if idx < NUM_COLORS {
+                    let mut c = self.colors[idx];
                     // Bold-as-bright: for standard colors 0-7, promote to 8-15
                     if flags.contains(CellFlags::BOLD) && idx < 8 {
-                        self.colors[idx + 8]
-                    } else {
-                        self.colors[idx]
+                        c = self.colors[idx + 8];
                     }
+                    c
                 } else {
                     DEFAULT_FG
                 }

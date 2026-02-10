@@ -51,7 +51,7 @@ impl DragState {
     pub fn distance_from_origin(&self, pos: PhysicalPosition<f64>) -> f64 {
         let dx = pos.x - self.origin.x;
         let dy = pos.y - self.origin.y;
-        dx.hypot(dy)
+        (dx * dx + dy * dy).sqrt()
     }
 
     /// Vertical distance from origin (for tear-off detection).

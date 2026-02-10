@@ -461,7 +461,7 @@ impl Grid {
     // --- Scroll region ---
 
     pub fn set_scroll_region(&mut self, top: usize, bottom: Option<usize>) {
-        let bottom = bottom.unwrap_or_else(|| self.lines.saturating_sub(1));
+        let bottom = bottom.unwrap_or(self.lines.saturating_sub(1));
         if top < bottom && bottom < self.lines {
             self.scroll_top = top;
             self.scroll_bottom = bottom;

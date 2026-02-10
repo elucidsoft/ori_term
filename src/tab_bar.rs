@@ -28,6 +28,7 @@ const TAB_HOVER_BG: u32 = 0x00363a4f;     // slightly lighter
 const TAB_TEXT_FG: u32 = 0x00cdd6f4;       // text
 const TAB_INACTIVE_TEXT: u32 = 0x00a6adc8; // subtext0
 const TAB_BORDER: u32 = 0x00282838;        // subtle border, close to mantle
+const CLOSE_HOVER_BG: u32 = 0x00333345;   // dark gray (on hover)
 const CLOSE_FG: u32 = 0x00a6adc8;         // subtext0
 
 // Window control colors (Windows 10/11 style)
@@ -289,11 +290,15 @@ pub fn render_window_border(buffer: &mut [u32], buf_w: usize, buf_h: usize, is_m
     let color = WINDOW_BORDER_COLOR;
 
     // Top edge
-    buffer[..buf_w].fill(color);
+    for x in 0..buf_w {
+        buffer[x] = color;
+    }
     // Bottom edge
     if buf_h > 0 {
         let row = (buf_h - 1) * buf_w;
-        buffer[row..row + buf_w].fill(color);
+        for x in 0..buf_w {
+            buffer[row + x] = color;
+        }
     }
     // Left edge
     for y in 0..buf_h {

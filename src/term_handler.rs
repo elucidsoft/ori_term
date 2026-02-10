@@ -320,15 +320,18 @@ impl Handler for TermHandler<'_> {
     }
 
     fn device_status(&mut self, status: usize) {
-        // CPR — Cursor Position Report
-        if status == 6 {
-            let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
-            let response = format!(
-                "\x1b[{};{}R",
-                grid.cursor.row + 1,
-                grid.cursor.col + 1,
-            );
-            self.write_pty(response.as_bytes());
+        match status {
+            // CPR — Cursor Position Report
+            6 => {
+                let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
+                let response = format!(
+                    "\x1b[{};{}R",
+                    grid.cursor.row + 1,
+                    grid.cursor.col + 1,
+                );
+                self.write_pty(response.as_bytes());
+            }
+            _ => {}
         }
     }
 

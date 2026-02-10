@@ -20,10 +20,6 @@ impl Row {
         self.inner.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
     pub fn reset(&mut self, template: &Cell) {
         for cell in &mut self.inner {
             cell.reset(template);

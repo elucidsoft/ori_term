@@ -9,7 +9,7 @@ Detailed findings from studying 26 reference repositories in
 
 ## Crossterm
 
-**Repository:** `reference_repos/console_repos/crossterm`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/crossterm`
 
 ### Terminal Width Detection
 
@@ -122,7 +122,7 @@ Also supports a pipe-based signal handler (`src/event/source/unix/tty.rs`).
 
 ## Console (console-rs/console)
 
-**Repository:** `reference_repos/console_repos/console`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/console`
 
 ### Terminal Width Detection
 
@@ -232,7 +232,7 @@ Also provides `truncate_str()` and `pad_str()` that correctly handle ANSI escape
 
 ## unicode-width
 
-**Repository:** `reference_repos/console_repos/unicode-width`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/unicode-width`
 
 The foundational crate used by most Rust console libraries. Implements Unicode Standard Annex #11 (East Asian Width).
 
@@ -270,7 +270,7 @@ pub trait UnicodeWidthStr: private::Sealed {
 
 ## Ratatui
 
-**Repository:** `reference_repos/console_repos/ratatui`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/ratatui`
 
 ### Terminal Width Detection
 
@@ -328,7 +328,7 @@ impl Frame<'_> {
 
 ## Indicatif
 
-**Repository:** `reference_repos/console_repos/indicatif`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/indicatif`
 
 ### Terminal Width Detection
 
@@ -354,7 +354,7 @@ pub trait TermLike: Debug + Send + Sync {
 
 ## Dialoguer
 
-**Repository:** `reference_repos/console_repos/dialoguer`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/dialoguer`
 
 ### Terminal Resize Handling
 
@@ -383,7 +383,7 @@ pub fn update(&mut self, cursor_pos: usize) -> Result {
 
 ## Inquire
 
-**Repository:** `reference_repos/console_repos/inquire`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/inquire`
 
 ### Terminal Width Detection
 
@@ -414,7 +414,7 @@ Validates non-zero dimensions at construction time.
 
 ## Rustyline
 
-**Repository:** `reference_repos/console_repos/rustyline`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/rustyline`
 
 ### Color Support Detection
 
@@ -474,7 +474,7 @@ fn no_zwj(s: &str) -> Unit { /* split on ZWJ */ }   // Split on ZWJ, measure seg
 
 ## Bubbletea (Go)
 
-**Repository:** `reference_repos/console_repos/bubbletea`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/bubbletea`
 
 ### Architecture: The Elm Architecture (TEA)
 
@@ -516,7 +516,7 @@ signal.Notify(sig, syscall.SIGWINCH)
 
 ## Lipgloss (Go)
 
-**Repository:** `reference_repos/console_repos/lipgloss`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/lipgloss`
 
 ### Architecture: Declarative CSS-like Styling
 
@@ -560,7 +560,7 @@ Uses `github.com/clipperhouse/displaywidth` for accurate CJK/emoji width measure
 
 ## Termenv (Go)
 
-**Repository:** `reference_repos/console_repos/termenv`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/termenv`
 
 ### The Canonical Color Detection Implementation
 
@@ -625,7 +625,7 @@ func (o *Output) isTTY() bool {
 
 ## Rich (Python)
 
-**Repository:** `reference_repos/console_repos/rich`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/rich`
 
 ### Architecture: Renderable/Segment Pipeline
 
@@ -681,7 +681,7 @@ def is_dumb_terminal(self) -> bool:
 
 ## Textual (Python)
 
-**Repository:** `reference_repos/console_repos/textual`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/textual`
 
 ### Architecture: CSS-Based Widget/DOM System
 
@@ -703,7 +703,7 @@ class ClockApp(App):
 
 ## Ink (JavaScript/React)
 
-**Repository:** `reference_repos/console_repos/ink`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/ink`
 
 ### Architecture: React Component Model with Yoga Flexbox Layout
 
@@ -726,7 +726,7 @@ render(<Counter />);
 
 ## Chalk (JavaScript)
 
-**Repository:** `reference_repos/console_repos/chalk`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/chalk`
 
 ### The Most Comprehensive Color Detection
 
@@ -760,7 +760,7 @@ const supportsColor = {
 
 ## python-prompt-toolkit
 
-**Repository:** `reference_repos/console_repos/python-prompt-toolkit`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/python-prompt-toolkit`
 
 ### Color Depth
 
@@ -788,7 +788,7 @@ class ColorDepth(str, Enum):
 
 ## fzf (Go)
 
-**Repository:** `reference_repos/console_repos/fzf`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/fzf`
 
 ### Architecture: Event-Driven Pipeline
 
@@ -819,7 +819,7 @@ Maintains per-line ANSI state across multi-line inputs for correct color preserv
 
 ## lazygit (Go)
 
-**Repository:** `reference_repos/console_repos/lazygit`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/lazygit`
 
 ### Color Detection (via vendored libs)
 
@@ -846,7 +846,7 @@ func ColorLevelFromEnv() (ColorLevel, error) {
 
 ## Ghostty
 
-**Repository:** `reference_repos/console_repos/ghostty`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/ghostty`
 
 ### Environment Variables Set
 
@@ -905,7 +905,7 @@ From `src/terminfo/ghostty.zig`:
 
 ## Alacritty
 
-**Repository:** `reference_repos/console_repos/alacritty`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/alacritty`
 
 ### Environment Variables
 
@@ -959,7 +959,7 @@ impl OnResize for Pty {
 
 ## WezTerm
 
-**Repository:** `reference_repos/console_repos/wezterm`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/wezterm`
 
 ### Color Level Detection (`termwiz/src/caps/mod.rs`)
 
@@ -1008,7 +1008,7 @@ Case-insensitive env var keys on Windows via `EnvEntry` struct.
 
 ## xterm.js
 
-**Repository:** `reference_repos/console_repos/xterm.js`
+**Repository:** `/home/eric/projects/reference_repos/console_repos/xterm.js`
 
 ### Unicode Width Implementation
 
