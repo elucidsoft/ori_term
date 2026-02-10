@@ -7,3 +7,8 @@ pre-commit:
     build:
       glob: "*.rs"
       run: cargo build --target x86_64-pc-windows-gnu
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: .lefthook/commit-msg.sh {1}

@@ -27,7 +27,7 @@ cursor, cursor position, saved cursor, DECSC, DECRC
 ---
 
 ### Section 02: VTE Escape Sequences
-**File:** `section-02-vte-sequences.md` | **Status:** In Progress
+**File:** `section-02-vte-sequences.md` | **Status:** Complete
 
 ```
 VTE, escape sequence, CSI, OSC, DCS, SGR
@@ -133,7 +133,7 @@ supplementary plane, surrogate pair
 ---
 
 ### Section 09: Selection & Clipboard
-**File:** `section-09-selection-clipboard.md` | **Status:** Not Started
+**File:** `section-09-selection-clipboard.md` | **Status:** Complete
 
 ```
 selection, select, highlight, mouse select
@@ -240,14 +240,14 @@ throughput, latency, frame rate, FPS
 | ID | Title | File | Tier | Status |
 |----|-------|------|------|--------|
 | 01 | Cell & Grid Model | `section-01-cell-grid.md` | 1 | **Complete** |
-| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **Mostly Complete** (02.1-02.7 done, OSC 7/52/133 remaining) |
+| 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **Complete** (OSC 52, OSC 7, OSC 133, XTVERSION, REP all done) |
 | 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **In Progress** (functional, ring buffer deferred) |
 | 04 | Resize Handling | `section-04-resize.md` | 1 | **Complete** (resize + text reflow with wide char handling) |
 | 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 7 built-in color schemes) |
 | 06 | Font System | `section-06-font-system.md` | 2 | Not Started |
 | 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | Not Started |
 | 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | Not Started |
-| 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 | Not Started |
+| 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 | **Complete** (mouse selection, copy/paste, Windows Terminal style) |
 | 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 | Not Started |
 | 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | Not Started |
 | 12 | Search | `section-12-search.md` | 3 | Not Started |

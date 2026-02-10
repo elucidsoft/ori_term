@@ -24,30 +24,44 @@ src/main.rs                    Entry point: App::run() with #![windows_subsystem
 
 src/
   lib.rs                       Module declarations + log() / log_path() helpers
-  app.rs                       App struct (1032 lines), winit ApplicationHandler, event dispatch,
+  app.rs                       App struct (1467 lines), winit ApplicationHandler, event dispatch,
                                frameless window creation, resize handling, keyboard/mouse input,
-                               scrollback scroll shortcuts, drag state machine
+                               scrollback scroll shortcuts, drag state machine, font zoom,
+                               mouse selection, clipboard integration
   window.rs                    TermWindow (winit Window + softbuffer Surface + tab list + is_maximized)
   tab.rs                       Tab (dual Grid primary+alt, PTY writer+master, VTE Processor,
-                               Palette, TermMode, title); TabId; TermEvent; resize
+                               Palette, TermMode, title, CharsetState, cursor shape,
+                               selection, CWD, prompt state); TabId; TermEvent; resize
   tab_bar.rs                   Tab bar rendering and hit-testing (TabBarLayout, TabBarHit),
                                window control buttons (minimize/maximize/close), window border,
                                pixel drawing helpers (draw_x, draw_plus, draw_rect, blend, etc.)
   drag.rs                      DragState / DragPhase -- Chrome-style drag state machine
   cell.rs                      Rich Cell (24 bytes), CellFlags (u16 bitflags), CellExtra (Arc),
-                               Hyperlink struct
+                               Hyperlink struct, ANY_UNDERLINE composite flag
+  selection.rs                 Selection model (3-point: anchor/pivot/end), SelectionMode
+                               (Char/Word/Line/Block), SelectionPoint with sub-cell Side,
+                               word_boundaries, logical_line_start/end, extract_text,
+                               contains() for hit-testing
+  clipboard.rs                 Platform clipboard wrapper: clipboard-win on Windows, no-op stubs
+                               on other platforms. get_text() / set_text().
   grid/
-    mod.rs                     Grid (845 lines) -- rows, cursor, scrollback, display_offset,
-                               scroll regions, tab stops, all operations, resize
+    mod.rs                     Grid (1135 lines) -- rows, cursor, scrollback, display_offset,
+                               scroll regions, tab stops, all operations, resize with reflow
     row.rs                     Row with occupancy tracking, grow/truncate
     cursor.rs                  Cursor with template Cell, input_needs_wrap
-  term_handler.rs              TermHandler -- vte::ansi::Handler impl (~40 methods), SGR,
-                               cursor, erase, scroll, modes, alt screen, OSC titles
-  term_mode.rs                 TermMode bitflags (15 terminal modes)
+  term_handler.rs              TermHandler -- vte::ansi::Handler impl (~50 methods), SGR,
+                               cursor, erase, scroll, modes, alt screen, OSC titles,
+                               OSC 52 clipboard (base64), cursor style, charset mapping,
+                               device attributes (DA/DA2), mode reports (DECRPM),
+                               title push/pop, hyperlinks
+  term_mode.rs                 TermMode bitflags (16 terminal modes)
   palette.rs                   270-entry color palette, resolve fg/bg with attributes,
                                bold-bright, dim, inverse, hidden, set/reset color
-  render.rs                    GlyphCache (fontdue), render_grid() with per-cell color
-                               resolution, cursor rendering, alpha blending
+  render.rs                    FontSet (fontdue) with Regular/Bold/Italic/BoldItalic variants
+                               and fallback font chain, render_grid() with per-cell color
+                               resolution, underline decorations (single/double/dotted/dashed/
+                               undercurl), strikethrough, cursor rendering, alpha blending,
+                               synthetic bold, render_text() for tab bar labels
 
   (Library scaffolding modules -- present but not used by the terminal emulator yet)
   color/                       Color types, profile detection (NO_COLOR, CLICOLOR, COLORTERM)
@@ -62,9 +76,10 @@ src/
 
 ### Data Flow
 
-1. **Startup** (`App::run`): Sets a panic hook, loads a monospace font from
-   `C:\Windows\Fonts\` (CascadiaMono > Consolas > Courier), builds a `GlyphCache`,
-   creates a winit `EventLoop<TermEvent>`, and calls `event_loop.run_app(&mut app)`.
+1. **Startup** (`App::run`): Sets a panic hook, loads a `FontSet` at default 16px
+   from system fonts (with Regular/Bold/Italic/BoldItalic variants and fallback fonts
+   for symbols and CJK), creates a winit `EventLoop<TermEvent>`, and calls
+   `event_loop.run_app(&mut app)`.
 
 2. **Window + Tab creation** (`resumed` handler): On first resume, creates one
    frameless window (`with_decorations(false)`) and spawns one tab inside it. The
@@ -73,8 +88,9 @@ src/
    background reader thread.
 
 3. **PTY output**: The reader thread sends `TermEvent::PtyOutput(tab_id, data)` through
-   the `EventLoopProxy`. The `user_event` handler feeds the data through the VTE
-   `Processor`, which parses escape sequences and calls `TermHandler` methods (via
+   the `EventLoopProxy`. The `user_event` handler feeds the data through both a raw
+   `vte::Parser` (for OSC 7, OSC 133, XTVERSION) and the high-level VTE `Processor`,
+   which parses escape sequences and calls `TermHandler` methods (via
    `vte::ansi::Handler` trait) that mutate the active grid (primary or alternate),
    update the palette, toggle terminal modes, and set tab title. Then the window
    containing the active tab is asked to redraw.
@@ -83,25 +99,37 @@ src/
    color, calls `tab_bar::render_tab_bar()` for the custom title bar with tabs and
    window controls, then `render::render_grid()` for the active tab's grid (using
    `visible_row()` for scrollback-aware rendering, with per-cell color resolution via
-   `Palette::resolve_fg/resolve_bg` applying bold-bright, dim, inverse, hidden).
-   Finally draws a 1px window border (skipped when maximized) and calls
-   `buffer.present()`.
+   `Palette::resolve_fg/resolve_bg` applying bold-bright, dim, inverse, hidden, then
+   rendering underline decorations, strikethrough, and glyphs with style-appropriate
+   font variants and fallback chain). Finally draws a 1px window border (skipped when
+   maximized) and calls `buffer.present()`.
 
 5. **Input**: Keyboard events are intercepted for built-in shortcuts (Ctrl+T new tab,
    Ctrl+W close tab, Ctrl+Tab / Ctrl+Shift+Tab cycle tabs, Escape cancel drag,
-   Shift+PageUp/Down page scroll, Shift+Home/End scroll to top/bottom of scrollback),
-   then forwarded to the active tab's PTY writer as raw bytes or escape sequences.
-   Supported keys: printable chars (UTF-8), Enter, Backspace, Tab, Escape, arrows
-   (with APP_CURSOR mode), Home, End, Delete, Insert, PageUp/Down, F1-F12.
+   Shift+PageUp/Down page scroll, Shift+Home/End scroll to top/bottom of scrollback,
+   Ctrl+=/+ zoom in, Ctrl+- zoom out, Ctrl+0 reset zoom, Ctrl+C smart copy-or-SIGINT,
+   Ctrl+V paste, Ctrl+Shift+C copy, Ctrl+Shift+V paste, Ctrl+Insert copy,
+   Shift+Insert paste), then forwarded to the active tab's PTY writer as raw bytes or
+   escape sequences. Supported keys: printable chars (UTF-8), Enter, Backspace, Tab,
+   Escape, arrows (with APP_CURSOR mode), Home, End, Delete, Insert, PageUp/Down,
+   F1-F12.
 
-6. **Mouse / Drag**: Mouse presses on the tab bar trigger hit-testing (`TabBarLayout`).
-   Clicking a tab selects it; clicking the close button closes it; clicking the "+"
-   button creates a new tab. Window control buttons handle minimize, maximize, and
-   close. Empty space in the tab bar is a drag area (calls `drag_window()` for native
-   OS drag, double-click toggles maximize). A press-and-hold on a tab initiates a
-   `DragState` which transitions through `Pending -> DraggingInBar -> TornOff`.
+6. **Mouse / Selection**: Left-click in the grid area starts text selection. Single-click
+   for character selection, double-click for word selection, triple-click for line
+   selection. Alt+click starts block (rectangular) selection. Shift+click extends an
+   existing selection. Dragging updates the selection end point with auto-scroll when
+   the cursor is above or below the grid. Selection is auto-copied to clipboard on
+   mouse release. Right-click copies if selection exists, pastes if not. Mouse presses
+   on the tab bar trigger hit-testing (`TabBarLayout`).
 
-7. **Resize borders**: Mouse near window edges (8px) triggers `drag_resize_window()`
+7. **Mouse / Drag**: Clicking a tab selects it; clicking the close button closes it;
+   clicking the "+" button creates a new tab. Window control buttons handle minimize,
+   maximize, and close. Empty space in the tab bar is a drag area (calls `drag_window()`
+   for native OS drag, double-click toggles maximize). A press-and-hold on a tab
+   initiates a `DragState` which transitions through `Pending -> DraggingInBar ->
+   TornOff`.
+
+8. **Resize borders**: Mouse near window edges (8px) triggers `drag_resize_window()`
    with the appropriate `ResizeDirection`. Cursor icon changes to resize arrows on hover.
 
 ## Custom Window Chrome
@@ -116,7 +144,7 @@ Terminal style):
   background (~15% white tint) so it's visible on both active and inactive tabs
 - **New tab button**: 38px wide with a pixel-drawn 11x11 plus icon (1px thick, centered)
 - **Window controls**: Rightmost 138px (3 x 46px buttons) with pixel-drawn Windows 10/11
-  style icons — minimize (horizontal line), maximize (rectangle / overlapping restore
+  style icons -- minimize (horizontal line), maximize (rectangle / overlapping restore
   rects), close (X with red hover background)
 - **Window border**: 1px border around entire window in overlay0 color, hidden when maximized
 - **Drag area**: Empty space between tabs and controls calls `drag_window()` for native
@@ -156,7 +184,7 @@ Terminal style):
   tabs live in `App.tabs` (keyed by `TabId`), separate from windows.
 
 - **PTY management with ConPTY handles kept alive**: `portable-pty` opens a ConPTY
-  pair; `cmd.exe` is spawned on the slave. The `_pty_master` and `_child` handles
+  pair; `cmd.exe` is spawned on the slave. The `pty_master` and `_child` handles
   are kept alive in the `Tab` struct -- dropping either would kill the ConPTY or the
   child process. A background thread reads PTY output and sends it to the event loop
   via `EventLoopProxy`.
@@ -164,19 +192,28 @@ Terminal style):
 - **Rich cell model**: 24-byte Cell struct with fg/bg colors (Named/Indexed/Spec),
   CellFlags bitflags (bold, dim, italic, underline variants, blink, inverse, hidden,
   strikeout, wide char, wrapline), and Arc<CellExtra> for rare data (zerowidth chars,
-  underline color, hyperlinks). Row wrapper with occupancy tracking.
+  underline color, hyperlinks). Row wrapper with occupancy tracking. `ANY_UNDERLINE`
+  composite flag for efficient underline detection.
 
 - **VTE parsing (comprehensive)**: `term_handler.rs` implements `vte::ansi::Handler`
-  trait (~40 methods). Full SGR attribute handling (all codes 0-29 + colors), cursor
-  movement (CUP/CUU/CUD/CUF/CUB/CR/LF/NEL/RI), erase operations (ED 0/1/2/3,
-  EL 0/1/2, ECH, DCH, ICH), line operations (IL/DL), scroll regions (DECSTBM),
-  alternate screen (DECSET 1049), 15 terminal modes, tab stops, DSR 6 cursor report,
-  OSC title updates.
+  trait (~50 methods). Full SGR attribute handling (all codes 0-29 + colors + underline
+  color SGR 58), cursor movement (CUP/CUU/CUD/CUF/CUB/CR/LF/NEL/RI), erase operations
+  (ED 0/1/2/3, EL 0/1/2, ECH, DCH, ICH), line operations (IL/DL), scroll regions
+  (DECSTBM), alternate screen (DECSET 1049), 16 terminal modes, tab stops, DSR 5/6,
+  device attributes (DA/DA2), mode reports (DECRPM for both ANSI and private modes),
+  OSC title updates (with push/pop stack), OSC 52 clipboard read/write (base64),
+  cursor style (DECSCUSR), charset configuration (G0-G3 with DEC Special Graphics
+  mapping), hyperlink support (OSC 8), DECALN screen alignment test, keypad
+  application mode, text area size queries (CSI 8/4 t), reset state, substitute (SUB).
+  A secondary raw `vte::Parser` with `RawInterceptor` (in `tab.rs`) handles OSC 7
+  (CWD), OSC 133 (prompt markers), and XTVERSION (CSI > q with build number from
+  BUILD_NUMBER file) -- sequences the high-level Processor drops.
 
 - **Full color support**: 270-entry palette (16 ANSI Catppuccin Mocha + 216 color
   cube + 24 grayscale + semantic colors). Per-cell foreground/background color
   resolution with bold-as-bright, DIM dimming, INVERSE swap, HIDDEN. Truecolor
-  (24-bit RGB) support. OSC 4 palette mutation, OSC 104 reset.
+  (24-bit RGB) support. OSC 4 palette mutation, OSC 104 reset. OSC 10/11/12
+  foreground/background/cursor color queries.
 
 - **Scrollback buffer**: Vec-based scrollback with configurable max (10,000 lines).
   display_offset viewport scrolling. Mouse wheel scroll (3 lines/tick). Keyboard
@@ -184,13 +221,54 @@ Terminal style):
   anchoring when scrolled up. Auto-scroll to live on keyboard input. ED 3 clears
   scrollback. Alternate screen has no scrollback.
 
-- **Dynamic resize**: Window resize recalculates grid dimensions, resizes both primary
-  and alternate grids (Ghostty-style algorithm: smart scrollback integration, cursor
-  preservation), notifies PTY via pty_master.resize(). Scroll region resets on resize.
+- **Dynamic resize with text reflow**: Window resize recalculates grid dimensions,
+  resizes both primary and alternate grids (Ghostty-style cell-by-cell reflow
+  algorithm: smart scrollback integration, cursor preservation), notifies PTY via
+  pty_master.resize(). Scroll region resets on resize. Alt screen does not reflow
+  (full-screen apps redraw themselves).
 
-- **Font rendering**: fontdue rasterizes glyphs from system monospace fonts. The
-  `GlyphCache` lazily caches rasterized glyphs. Per-cell color-resolved alpha blending
-  against resolved background colors.
+- **Font system with style variants and fallback chain**: `FontSet` replaces the old
+  `GlyphCache`. Loads Regular, Bold, Italic, and BoldItalic font variants from system
+  fonts. Cross-platform font discovery: on Windows, tries CascadiaMonoNF > CascadiaMono
+  > Consolas > Courier from `C:\Windows\Fonts\`; on Linux, searches
+  `~/.local/share/fonts`, `/usr/share/fonts`, `/usr/local/share/fonts` for JetBrainsMono
+  > UbuntuMono > DejaVuSansMono > LiberationMono. Fallback font chain for missing glyphs:
+  on Windows, Segoe UI Symbol + MS Gothic (CJK) + Segoe UI; on Linux, NotoSansMono +
+  NotoSansSymbols2 + NotoSansCJK + DejaVuSans. Synthetic bold (double-strike at +1px
+  offset) is used when no real bold font is available. Glyphs are lazily rasterized and
+  cached by (char, FontStyle) key, with ASCII pre-cached at load time. `FontSet::resize()`
+  rebuilds at a new size preserving the same font files.
+
+- **Font zoom**: Ctrl+= or Ctrl++ zooms in (+1px), Ctrl+- zooms out (-1px), Ctrl+0
+  resets to default (16px). Font size is clamped to 8-32px range. Zoom triggers
+  `FontSet::resize()` which recomputes cell metrics and clears the glyph cache, then
+  resizes all tabs in the window to match new cell dimensions.
+
+- **Underline decorations**: Renderer draws five underline styles at 2px from cell bottom:
+  single (solid line), double (two lines 2px apart), dotted (every other pixel), dashed
+  (3px on / 2px off), and undercurl (sine wave, 2px amplitude). Underline color respects
+  SGR 58 (per-cell underline color override) or falls back to foreground color.
+
+- **Strikethrough**: Horizontal line at vertical center of the cell, drawn in foreground
+  color.
+
+- **Mouse selection and clipboard (Windows Terminal style)**: Single-click for character
+  selection, double-click for word selection, triple-click for line selection, Alt+click
+  for block (rectangular) selection, Shift+click to extend. Selection is auto-copied to
+  clipboard on mouse release. Right-click copies if selection exists, pastes if not.
+  Ctrl+C is smart: copies if selection exists, sends ^C otherwise. Ctrl+V pastes.
+  Ctrl+Shift+C / Ctrl+Insert copy. Ctrl+Shift+V / Shift+Insert paste. Bracketed paste
+  mode supported. Selection uses 3-point model (anchor/pivot/end) with sub-cell Side
+  precision.
+
+- **OSC 52 clipboard (base64)**: Applications can read from and write to the system
+  clipboard via OSC 52 escape sequences. `clipboard_store` decodes base64 data and
+  writes to clipboard. `clipboard_load` reads clipboard, encodes to base64, and sends
+  the response back to the PTY.
+
+- **Cursor style tracking**: DECSCUSR (CSI Ps SP q) sets cursor shape (Block/Underline/
+  Beam). The `cursor_shape` field is stored per-tab. (Rendering currently always draws
+  a block cursor regardless of the tracked shape.)
 
 - **Keyboard input forwarding**: Enter, Backspace, Tab, Escape, arrow keys (with
   APP_CURSOR mode support), Home, End, Delete, Insert, PageUp/Down, F1-F12, and
@@ -206,9 +284,9 @@ Terminal style):
 - **Escape cancels drag**: Pressing Escape during any drag phase reverts the drag
   and redraws all windows.
 
-- **Panic/error logging**: Panics are caught and written to `ori_term_panic.log`.
-  Runtime trace goes to `ori_term_debug.log`. Top-level errors go to
-  `ori_term_error.log`.
+- **Panic/error logging**: Panics are caught and written to `oriterm_panic.log`.
+  Runtime trace goes to `oriterm_debug.log`. Top-level errors go to
+  `oriterm_error.log`.
 
 ## What's Not Working Yet / Known Issues
 
@@ -225,39 +303,23 @@ Terminal style):
   which shifts as the window moves. A more robust approach would use absolute screen
   coordinates or platform-specific drag APIs.
 
-- **No selection / copy-paste**: No text selection with the mouse and no clipboard
-  integration.
-
 - **Hardcoded shell**: Always spawns `cmd.exe`. No configuration for PowerShell,
   WSL, or other shells.
-
-- **Font loading is Windows-only**: `load_font()` looks for fonts at hardcoded
-  `C:\Windows\Fonts\` paths. Will panic on Linux or macOS. No font fallback
-  chain, no bold/italic variants, no emoji support.
 
 - **No mouse reporting to applications**: Terminal modes for mouse reporting
   (1000/1002/1003/1006) are tracked in TermMode bitflags but mouse events are
   not forwarded to the PTY. vim/htop/tmux mouse interaction won't work.
 
-- **No text reflow on column resize**: When the window is resized horizontally,
-  wrapped lines are not re-wrapped to the new column width.
-
 - **No color scheme configuration**: Only Catppuccin Mocha is available. No
   built-in scheme switching or custom color scheme loading.
-
-- **Incomplete OSC support**: Only OSC 0/1/2 (window/tab title) handled. OSC 7
-  (CWD), OSC 8 (hyperlinks), OSC 10/11/12 (fg/bg/cursor colors), OSC 52
-  (clipboard), OSC 133 (prompt markers) not yet wired.
-
-- **No device attributes responses**: DA/DA2 (terminal identification) not
-  implemented. Some applications use DA to detect terminal capabilities.
 
 - **Tab title truncation uses byte length**: In `tab_bar.rs`, `title.len()` is
   compared against a character count, which is incorrect for multi-byte or wide
   characters.
 
-- **No cursor style changes**: Cursor is always a block. DECSCUSR (CSI Ps SP q)
-  for bar/underline/blinking cursor styles not implemented.
+- **Cursor rendering ignores cursor shape**: DECSCUSR cursor shape changes are
+  tracked per-tab (`cursor_shape` field) but the renderer always draws a filled
+  block cursor. Bar and underline cursor shapes are not rendered.
 
 - **No focus events**: DECSET 1004 tracked but focus in/out events not sent to
   PTY when window gains/loses focus.
@@ -271,16 +333,22 @@ Terminal style):
 - **Vec-based scrollback**: Scrollback uses `Vec<Row>` with O(n) removal at front.
   Should be upgraded to ring buffer for O(1) rotation (performance optimization).
 
+- **Clipboard stubs on non-Windows**: The `clipboard.rs` module uses `clipboard-win`
+  on Windows but provides no-op stubs on other platforms. Needs arboard or similar
+  for cross-platform clipboard support.
+
 ## Key Data Structures
 
 ### `App` (app.rs)
 
 Top-level application state. Owns all windows (`HashMap<WindowId, TermWindow>`),
-all tabs (`HashMap<TabId, Tab>`), the shared `GlyphCache`, the current `DragState`,
+all tabs (`HashMap<TabId, Tab>`), the shared `FontSet`, the current `DragState`,
 per-window cursor positions and hover states, keyboard modifier state, double-click
-tracking (`last_click_time`, `last_click_window`), and the `EventLoopProxy` for
-sending `TermEvent`s from background threads. Implements
-`ApplicationHandler<TermEvent>` for the winit event loop.
+tracking (`last_click_time`, `last_click_window`), click count tracking for
+single/double/triple click detection, selection state (`left_mouse_down`,
+`last_grid_click_pos`, `click_count`), and the `EventLoopProxy` for sending
+`TermEvent`s from background threads. Implements `ApplicationHandler<TermEvent>`
+for the winit event loop.
 
 The separation of tabs from windows (each in their own HashMap) is the key design
 that enables tab tear-off: moving a tab between windows is just updating two
@@ -296,12 +364,21 @@ index, and `is_maximized` for tracking maximize state. Methods: `add_tab`,
 ### `Tab` / `TabId` (tab.rs)
 
 Each tab represents a running shell session. Contains:
-- `Grid` -- the character cell buffer
+- `Grid` -- primary and alternate character cell buffers
 - `pty_writer` -- `Option<Box<dyn Write + Send>>` for writing to the PTY
-- `vte_parser` -- `vte::Parser` for parsing escape sequences
-- `title` -- display string
-- `_pty_master` -- `Box<dyn MasterPty>`, must stay alive to keep ConPTY open
+- `pty_master` -- `Box<dyn MasterPty>`, must stay alive to keep ConPTY open
 - `_child` -- `Box<dyn Child>`, must stay alive to keep the shell process running
+- `processor` -- `vte::ansi::Processor` for high-level escape sequence parsing
+- `raw_parser` -- `vte::Parser` for intercepting OSC 7/133/XTVERSION
+- `title` -- display string (with `title_stack` for push/pop)
+- `palette` -- 270-entry color palette
+- `mode` -- `TermMode` bitflags
+- `cursor_shape` -- `CursorShape` (Block/Underline/Beam)
+- `charset` -- `CharsetState` for G0-G3 charset mapping
+- `cwd` -- optional current working directory (from OSC 7)
+- `prompt_state` -- `PromptState` (from OSC 133)
+- `selection` -- optional `Selection` for mouse text selection
+- `active_is_alt` -- whether alternate screen is active
 
 `TabId` is a newtype `TabId(u64)`, allocated sequentially by `App::alloc_tab_id()`.
 
@@ -341,64 +418,99 @@ dispatch and hover state tracking.
 Pixel drawing helpers: `set_pixel`, `fill_rect`, `draw_hline`, `draw_rect`, `draw_x`,
 `draw_plus`, `blend` (alpha compositing for hover effects).
 
-### `GlyphCache` (render.rs)
+### `FontSet` (render.rs)
 
-Wraps a `fontdue::Font` and a `HashMap<char, (Metrics, Vec<u8>)>` of rasterized
-glyphs. Provides `ensure(ch)` to lazily rasterize and `get(ch)` to retrieve.
-Computes `cell_width`, `cell_height`, and `baseline` from font line metrics at
-construction time. Font size is 16.0 px.
+Replaces the old `GlyphCache`. Contains an array of 4 `fontdue::Font` objects (one per
+`FontStyle`: Regular, Bold, Italic, BoldItalic), a `has_variant` array tracking which
+styles have real font files (vs. falling back to Regular), a `Vec<fontdue::Font>` of
+fallback fonts for missing glyphs (symbols, CJK), the current font `size`, computed
+`cell_width`/`cell_height`/`baseline`, and a `HashMap<(char, FontStyle), (Metrics,
+Vec<u8>)>` glyph cache.
+
+Glyph rasterization follows a fallback chain: (1) requested style font, (2) Regular
+font (style fallback), (3) fallback fonts (Segoe UI Symbol, MS Gothic, etc.), (4)
+Unicode replacement character U+FFFD, (5) empty glyph.
+
+`FontSet::load(size)` tries font families in priority order. `FontSet::resize(new_size)`
+rebuilds at a new size preserving the same font files, clearing the cache.
+`needs_synthetic_bold()` returns true when no real bold font was loaded.
+
+### `Selection` (selection.rs)
+
+3-point selection model: `anchor` (click origin), `pivot` (other end of initial unit),
+`end` (current drag position). `SelectionMode` enum: `Char`, `Word`, `Line`, `Block`.
+`SelectionPoint` has `row` (absolute), `col`, and `side` (Left/Right for sub-cell
+precision). Implements `contains(row, col)` for rendering hit-testing. Helper functions:
+`word_boundaries()`, `logical_line_start/end()`, `extract_text()`.
 
 ### `Cell` / `CellFlags` / `CellExtra` (cell.rs)
 
 Rich 24-byte Cell struct:
-- `c: char` — the character (4 bytes)
-- `fg: vte::ansi::Color` — foreground (Named/Indexed/Spec)
-- `bg: vte::ansi::Color` — background
-- `flags: CellFlags` — u16 bitflags (BOLD, DIM, ITALIC, UNDERLINE, DOUBLE_UNDERLINE,
+- `c: char` -- the character (4 bytes)
+- `fg: vte::ansi::Color` -- foreground (Named/Indexed/Spec)
+- `bg: vte::ansi::Color` -- background
+- `flags: CellFlags` -- u16 bitflags (BOLD, DIM, ITALIC, UNDERLINE, DOUBLE_UNDERLINE,
   UNDERCURL, DOTTED_UNDERLINE, DASHED_UNDERLINE, BLINK, INVERSE, HIDDEN, STRIKEOUT,
   WIDE_CHAR, WIDE_CHAR_SPACER, WRAPLINE, LEADING_WIDE_CHAR_SPACER)
-- `extra: Option<Arc<CellExtra>>` — rare data (zerowidth chars, underline_color, hyperlink)
+- `extra: Option<Arc<CellExtra>>` -- rare data (zerowidth chars, underline_color, hyperlink)
+
+Composite flag `ANY_UNDERLINE` combines all underline variants for efficient testing.
 
 ### `Grid` / `Row` / `Cursor` (grid/mod.rs, grid/row.rs, grid/cursor.rs)
 
 `Grid` contains:
-- `rows: Vec<Row>` — visible rows
-- `cols` / `lines` — dimensions
-- `cursor: Cursor` — current position + template cell + `input_needs_wrap`
-- `saved_cursor: Cursor` — for DECSC/DECRC
-- `scroll_top` / `scroll_bottom` — scroll region bounds
-- `tab_stops: Vec<bool>` — tab stop positions
-- `scrollback: Vec<Row>` — history buffer
-- `max_scrollback: usize` — cap (default 10,000)
-- `display_offset: usize` — viewport offset into scrollback
+- `rows: Vec<Row>` -- visible rows
+- `cols` / `lines` -- dimensions
+- `cursor: Cursor` -- current position + template cell + `input_needs_wrap`
+- `saved_cursor: Cursor` -- for DECSC/DECRC
+- `scroll_top` / `scroll_bottom` -- scroll region bounds
+- `tab_stops: Vec<bool>` -- tab stop positions
+- `scrollback: Vec<Row>` -- history buffer
+- `max_scrollback: usize` -- cap (default 10,000)
+- `display_offset: usize` -- viewport offset into scrollback
 
 `Row` wraps `Vec<Cell>` with `occ` (occupancy) for efficient reset.
 `Cursor` has `col`, `row`, `template: Cell` (current attributes), `input_needs_wrap`.
 
 Operations: put_char, put_wide_char, newline, carriage_return, backspace, scroll_up/down
 (in region), erase_display, erase_line, erase_chars, insert_blank_chars, delete_chars,
-insert_lines, delete_lines, resize, visible_row (viewport rendering).
+insert_lines, delete_lines, resize (with Ghostty-style cell-by-cell reflow), visible_row
+(viewport rendering), decaln, advance_tab, backward_tab, set_tab_stop, clear_tab_stops.
 
 ### `TermHandler` (term_handler.rs)
 
-Implements `vte::ansi::Handler` trait (~40 methods) with mutable access to Grid,
-Palette, TermMode, PTY writer, tab title, and active_is_alt flag. Uses vte's
-high-level `Processor` which parses all SGR/CSI/OSC sequences and calls semantic
-methods:
-- `input(char)` -- put character at cursor with template attributes
+Implements `vte::ansi::Handler` trait (~50 methods) with mutable access to Grid (primary
++ alt), Palette, TermMode, PTY writer, tab title, active_is_alt flag, cursor_shape,
+charset state, and title stack. Uses vte's high-level `Processor` which parses all
+SGR/CSI/OSC sequences and calls semantic methods:
+- `input(char)` -- put character at cursor with template attributes, charset mapping
 - `linefeed`, `carriage_return`, `backspace`, `tab` -- cursor movement
 - `goto(line, col)`, `move_up/down/forward/backward` -- CUP/CUU/CUD/CUF/CUB
-- `terminal_attribute(Attr)` -- SGR: all attributes, colors
+- `move_down_and_cr`, `move_up_and_cr` -- CNL/CPL
+- `terminal_attribute(Attr)` -- SGR: all attributes, colors, underline color (SGR 58)
 - `erase_display/erase_line/erase_chars` -- ED/EL/ECH
 - `insert_blank_chars/delete_chars/insert_blank_lines/delete_lines` -- ICH/DCH/IL/DL
 - `set_scrolling_region` -- DECSTBM
 - `scroll_up/scroll_down` -- SU/SD
-- `set_mode/unset_mode` -- DECSET/DECRST for 15 terminal modes
-- `swap_alt_screen/restore_primary_screen` -- alternate screen (1049)
+- `set_mode/unset_mode` -- SM/RM for ANSI modes (Insert, LineFeedNewLine)
+- `set_private_mode/unset_private_mode` -- DECSET/DECRST for 15+ private modes
+- `swap_alt_screen/restore_primary_screen` -- alternate screen (1049) with cursor save
 - `save_cursor_position/restore_cursor_position` -- DECSC/DECRC
 - `set_title` -- OSC 0/1/2
-- `device_status` -- DSR 6 cursor position report
-- `reverse_index`, `newline` -- RI, NEL
+- `push_title/pop_title` -- title stack
+- `device_status` -- DSR 5 (device OK) and DSR 6 (cursor position report)
+- `identify_terminal` -- DA (primary) and DA2 (secondary device attributes)
+- `report_mode/report_private_mode` -- DECRPM for ANSI and private modes
+- `set_cursor_style/set_cursor_shape` -- DECSCUSR
+- `configure_charset/set_active_charset` -- G0-G3 charset configuration
+- `dynamic_color_sequence` -- OSC 10/11/12 color queries
+- `set_color/reset_color` -- OSC 4/104 palette mutation
+- `set_hyperlink` -- OSC 8 hyperlinks
+- `clipboard_store/clipboard_load` -- OSC 52 clipboard (base64 encode/decode)
+- `text_area_size_chars/text_area_size_pixels` -- CSI 8/4 t
+- `decaln` -- screen alignment test
+- `reset_state` -- full terminal reset
+- `bell`, `substitute` -- BEL, SUB
 
 ### `TermMode` (term_mode.rs)
 
@@ -423,24 +535,41 @@ winit EventLoop<TermEvent>
   |
   +-- user_event(TermEvent)
   |     |
-  |     +-- PtyOutput(tab_id, data)   Feed bytes through VTE parser -> Grid mutations
+  |     +-- PtyOutput(tab_id, data)   Feed bytes through raw parser (OSC 7/133/XTVERSION)
+  |                                   then VTE Processor -> Grid mutations
   |                                   Request redraw if this is the active tab
   |
   +-- window_event(window_id, event)
         |
         +-- RedrawRequested           render_window():
         |                               1. Resize softbuffer surface
-        |                               2. Fill background (black)
+        |                               2. Fill background
         |                               3. render_tab_bar() with hover state + is_maximized
-        |                               4. render_grid() for active tab (with padding offsets)
+        |                               4. render_grid() for active tab:
+        |                                  - Pre-cache visible glyphs with font style
+        |                                  - Per-cell: resolve colors, selection highlight
+        |                                  - Draw cell backgrounds
+        |                                  - Draw cursor block
+        |                                  - Draw underline decorations (5 styles)
+        |                                  - Draw strikethrough
+        |                                  - Render glyphs with style + synthetic bold
         |                               5. render_window_border() (1px, skipped when maximized)
         |                               6. buffer.present()
         |
         +-- KeyboardInput             Intercept shortcuts:
+        |                               Ctrl+=       -> zoom in (change_font_size +1)
+        |                               Ctrl+-       -> zoom out (change_font_size -1)
+        |                               Ctrl+0       -> reset zoom (reset_font_size)
         |                               Ctrl+T       -> new_tab_in_window()
         |                               Ctrl+W       -> close_tab()
         |                               Ctrl+Tab     -> cycle tabs forward
         |                               Ctrl+S+Tab   -> cycle tabs backward
+        |                               Ctrl+C       -> copy if selection, else ^C to PTY
+        |                               Ctrl+V       -> paste from clipboard
+        |                               Ctrl+S+C     -> copy selection
+        |                               Ctrl+S+V     -> paste from clipboard
+        |                               Ctrl+Insert  -> copy selection
+        |                               Shift+Insert -> paste from clipboard
         |                               Escape       -> cancel drag
         |                               Shift+PgUp   -> scroll up one page
         |                               Shift+PgDn   -> scroll down one page
@@ -451,7 +580,8 @@ winit EventLoop<TermEvent>
         |
         +-- MouseInput (pressed)      Check resize borders first (8px edges):
         |                               Resize zone -> drag_resize_window(direction)
-        |                             Then hit-test tab bar:
+        |                             Right-click: copy selection or paste
+        |                             Then check tab bar hit-test:
         |                               Tab(idx)      -> start DragState + select tab
         |                               CloseTab(idx) -> close_tab()
         |                               NewTab        -> new_tab_in_window()
@@ -459,21 +589,28 @@ winit EventLoop<TermEvent>
         |                               Maximize      -> toggle maximized
         |                               CloseWindow   -> close_window()
         |                               DragArea      -> drag_window() or double-click maximize
+        |                             Grid area:
+        |                               Single click  -> char selection
+        |                               Double click  -> word selection
+        |                               Triple click  -> line selection
+        |                               Alt+click     -> block selection
+        |                               Shift+click   -> extend selection
         |
-        +-- MouseInput (released)     Finalize drag:
+        +-- MouseInput (released)     Finalize selection (auto-copy to clipboard):
         |                               TornOff    -> find_window_at_cursor (stub)
         |                               DraggingInBar -> reorder done
         |                               Pending    -> was just a click
         |
         +-- CursorMoved              Update cursor icon (resize arrows at edges)
         |                            Update hover_hit for tab bar redraw
+        |                            Selection drag (update end point, auto-scroll)
         |                            Advance drag state machine:
         |                               Pending -> DraggingInBar (if dist >= 10px)
         |                               DraggingInBar -> TornOff (if vert >= 15px)
         |                               DraggingInBar -> reorder_tab_in_bar()
         |                               TornOff -> adjust window position
         |
-        +-- ModifiersChanged          Track Ctrl/Shift for keyboard shortcuts
+        +-- ModifiersChanged          Track Ctrl/Shift/Alt for keyboard shortcuts
         |
         +-- CloseRequested            Remove all tabs in window, remove window,
                                       exit process if no windows remain
@@ -490,12 +627,36 @@ cp target/x86_64-pc-windows-gnu/release/oriterm.exe /mnt/c/Users/ericm/ori_term/
 
 Launch from Windows: `C:\Users\ericm\ori_term\oriterm.exe`
 
+### Version
+
+Current version: `0.1.0-alpha.1` (Cargo.toml). Build number tracked in `BUILD_NUMBER`
+file and included in XTVERSION response.
+
+### Pre-commit hooks (lefthook)
+
+```yaml
+pre-commit:
+  parallel: true
+  commands:
+    clippy:
+      glob: "*.rs"
+      run: cargo clippy --target x86_64-pc-windows-gnu -- -D warnings
+    build:
+      glob: "*.rs"
+      run: cargo build --target x86_64-pc-windows-gnu
+
+commit-msg:
+  commands:
+    conventional-commit:
+      run: .lefthook/commit-msg.sh {1}
+```
+
 ### Debug logs
 
 The app writes log files next to the executable:
-- `ori_term_debug.log` -- runtime trace (PTY events, window creation, drag transitions)
-- `ori_term_panic.log` -- panic message if the app crashes
-- `ori_term_error.log` -- top-level error if `App::run()` returns `Err`
+- `oriterm_debug.log` -- runtime trace (PTY events, window creation, drag transitions)
+- `oriterm_panic.log` -- panic message if the app crashes
+- `oriterm_error.log` -- top-level error if `App::run()` returns `Err`
 
 ### Dependencies
 
@@ -508,6 +669,8 @@ The app writes log files next to the executable:
 | `vte` | 0.15 (ansi feature) | ANSI/VT escape sequence parser with high-level Handler trait |
 | `bitflags` | 2 | CellFlags and TermMode bitflags |
 | `log` | 0.4 | Logging macros |
+| `base64` | 0.22 | OSC 52 clipboard payload encoding/decoding |
+| `clipboard-win` | 5.4 | Windows clipboard access (cfg(windows) only) |
 | `unicode-width` | 0.2 | Wide character width detection in term_handler |
 | `crossterm` | 0.28 | Library scaffolding modules (not used by emulator yet) |
 | `unicode-segmentation` | 1.12 | Library scaffolding (not used by emulator yet) |

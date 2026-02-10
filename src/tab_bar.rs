@@ -1,4 +1,4 @@
-use crate::render::{GlyphCache, render_text};
+use crate::render::{FontSet, render_text};
 use crate::tab::TabId;
 
 // Tab bar constants
@@ -128,7 +128,7 @@ impl TabBarLayout {
 }
 
 pub fn render_tab_bar(
-    glyphs: &mut GlyphCache,
+    glyphs: &mut FontSet,
     buffer: &mut [u32],
     buf_w: usize,
     _buf_h: usize,

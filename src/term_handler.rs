@@ -1,5 +1,7 @@
 use std::io::Write;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use unicode_width::UnicodeWidthChar;
 use vte::ansi::{
     Attr, CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, Hyperlink,
@@ -624,12 +626,24 @@ impl Handler for TermHandler<'_> {
         }
     }
 
-    fn clipboard_store(&mut self, _clipboard: u8, _data: &[u8]) {
-        // OSC 52 clipboard store — requires platform clipboard integration (Section 09/14)
+    fn clipboard_store(&mut self, _clipboard: u8, data: &[u8]) {
+        // OSC 52 clipboard store: data is base64-encoded text from the application.
+        // Selector byte (_clipboard) maps c/p/s — all go to system clipboard on Windows.
+        if let Ok(decoded) = BASE64.decode(data) {
+            if let Ok(text) = String::from_utf8(decoded) {
+                crate::clipboard::set_text(&text);
+            }
+        }
     }
 
-    fn clipboard_load(&mut self, _clipboard: u8, _terminator: &str) {
-        // OSC 52 clipboard load — requires platform clipboard integration (Section 09/14)
+    fn clipboard_load(&mut self, _clipboard: u8, terminator: &str) {
+        // OSC 52 clipboard load: respond with base64-encoded clipboard contents.
+        // Format: ESC ] 52 ; <selector> ; <base64> <terminator>
+        if let Some(text) = crate::clipboard::get_text() {
+            let encoded = BASE64.encode(text.as_bytes());
+            let response = format!("\x1b]52;c;{encoded}{terminator}");
+            self.write_pty(response.as_bytes());
+        }
     }
 
     fn substitute(&mut self) {

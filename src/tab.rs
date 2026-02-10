@@ -123,8 +123,9 @@ impl Perform for RawInterceptor<'_> {
         // XTVERSION: CSI > q — report terminal name and version.
         if action == 'q' && intermediates == [b'>'] {
             let version = env!("CARGO_PKG_VERSION");
+            let build = include_str!("../BUILD_NUMBER").trim();
             // Response: DCS > | terminal-name(version) ST
-            let response = format!("\x1bP>|oriterm({version})\x1b\\");
+            let response = format!("\x1bP>|oriterm({version} build {build})\x1b\\");
             if let Some(w) = self.pty_writer.as_mut() {
                 let _ = w.write_all(response.as_bytes());
                 let _ = w.flush();

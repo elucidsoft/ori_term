@@ -14,7 +14,7 @@ use crate::clipboard;
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
 use crate::log;
 use crate::palette::rgb_to_u32;
-use crate::render::{self, GlyphCache, render_grid};
+use crate::render::{self, FontSet, render_grid};
 use crate::selection::{
     self, Selection, SelectionMode, SelectionPoint, Side,
 };
@@ -38,7 +38,7 @@ const SCROLL_LINES: usize = 3;
 pub struct App {
     windows: HashMap<WindowId, TermWindow>,
     tabs: HashMap<TabId, Tab>,
-    glyphs: GlyphCache,
+    glyphs: FontSet,
     drag: Option<DragState>,
     next_tab_id: u64,
     proxy: EventLoopProxy<TermEvent>,
@@ -63,12 +63,10 @@ impl App {
         let _ = std::fs::remove_file(crate::log_path());
         log("starting");
 
-        let font_data = render::load_font();
-        log(&format!("font loaded: {} bytes", font_data.len()));
-        let glyphs = GlyphCache::new(&font_data, render::FONT_SIZE);
+        let glyphs = FontSet::load(render::FONT_SIZE);
         log(&format!(
-            "glyphs: cell={}x{}, baseline={}",
-            glyphs.cell_width, glyphs.cell_height, glyphs.baseline
+            "font loaded: cell={}x{}, baseline={}, size={}",
+            glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size
         ));
 
         let event_loop = EventLoop::<TermEvent>::with_user_event()
@@ -112,6 +110,46 @@ impl App {
         let cols = if cw > 0 { grid_w / cw } else { DEFAULT_COLS };
         let rows = if ch > 0 { grid_h / ch } else { DEFAULT_ROWS };
         (cols.max(2), rows.max(1))
+    }
+
+    fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
+        let new_size = self.glyphs.size + delta;
+        self.glyphs = self.glyphs.resize(new_size);
+        log(&format!(
+            "font resize: size={}, cell={}x{}",
+            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+        ));
+        self.resize_all_tabs_in_window(window_id);
+    }
+
+    fn reset_font_size(&mut self, window_id: WindowId) {
+        self.glyphs = self.glyphs.resize(render::FONT_SIZE);
+        log(&format!(
+            "font reset: size={}, cell={}x{}",
+            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+        ));
+        self.resize_all_tabs_in_window(window_id);
+    }
+
+    fn resize_all_tabs_in_window(&mut self, window_id: WindowId) {
+        let tw = match self.windows.get(&window_id) {
+            Some(tw) => tw,
+            None => return,
+        };
+        let size = tw.window.inner_size();
+        let (cols, rows) = self.grid_dims_for_size(size.width, size.height);
+        let pixel_w = size.width as u16;
+        let pixel_h = size.height as u16;
+
+        for &tab_id in &tw.tabs.clone() {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.selection = None;
+                tab.resize(cols, rows, pixel_w, pixel_h);
+            }
+        }
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
     }
 
     fn create_window(
@@ -1180,6 +1218,24 @@ impl ApplicationHandler<TermEvent> for App {
 
                 let ctrl = self.modifiers.control_key();
                 let shift = self.modifiers.shift_key();
+
+                // Ctrl+= or Ctrl++ — zoom in
+                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "=" || c.as_str() == "+") {
+                    self.change_font_size(window_id, 1.0);
+                    return;
+                }
+
+                // Ctrl+- — zoom out
+                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "-") {
+                    self.change_font_size(window_id, -1.0);
+                    return;
+                }
+
+                // Ctrl+0 — reset zoom
+                if ctrl && !shift && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "0") {
+                    self.reset_font_size(window_id);
+                    return;
+                }
 
                 // Ctrl+T — new tab
                 if ctrl && matches!(&event.logical_key, Key::Character(c) if c.as_str() == "t") {
