@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
+use crate::gpu::renderer::GpuState;
 use crate::tab::TabId;
 use crate::tab_bar::TAB_BAR_HEIGHT;
 
 pub struct TermWindow {
     pub window: Arc<Window>,
-    pub context: softbuffer::Context<Arc<Window>>,
-    pub surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    pub surface: wgpu::Surface<'static>,
+    pub surface_config: wgpu::SurfaceConfiguration,
     pub tabs: Vec<TabId>,
     pub active_tab: usize,
     pub tab_bar_height: usize,
@@ -18,17 +19,25 @@ pub struct TermWindow {
 impl TermWindow {
     pub fn new(
         window: Arc<Window>,
-        context: softbuffer::Context<Arc<Window>>,
-        surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
-    ) -> Self {
-        Self {
+        gpu: &GpuState,
+    ) -> Option<Self> {
+        let (surface, surface_config) = gpu.create_surface(&window)?;
+        Some(Self {
             window,
-            context,
             surface,
+            surface_config,
             tabs: Vec::new(),
             active_tab: 0,
             tab_bar_height: TAB_BAR_HEIGHT,
             is_maximized: false,
+        })
+    }
+
+    pub fn resize_surface(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.surface_config.width = width;
+            self.surface_config.height = height;
+            self.surface.configure(device, &self.surface_config);
         }
     }
 

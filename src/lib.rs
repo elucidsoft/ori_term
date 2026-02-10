@@ -16,6 +16,7 @@ pub mod palette;
 pub mod term_mode;
 pub mod term_handler;
 pub mod render;
+pub mod gpu;
 pub mod tab;
 pub mod tab_bar;
 pub mod drag;

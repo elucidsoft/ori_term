@@ -3,7 +3,7 @@ use crate::tab::TabId;
 
 // Tab bar constants
 pub const TAB_BAR_HEIGHT: usize = 46;
-const TAB_LEFT_MARGIN: usize = 16;     // space between window edge and first tab
+pub const TAB_LEFT_MARGIN: usize = 16;     // space between window edge and first tab
 const TAB_TOP_MARGIN: usize = 8;       // space between window edge and tab tops
 const TAB_BOTTOM_MARGIN: usize = 0;    // tabs touch the grid area
 const TAB_MIN_WIDTH: usize = 80;
@@ -11,11 +11,12 @@ const TAB_MAX_WIDTH: usize = 200;
 const TAB_PADDING: usize = 8;
 const CLOSE_BUTTON_WIDTH: usize = 24;
 const CLOSE_BUTTON_RIGHT_PAD: usize = 8;  // padding from right edge of tab
-const NEW_TAB_BUTTON_WIDTH: usize = 38;
+pub const NEW_TAB_BUTTON_WIDTH: usize = 38;
+pub const DROPDOWN_BUTTON_WIDTH: usize = 30;
 
 // Window control button constants (Windows 10/11 proportions)
-const CONTROL_BUTTON_WIDTH: usize = 46;
-const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3; // 138px for 3 buttons
+const CONTROL_BUTTON_WIDTH: usize = 58;
+const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3; // 174px for 3 buttons
 
 // Window control icon size (10x10 pixel icons, centered in buttons)
 const ICON_SIZE: usize = 10;
@@ -50,6 +51,7 @@ pub enum TabBarHit {
     Tab(usize),
     CloseTab(usize),
     NewTab,
+    DropdownButton,
     Minimize,
     Maximize,
     CloseWindow,
@@ -65,10 +67,11 @@ pub struct TabBarLayout {
 
 impl TabBarLayout {
     pub fn compute(tab_count: usize, bar_width: usize) -> Self {
-        // Reserve space for left margin, new-tab button, and window controls
+        // Reserve space for left margin, new-tab button, dropdown, and window controls
         let available = bar_width
             .saturating_sub(TAB_LEFT_MARGIN)
             .saturating_sub(NEW_TAB_BUTTON_WIDTH)
+            .saturating_sub(DROPDOWN_BUTTON_WIDTH)
             .saturating_sub(CONTROLS_ZONE_WIDTH);
         let tab_width = if tab_count == 0 {
             TAB_MIN_WIDTH
@@ -106,6 +109,12 @@ impl TabBarLayout {
         // Check new tab button (at the end of all tabs)
         if x >= tabs_end && x < tabs_end + NEW_TAB_BUTTON_WIDTH {
             return TabBarHit::NewTab;
+        }
+
+        // Check dropdown button (right after new-tab button)
+        let dropdown_x = tabs_end + NEW_TAB_BUTTON_WIDTH;
+        if x >= dropdown_x && x < dropdown_x + DROPDOWN_BUTTON_WIDTH {
+            return TabBarHit::DropdownButton;
         }
 
         // Check which tab

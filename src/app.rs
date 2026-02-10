@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -12,14 +11,18 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::clipboard;
 use crate::drag::{DragPhase, DragState, DRAG_START_THRESHOLD, TEAR_OFF_THRESHOLD};
+use crate::gpu::renderer::{FrameParams, GpuRenderer, GpuState};
 use crate::log;
-use crate::palette::rgb_to_u32;
-use crate::render::{self, FontSet, render_grid};
+use crate::render::{self, FontSet};
 use crate::selection::{
     self, Selection, SelectionMode, SelectionPoint, Side,
 };
 use crate::tab::{Tab, TabId, TermEvent};
-use crate::tab_bar::{self, TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, GRID_PADDING_LEFT, GRID_PADDING_BOTTOM, render_window_border};
+use crate::palette::{ColorScheme, BUILTIN_SCHEMES};
+use crate::tab_bar::{
+    TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
+    GRID_PADDING_LEFT, GRID_PADDING_BOTTOM,
+};
 use crate::term_mode::TermMode;
 use crate::window::TermWindow;
 
@@ -39,6 +42,8 @@ pub struct App {
     windows: HashMap<WindowId, TermWindow>,
     tabs: HashMap<TabId, Tab>,
     glyphs: FontSet,
+    gpu: Option<GpuState>,
+    renderer: Option<GpuRenderer>,
     drag: Option<DragState>,
     next_tab_id: u64,
     proxy: EventLoopProxy<TermEvent>,
@@ -52,6 +57,10 @@ pub struct App {
     left_mouse_down: bool,
     last_grid_click_pos: Option<(usize, usize)>,
     click_count: u8,
+    // Dropdown menu & settings
+    dropdown_open: Option<WindowId>,
+    settings_window: Option<WindowId>,
+    active_scheme: &'static str,
 }
 
 impl App {
@@ -78,6 +87,8 @@ impl App {
             windows: HashMap::new(),
             tabs: HashMap::new(),
             glyphs,
+            gpu: None,
+            renderer: None,
             drag: None,
             next_tab_id: 1,
             proxy,
@@ -90,6 +101,9 @@ impl App {
             left_mouse_down: false,
             last_grid_click_pos: None,
             click_count: 0,
+            dropdown_open: None,
+            settings_window: None,
+            active_scheme: "Catppuccin Mocha",
         };
 
         event_loop.run_app(&mut app)?;
@@ -119,6 +133,10 @@ impl App {
             "font resize: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
         ));
+        // Rebuild atlas for new font size
+        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+            renderer.rebuild_atlas(gpu, &mut self.glyphs);
+        }
         self.resize_all_tabs_in_window(window_id);
     }
 
@@ -128,6 +146,10 @@ impl App {
             "font reset: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
         ));
+        // Rebuild atlas for new font size
+        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+            renderer.rebuild_atlas(gpu, &mut self.glyphs);
+        }
         self.resize_all_tabs_in_window(window_id);
     }
 
@@ -162,7 +184,8 @@ impl App {
         let attrs = Window::default_attributes()
             .with_title("oriterm")
             .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
-            .with_decorations(false);
+            .with_decorations(false)
+            .with_visible(false);
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -172,38 +195,33 @@ impl App {
             }
         };
 
-        let context = match softbuffer::Context::new(window.clone()) {
-            Ok(c) => c,
-            Err(e) => {
-                log(&format!("failed to create softbuffer context: {e}"));
-                return None;
-            }
-        };
-
-        let surface = match softbuffer::Surface::new(&context, window.clone()) {
-            Ok(s) => s,
-            Err(e) => {
-                log(&format!("failed to create surface: {e}"));
-                return None;
-            }
-        };
-
-        let id = window.id();
-        let mut tw = TermWindow::new(window, context, surface);
-
-        // Fill surface with dark background immediately to prevent white flash
-        let bg_u32 = rgb_to_u32(crate::palette::Palette::new().default_bg());
-        if let (Some(nw), Some(nh)) = (NonZeroU32::new(win_w), NonZeroU32::new(win_h)) {
-            if tw.surface.resize(nw, nh).is_ok() {
-                if let Ok(mut buf) = tw.surface.buffer_mut() {
-                    buf.fill(bg_u32);
-                    let _ = buf.present();
-                }
-            }
+        // Initialize GPU on first window creation
+        if self.gpu.is_none() {
+            let gpu = GpuState::new(&window);
+            let renderer = GpuRenderer::new(&gpu, &mut self.glyphs);
+            self.gpu = Some(gpu);
+            self.renderer = Some(renderer);
         }
 
+        let gpu = self.gpu.as_ref().expect("GPU initialized");
+        let id = window.id();
+
+        let Some(tw) = TermWindow::new(window.clone(), gpu) else {
+            log("failed to create TermWindow (surface creation failed)");
+            return None;
+        };
+
+        // Render a dark clear frame before showing the window
+        if let Some(renderer) = &self.renderer {
+            let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
+            renderer.clear_surface(gpu, &tw.surface, bg);
+        }
+
+        // Now show the window with the dark frame already rendered
+        window.set_visible(true);
+
         self.windows.insert(id, tw);
-        log(&format!("created window {:?}", id));
+        log(&format!("created window {id:?}"));
         Some(id)
     }
 
@@ -234,7 +252,7 @@ impl App {
             tw.window.request_redraw();
         }
 
-        log(&format!("new tab {:?} in window {:?}", tab_id, window_id));
+        log(&format!("new tab {tab_id:?} in window {window_id:?}"));
         Some(tab_id)
     }
 
@@ -263,6 +281,12 @@ impl App {
     }
 
     fn close_window(&mut self, window_id: WindowId, event_loop: &ActiveEventLoop) {
+        // If closing the settings window, just remove it — don't exit
+        if self.settings_window == Some(window_id) {
+            self.close_settings_window();
+            return;
+        }
+
         let tab_ids: Vec<TabId> = self
             .windows
             .get(&window_id)
@@ -273,13 +297,23 @@ impl App {
         }
         self.windows.remove(&window_id);
 
-        if self.windows.is_empty() {
+        // Also close settings window if no terminal windows remain
+        let terminal_windows = self.windows.keys()
+            .any(|wid| self.settings_window != Some(*wid));
+        if !terminal_windows {
+            self.close_settings_window();
             event_loop.exit();
         }
     }
 
     fn render_window(&mut self, window_id: WindowId) {
-        // Extract all info we need before borrowing the surface mutably.
+        // Settings window has its own renderer path
+        if self.is_settings_window(window_id) {
+            self.render_settings_window(window_id);
+            return;
+        }
+
+        // Extract all info we need before borrowing mutably.
         let (phys, tab_info, active_idx, active_tab_id, is_maximized) = {
             let tw = match self.windows.get(&window_id) {
                 Some(tw) => tw,
@@ -306,67 +340,53 @@ impl App {
             return;
         }
 
-        let w = phys.width as usize;
-        let h = phys.height as usize;
         let hover = self.hover_hit.get(&window_id).copied().unwrap_or(TabBarHit::None);
+        let dropdown_open = self.dropdown_open == Some(window_id);
 
-        // Get palette info for background color
-        let bg_u32 = self.tabs.values().next()
-            .map_or(0x001e1e2e, |t| rgb_to_u32(t.palette.default_bg()));
+        // Build FrameParams — need the active tab's grid
+        let frame_params = active_tab_id
+            .and_then(|tab_id| self.tabs.get(&tab_id))
+            .map(|tab| FrameParams {
+                width: phys.width,
+                height: phys.height,
+                grid: tab.grid(),
+                palette: &tab.palette,
+                mode: tab.mode,
+                selection: tab.selection.as_ref(),
+                tab_info: &tab_info,
+                active_tab: active_idx,
+                hover_hit: hover,
+                is_maximized,
+                dropdown_open,
+            });
 
-        let tw = match self.windows.get_mut(&window_id) {
+        let Some(frame_params) = frame_params else {
+            return;
+        };
+
+        // Get surface and config from the window
+        let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
             None => return,
         };
 
-        if tw.surface.resize(
-            NonZeroU32::new(phys.width).unwrap(),
-            NonZeroU32::new(phys.height).unwrap(),
-        ).is_err() {
-            return;
-        }
-
-        let mut buffer = match tw.surface.buffer_mut() {
-            Ok(b) => b,
-            Err(_) => return,
+        let gpu = match &self.gpu {
+            Some(g) => g,
+            None => return,
         };
 
-        buffer.fill(bg_u32);
+        let renderer = match &mut self.renderer {
+            Some(r) => r,
+            None => return,
+        };
 
-        // Render tab bar
-        tab_bar::render_tab_bar(
+        renderer.draw_frame(
+            gpu,
+            &tw.surface,
+            &tw.surface_config,
+            &frame_params,
             &mut self.glyphs,
-            &mut buffer,
-            w,
-            h,
-            &tab_info,
-            active_idx,
-            hover,
-            is_maximized,
         );
-
-        // Render active tab's grid
-        if let Some(tab_id) = active_tab_id {
-            if let Some(tab) = self.tabs.get(&tab_id) {
-                render_grid(
-                    &mut self.glyphs,
-                    tab.grid(),
-                    &tab.palette,
-                    tab.mode,
-                    tab.selection.as_ref(),
-                    &mut buffer,
-                    w,
-                    h,
-                    GRID_PADDING_LEFT,
-                    TAB_BAR_HEIGHT + 10,
-                );
-            }
-        }
-
-        // Draw 1px window border on top of everything (Windows 10 style)
-        render_window_border(&mut buffer, w, h, is_maximized);
-
-        let _ = buffer.present();
     }
 
     /// Detect if cursor is in the resize border zone. Returns the resize direction
@@ -406,11 +426,24 @@ impl App {
     }
 
     fn handle_resize(&mut self, window_id: WindowId, width: u32, height: u32) {
+        // Settings window doesn't have tabs to resize
+        if self.is_settings_window(window_id) {
+            if let (Some(tw), Some(gpu)) = (self.windows.get_mut(&window_id), self.gpu.as_ref()) {
+                tw.resize_surface(&gpu.device, width, height);
+            }
+            return;
+        }
+
         let (cols, rows) = self.grid_dims_for_size(width, height);
         log(&format!(
             "handle_resize: window={width}x{height} cell={}x{} cols={cols} rows={rows}",
             self.glyphs.cell_width, self.glyphs.cell_height
         ));
+
+        // Resize the wgpu surface
+        if let (Some(tw), Some(gpu)) = (self.windows.get_mut(&window_id), self.gpu.as_ref()) {
+            tw.resize_surface(&gpu.device, width, height);
+        }
 
         let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
@@ -542,6 +575,17 @@ impl App {
 
         match state {
             ElementState::Pressed => {
+                // If clicking in settings window, handle separately
+                if self.is_settings_window(window_id) {
+                    self.handle_settings_mouse(window_id, x, y);
+                    return;
+                }
+
+                // If dropdown is open, handle menu click first
+                if self.dropdown_open.is_some() && self.handle_dropdown_click(window_id, x, y, event_loop) {
+                    return;
+                }
+
                 // Check resize borders first
                 if let Some(direction) = self.resize_direction_at(window_id, pos) {
                     if let Some(tw) = self.windows.get(&window_id) {
@@ -561,6 +605,16 @@ impl App {
                     match hit {
                         TabBarHit::NewTab => {
                             self.new_tab_in_window(window_id);
+                        }
+                        TabBarHit::DropdownButton => {
+                            if self.dropdown_open == Some(window_id) {
+                                self.dropdown_open = None;
+                            } else {
+                                self.dropdown_open = Some(window_id);
+                            }
+                            if let Some(tw) = self.windows.get(&window_id) {
+                                tw.window.request_redraw();
+                            }
                         }
                         TabBarHit::CloseTab(idx) => {
                             let tw = match self.windows.get(&window_id) {
@@ -1125,6 +1179,201 @@ impl App {
         // Simplified for now — would need screen coordinates.
         None
     }
+
+    // --- Dropdown menu helpers ---
+
+    /// Compute the dropdown menu rectangle (x, y, w, h) in the given window.
+    fn dropdown_menu_rect(&self, window_id: WindowId) -> Option<(usize, usize, usize, usize)> {
+        let tw = self.windows.get(&window_id)?;
+        let tab_count = tw.tabs.len();
+        let bar_w = tw.window.inner_size().width as usize;
+        let layout = TabBarLayout::compute(tab_count, bar_w);
+        let tabs_end = TAB_LEFT_MARGIN + tab_count * layout.tab_width;
+        let dropdown_x = tabs_end + NEW_TAB_BUTTON_WIDTH;
+        let menu_w: usize = 140;
+        let menu_h: usize = 32;
+        let menu_x = dropdown_x;
+        let menu_y = TAB_BAR_HEIGHT;
+        Some((menu_x, menu_y, menu_w, menu_h))
+    }
+
+    /// Handle a click when the dropdown menu is open.
+    /// Returns true if the click was consumed (inside menu or dismiss).
+    fn handle_dropdown_click(
+        &mut self,
+        window_id: WindowId,
+        x: usize,
+        y: usize,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
+        let dropdown_wid = match self.dropdown_open {
+            Some(wid) => wid,
+            None => return false,
+        };
+
+        // Only handle clicks in the window that has the dropdown open
+        if window_id != dropdown_wid {
+            self.dropdown_open = None;
+            if let Some(tw) = self.windows.get(&dropdown_wid) {
+                tw.window.request_redraw();
+            }
+            return false;
+        }
+
+        if let Some((mx, my, mw, mh)) = self.dropdown_menu_rect(window_id) {
+            if x >= mx && x < mx + mw && y >= my && y < my + mh {
+                // Clicked on "Settings" menu item
+                self.dropdown_open = None;
+                self.open_settings_window(event_loop);
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+                return true;
+            }
+        }
+
+        // Clicked outside menu — dismiss
+        self.dropdown_open = None;
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+        // Don't consume if the click is on tab bar buttons — let it propagate
+        y >= TAB_BAR_HEIGHT
+    }
+
+    // --- Settings window ---
+
+    fn open_settings_window(&mut self, event_loop: &ActiveEventLoop) {
+        // If already open, focus it
+        if let Some(wid) = self.settings_window {
+            if let Some(tw) = self.windows.get(&wid) {
+                tw.window.focus_window();
+                return;
+            }
+            // Window was closed externally
+            self.settings_window = None;
+        }
+
+        let win_w: u32 = 300;
+        let win_h: u32 = 350;
+
+        let attrs = Window::default_attributes()
+            .with_title("Settings")
+            .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
+            .with_decorations(false)
+            .with_resizable(false);
+
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                log(&format!("failed to create settings window: {e}"));
+                return;
+            }
+        };
+
+        let gpu = match &self.gpu {
+            Some(g) => g,
+            None => return,
+        };
+
+        let id = window.id();
+
+        let Some(tw) = TermWindow::new(window.clone(), gpu) else {
+            log("failed to create settings window surface");
+            return;
+        };
+
+        // Render a dark clear frame
+        if let Some(renderer) = &self.renderer {
+            let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
+            renderer.clear_surface(gpu, &tw.surface, bg);
+        }
+
+        window.set_visible(true);
+        self.windows.insert(id, tw);
+        self.settings_window = Some(id);
+        log(&format!("created settings window {id:?}"));
+    }
+
+    fn close_settings_window(&mut self) {
+        if let Some(wid) = self.settings_window.take() {
+            self.windows.remove(&wid);
+        }
+    }
+
+    fn is_settings_window(&self, window_id: WindowId) -> bool {
+        self.settings_window == Some(window_id)
+    }
+
+    fn render_settings_window(&mut self, window_id: WindowId) {
+        let tw = match self.windows.get(&window_id) {
+            Some(tw) => tw,
+            None => return,
+        };
+
+        let phys = tw.window.inner_size();
+        if phys.width == 0 || phys.height == 0 {
+            return;
+        }
+
+        let gpu = match &self.gpu {
+            Some(g) => g,
+            None => return,
+        };
+
+        let renderer = match &mut self.renderer {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Get palette from any tab (for color derivation)
+        let palette = self.tabs.values().next().map(|t| &t.palette);
+
+        renderer.draw_settings_frame(
+            gpu,
+            &tw.surface,
+            &tw.surface_config,
+            phys.width,
+            phys.height,
+            self.active_scheme,
+            palette,
+            &mut self.glyphs,
+        );
+    }
+
+    fn handle_settings_mouse(&mut self, window_id: WindowId, x: usize, y: usize) {
+        // Close button (top-right 30x30) — check first
+        let w = self.windows.get(&window_id)
+            .map_or(0, |tw| tw.window.inner_size().width as usize);
+        if x >= w.saturating_sub(30) && y < 30 {
+            self.close_settings_window();
+            return;
+        }
+
+        let title_h: usize = 50;
+        let row_h: usize = 40;
+
+        if y < title_h {
+            return;
+        }
+
+        let row_idx = (y - title_h) / row_h;
+        if row_idx < BUILTIN_SCHEMES.len() {
+            let scheme = BUILTIN_SCHEMES[row_idx];
+            self.apply_scheme_to_all_tabs(scheme);
+        }
+    }
+
+    fn apply_scheme_to_all_tabs(&mut self, scheme: &'static ColorScheme) {
+        self.active_scheme = scheme.name;
+        for tab in self.tabs.values_mut() {
+            tab.palette.set_scheme(scheme);
+        }
+        // Redraw all windows
+        for tw in self.windows.values() {
+            tw.window.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler<TermEvent> for App {
@@ -1142,7 +1391,7 @@ impl ApplicationHandler<TermEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: TermEvent) {
         match event {
             TermEvent::PtyOutput(tab_id, data) => {
-                log(&format!("pty_output: tab={:?} len={}", tab_id, data.len()));
+                log(&format!("pty_output: tab={tab_id:?} len={}", data.len()));
 
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
@@ -1201,6 +1450,27 @@ impl ApplicationHandler<TermEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
+                }
+
+                // Settings window: Escape closes it, all other keys ignored
+                if self.is_settings_window(window_id) {
+                    if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                        self.close_settings_window();
+                    }
+                    return;
+                }
+
+                // Escape: close dropdown if open
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                    if self.dropdown_open.is_some() {
+                        let wid = self.dropdown_open.take();
+                        if let Some(wid) = wid {
+                            if let Some(tw) = self.windows.get(&wid) {
+                                tw.window.request_redraw();
+                            }
+                        }
+                        return;
+                    }
                 }
 
                 // Handle Escape during drag
