@@ -20,6 +20,12 @@ pub struct Terminal {
     pub color_profile: ColorProfile,
 }
 
+impl Default for Terminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Terminal {
     /// Create a new Terminal, auto-detecting capabilities.
     pub fn new() -> Self {
@@ -45,7 +51,7 @@ impl Terminal {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = terminal::disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, cursor::Show);
+            let _ = execute!(stdout(), LeaveAlternateScreen, cursor::Show);
             original_hook(info);
         }));
 

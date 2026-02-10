@@ -33,7 +33,7 @@ impl CellFlags {
         .union(CellFlags::DASHED_UNDERLINE);
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct CellExtra {
     pub zerowidth: Vec<char>,
     pub underline_color: Option<Color>,
@@ -49,16 +49,6 @@ impl Clone for CellExtra {
                 id: h.id.clone(),
                 uri: h.uri.clone(),
             }),
-        }
-    }
-}
-
-impl Default for CellExtra {
-    fn default() -> Self {
-        Self {
-            zerowidth: Vec::new(),
-            underline_color: None,
-            hyperlink: None,
         }
     }
 }

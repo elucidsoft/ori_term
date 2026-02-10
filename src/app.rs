@@ -144,13 +144,12 @@ impl App {
 
         // Fill surface with dark background immediately to prevent white flash
         let bg_u32 = rgb_to_u32(crate::palette::Palette::new().default_bg());
-        if let (Some(nw), Some(nh)) = (NonZeroU32::new(win_w), NonZeroU32::new(win_h)) {
-            if tw.surface.resize(nw, nh).is_ok() {
-                if let Ok(mut buf) = tw.surface.buffer_mut() {
-                    buf.fill(bg_u32);
-                    let _ = buf.present();
-                }
-            }
+        if let (Some(nw), Some(nh)) = (NonZeroU32::new(win_w), NonZeroU32::new(win_h))
+            && tw.surface.resize(nw, nh).is_ok()
+            && let Ok(mut buf) = tw.surface.buffer_mut()
+        {
+            buf.fill(bg_u32);
+            let _ = buf.present();
         }
 
         self.windows.insert(id, tw);
@@ -301,20 +300,20 @@ impl App {
         );
 
         // Render active tab's grid
-        if let Some(tab_id) = active_tab_id {
-            if let Some(tab) = self.tabs.get(&tab_id) {
-                render_grid(
-                    &mut self.glyphs,
-                    tab.grid(),
-                    &tab.palette,
-                    tab.mode,
-                    &mut buffer,
-                    w,
-                    h,
-                    GRID_PADDING_LEFT,
-                    TAB_BAR_HEIGHT + 10,
-                );
-            }
+        if let Some(tab_id) = active_tab_id
+            && let Some(tab) = self.tabs.get(&tab_id)
+        {
+            render_grid(
+                &mut self.glyphs,
+                tab.grid(),
+                &tab.palette,
+                tab.mode,
+                &mut buffer,
+                w,
+                h,
+                GRID_PADDING_LEFT,
+                TAB_BAR_HEIGHT + 10,
+            );
         }
 
         // Draw 1px window border on top of everything (Windows 10 style)
@@ -563,10 +562,8 @@ impl App {
             if let Some(tw) = self.windows.get(&window_id) {
                 tw.window.set_cursor(icon);
             }
-        } else {
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.set_cursor(CursorIcon::Default);
-            }
+        } else if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.set_cursor(CursorIcon::Default);
         }
 
         // Update hover state for tab bar
@@ -584,10 +581,10 @@ impl App {
             }
         } else {
             let prev = self.hover_hit.insert(window_id, TabBarHit::None);
-            if prev != Some(TabBarHit::None) {
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
+            if prev != Some(TabBarHit::None)
+                && let Some(tw) = self.windows.get(&window_id)
+            {
+                tw.window.request_redraw();
             }
         }
 
@@ -625,18 +622,15 @@ impl App {
                         .and_then(|tw| tw.window.inner_position().ok())
                         .map(|ip| (ip.x as f64 + position.x, ip.y as f64 + position.y));
 
-                    if let Some((sx, sy)) = screen_cursor {
-                        // Position torn-off window so cursor stays at grab_offset
-                        let torn_wid = self.window_containing_tab(tab_id);
-                        if let Some(wid) = torn_wid {
-                            if let Some(tw) = self.windows.get(&wid) {
-                                let new_x = sx - grab_offset.x;
-                                let new_y = sy - grab_offset.y;
-                                tw.window.set_outer_position(
-                                    winit::dpi::PhysicalPosition::new(new_x as i32, new_y as i32),
-                                );
-                            }
-                        }
+                    if let Some((sx, sy)) = screen_cursor
+                        && let Some(wid) = self.window_containing_tab(tab_id)
+                        && let Some(tw) = self.windows.get(&wid)
+                    {
+                        let new_x = sx - grab_offset.x;
+                        let new_y = sy - grab_offset.y;
+                        tw.window.set_outer_position(
+                            PhysicalPosition::new(new_x as i32, new_y as i32),
+                        );
                     }
                 }
             }
@@ -678,7 +672,7 @@ impl App {
                     let win_x = sx - grab_x as i32;
                     let win_y = sy - grab_y as i32;
                     tw.window
-                        .set_outer_position(winit::dpi::PhysicalPosition::new(win_x, win_y));
+                        .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
                 tw.window.request_redraw();
 
@@ -747,13 +741,13 @@ impl App {
         let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
         let new_idx = (position.x as usize / layout.tab_width).min(tw.tabs.len().saturating_sub(1));
 
-        if let Some(current_idx) = tw.tab_index(tab_id) {
-            if current_idx != new_idx {
-                tw.tabs.remove(current_idx);
-                tw.tabs.insert(new_idx, tab_id);
-                tw.active_tab = new_idx;
-                tw.window.request_redraw();
-            }
+        if let Some(current_idx) = tw.tab_index(tab_id)
+            && current_idx != new_idx
+        {
+            tw.tabs.remove(current_idx);
+            tw.tabs.insert(new_idx, tab_id);
+            tw.active_tab = new_idx;
+            tw.window.request_redraw();
         }
     }
 
@@ -794,13 +788,11 @@ impl ApplicationHandler<TermEvent> for App {
                     tab.process_output(&data);
                 }
                 // Redraw the window containing this tab
-                if let Some(wid) = self.window_containing_tab(tab_id) {
-                    // Only redraw if this is the active tab in that window
-                    if let Some(tw) = self.windows.get(&wid) {
-                        if tw.active_tab_id() == Some(tab_id) {
-                            tw.window.request_redraw();
-                        }
-                    }
+                if let Some(wid) = self.window_containing_tab(tab_id)
+                    && let Some(tw) = self.windows.get(&wid)
+                    && tw.active_tab_id() == Some(tab_id)
+                {
+                    tw.window.request_redraw();
                 }
             }
         }
@@ -850,16 +842,16 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 // Handle Escape during drag
-                if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                    if self.drag.is_some() {
-                        // Cancel drag — revert to original state
-                        self.drag = None;
-                        // Redraw all windows
-                        for tw in self.windows.values() {
-                            tw.window.request_redraw();
-                        }
-                        return;
+                if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    && self.drag.is_some()
+                {
+                    // Cancel drag — revert to original state
+                    self.drag = None;
+                    // Redraw all windows
+                    for tw in self.windows.values() {
+                        tw.window.request_redraw();
                     }
+                    return;
                 }
 
                 let ctrl = self.modifiers.control_key();

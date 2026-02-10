@@ -1,3 +1,5 @@
+#![allow(clippy::missing_const_for_fn)]
+
 pub mod color;
 pub mod style;
 pub mod text;
@@ -26,7 +28,7 @@ pub fn log_path() -> std::path::PathBuf {
     std::env::current_exe()
         .unwrap_or_default()
         .parent()
-        .unwrap_or(std::path::Path::new("."))
+        .unwrap_or_else(|| std::path::Path::new("."))
         .join("ori_console_debug.log")
 }
 
