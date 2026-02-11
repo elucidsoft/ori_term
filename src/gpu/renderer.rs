@@ -27,12 +27,17 @@ use super::pipeline::{self, INSTANCE_STRIDE};
 const CONTROL_CLOSE_HOVER_BG: [f32; 4] = rgb_const(0xc4, 0x2b, 0x1c);
 const CONTROL_CLOSE_HOVER_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// Tab bar colors derived dynamically from the palette's background.
+/// Tab bar colors derived dynamically from the palette.
+///
+/// Chrome-style: the bar is dark, inactive tabs are slightly lighter (solid,
+/// fully opaque), the active tab matches the content area exactly.  All colors
+/// are alpha 1.0 — no transparency anywhere in the tab bar.
 struct TabBarColors {
     bar_bg: [f32; 4],
+    active_bg: [f32; 4],
     inactive_bg: [f32; 4],
     hover_bg: [f32; 4],
-    border: [f32; 4],
+    separator: [f32; 4],
     text_fg: [f32; 4],
     inactive_text: [f32; 4],
     close_fg: [f32; 4],
@@ -46,21 +51,30 @@ impl TabBarColors {
         let base = vte_rgb_to_rgba(palette.default_bg());
         let fg = vte_rgb_to_rgba(palette.default_fg());
 
+        // Chrome dark-mode style:
+        //   bar_bg       = noticeably darker than content
+        //   active_bg    = content bg (merges with grid below)
+        //   inactive_bg  = lighter than bar (visible step up)
+        //   hover_bg     = brighter still
+        // lighten() adds toward white — works correctly in linear space
+        // where dark values are compressed near zero.
         let bar_bg = darken(base, 0.35);
+        let active_bg = base;
         let inactive_bg = lighten(bar_bg, 0.15);
-        let hover_bg = lighten(bar_bg, 0.20);
-        let border = lighten(bar_bg, 0.08);
-        let inactive_text = blend(fg, bar_bg, 0.6);
+        let hover_bg = lighten(bar_bg, 0.22);
+        let separator = lighten(bar_bg, 0.06);
+        let inactive_text = lerp_color(fg, bar_bg, 0.40);
         let close_fg = inactive_text;
         let control_fg = fg;
-        let control_fg_dim = blend(fg, bar_bg, 0.5);
+        let control_fg_dim = lerp_color(fg, bar_bg, 0.50);
         let control_hover_bg = lighten(bar_bg, 0.12);
 
         Self {
             bar_bg,
+            active_bg,
             inactive_bg,
             hover_bg,
-            border,
+            separator,
             text_fg: fg,
             inactive_text,
             close_fg,
@@ -87,12 +101,12 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
-/// Blend two colors: result = a * t + b * (1 - t).
-fn blend(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+/// Linear interpolation between two colors.  t=0 → a, t=1 → b.  Alpha always 1.0.
+fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [
-        a[0] * t + b[0] * (1.0 - t),
-        a[1] * t + b[1] * (1.0 - t),
-        a[2] * t + b[2] * (1.0 - t),
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
         1.0,
     ]
 }
@@ -674,8 +688,7 @@ impl GpuRenderer {
         // Default background color
         let default_bg = palette_to_rgba(params.palette.default_bg());
 
-        // 1. Tab bar (uses configured tab_bar_opacity, UI font)
-        bg.opacity = params.tab_bar_opacity;
+        // 1. Tab bar (always fully opaque — individual tabs carry their own alpha)
         self.build_tab_bar_instances(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
 
         // Switch to transparent for grid content
@@ -699,9 +712,12 @@ impl GpuRenderer {
             bg.push_rect(w - bw, 0.0, bw, h, border_color);
         }
 
-        // 5. Dropdown overlay (separate buffers — drawn after main bg+fg, opaque)
+        // 5. Overlay pass (drawn after main bg+fg — dragged tab + dropdown)
         let mut overlay_bg = InstanceWriter::new();
         let mut overlay_fg = InstanceWriter::new();
+        self.build_dragged_tab_overlay(
+            &mut overlay_bg, &mut overlay_fg, params, ui_glyphs, &gpu.queue,
+        );
         self.build_dropdown_overlay(
             &mut overlay_bg, &mut overlay_fg, params, ui_glyphs, &gpu.queue,
         );
@@ -861,7 +877,7 @@ impl GpuRenderer {
         let w = params.width as f32;
         let tab_bar_h = TAB_BAR_HEIGHT as f32;
 
-        // Tab bar background
+        // Full-width bar background (darkest layer)
         bg.push_rect(0.0, 0.0, w, tab_bar_h, tc.bar_bg);
 
         let tab_count = params.tab_info.len();
@@ -872,143 +888,69 @@ impl GpuRenderer {
         let cell_h = glyphs.cell_height;
 
         let dragged_idx = params.dragged_tab.map(|(idx, _)| idx);
+        let top = TAB_TOP_MARGIN as f32;
+        let tab_h = tab_bar_h - top;
 
+        let tab_wf = tab_w as f32;
+
+        // --- Pass 1: inactive tabs (drawn first, behind active) ---
         for (i, (_id, title)) in params.tab_info.iter().enumerate() {
-            // Skip dragged tab — it's drawn last (on top)
-            if Some(i) == dragged_idx {
+            if Some(i) == dragged_idx || i == params.active_tab {
                 continue;
             }
 
             let base_x = (TAB_LEFT_MARGIN + i * tab_w) as f32;
             let x0 = base_x + params.tab_offsets.get(i).copied().unwrap_or(0.0);
-            let is_active = i == params.active_tab;
             let is_hovered = params.hover_hit == TabBarHit::Tab(i);
 
-            let tab_bg = if is_active {
-                vte_rgb_to_rgba(params.palette.default_bg())
-            } else if is_hovered {
-                tc.hover_bg
-            } else {
-                tc.inactive_bg
-            };
+            let tab_bg = if is_hovered { tc.hover_bg } else { tc.inactive_bg };
 
-            let text_fg = if is_active {
-                tc.text_fg
-            } else {
-                tc.inactive_text
-            };
+            bg.push_rounded_rect(x0, top, tab_wf, tab_h, tab_bg, 8.0);
 
-            // Tab background rect
-            let top = TAB_TOP_MARGIN as f32;
-            let bot = tab_bar_h;
-            bg.push_rect(x0, top, tab_w as f32, bot - top, tab_bg);
-
-            // Tab right border
-            let border_x = x0 + tab_w as f32 - 1.0;
-            bg.push_rect(border_x, top + 2.0, 1.0, bot - top - 4.0, tc.border);
-
-            // Tab title
-            let max_text_chars =
-                (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / cell_w.max(1);
-            let display_title: String = if title.len() > max_text_chars {
-                let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
-                t.push('\u{2026}');
-                t
-            } else {
-                title.clone()
-            };
-
-            let text_x = x0 + TAB_PADDING as f32;
-            let text_y = TAB_TOP_MARGIN as f32
-                + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
-            self.push_text_instances(
-                fg, &display_title, text_x, text_y, text_fg, glyphs, queue,
-            );
-
-            // Close button "×"
-            let close_x =
-                x0 + (tab_w - CLOSE_BUTTON_WIDTH - CLOSE_BUTTON_RIGHT_PAD) as f32;
-            let close_hovered = params.hover_hit == TabBarHit::CloseTab(i);
-            if close_hovered {
-                let sq_y = TAB_TOP_MARGIN as f32
-                    + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - CLOSE_BUTTON_WIDTH) as f32 / 2.0;
-                bg.push_rect(
-                    close_x,
-                    sq_y,
-                    CLOSE_BUTTON_WIDTH as f32,
-                    CLOSE_BUTTON_WIDTH as f32,
-                    lighten(tc.bar_bg, 0.10),
-                );
+            // Separator — hidden next to active, hovered, or dragged tabs
+            let next_is_active = (i + 1) == params.active_tab;
+            let next_is_dragged = Some(i + 1) == dragged_idx;
+            let next_is_hovered = params.hover_hit == TabBarHit::Tab(i + 1);
+            if !is_hovered && !next_is_active && !next_is_dragged && !next_is_hovered {
+                let sep_x = x0 + tab_wf - 0.5;
+                bg.push_rect(sep_x, top + 8.0, 1.0, tab_h - 16.0, tc.separator);
             }
-            let close_fg = if close_hovered { tc.text_fg } else { tc.close_fg };
-            let close_text_x = close_x + (CLOSE_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
-            let close_text_y = TAB_TOP_MARGIN as f32
-                + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
-            self.push_text_instances(
-                fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
+
+            self.render_tab_content(
+                bg, fg, x0, tab_w, cell_w, cell_h, title,
+                tc.inactive_text, &tc, i, params, glyphs, queue,
             );
         }
 
-        // Draw dragged tab last (on top of neighbors)
-        if let Some((drag_idx, drag_x)) = params.dragged_tab {
-            if let Some((_id, title)) = params.tab_info.get(drag_idx) {
-                let x0 = drag_x;
-                let tab_bg = vte_rgb_to_rgba(params.palette.default_bg());
-                let text_fg = tc.text_fg;
+        // --- Pass 2: active tab (drawn on top of inactive) ---
+        if let Some((_id, title)) = params.tab_info.get(params.active_tab) {
+            if Some(params.active_tab) != dragged_idx {
+                let base_x = (TAB_LEFT_MARGIN + params.active_tab * tab_w) as f32;
+                let x0 = base_x
+                    + params.tab_offsets.get(params.active_tab).copied().unwrap_or(0.0);
 
-                let top = TAB_TOP_MARGIN as f32;
-                let bot = tab_bar_h;
-                bg.push_rect(x0, top, tab_w as f32, bot - top, tab_bg);
+                bg.push_rounded_rect(x0, top, tab_wf, tab_h, tc.active_bg, 8.0);
 
-                let border_x = x0 + tab_w as f32 - 1.0;
-                bg.push_rect(border_x, top + 2.0, 1.0, bot - top - 4.0, tc.border);
-
-                let max_text_chars =
-                    (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / cell_w.max(1);
-                let display_title: String = if title.len() > max_text_chars {
-                    let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
-                    t.push('\u{2026}');
-                    t
-                } else {
-                    title.clone()
-                };
-
-                let text_x = x0 + TAB_PADDING as f32;
-                let text_y = TAB_TOP_MARGIN as f32
-                    + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
-                self.push_text_instances(
-                    fg, &display_title, text_x, text_y, text_fg, glyphs, queue,
-                );
-
-                let close_x =
-                    x0 + (tab_w - CLOSE_BUTTON_WIDTH - CLOSE_BUTTON_RIGHT_PAD) as f32;
-                let close_fg = tc.close_fg;
-                let close_text_x = close_x + (CLOSE_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
-                let close_text_y = TAB_TOP_MARGIN as f32
-                    + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
-                self.push_text_instances(
-                    fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
+                self.render_tab_content(
+                    bg, fg, x0, tab_w, cell_w, cell_h, title,
+                    tc.text_fg, &tc, params.active_tab, params, glyphs, queue,
                 );
             }
         }
+
+        // Dragged tab is rendered in the overlay pass (see build_dragged_tab_overlay)
+        // so its bg+fg both draw AFTER all main-pass bg+fg, giving correct occlusion.
 
         // New tab "+" button
         let plus_x = (TAB_LEFT_MARGIN + tab_count * tab_w) as f32;
         let plus_hovered = params.hover_hit == TabBarHit::NewTab;
         let plus_bg = if plus_hovered { tc.hover_bg } else { tc.bar_bg };
-        bg.push_rect(
-            plus_x,
-            TAB_TOP_MARGIN as f32,
-            NEW_TAB_BUTTON_WIDTH as f32,
-            tab_bar_h - TAB_TOP_MARGIN as f32,
-            plus_bg,
-        );
+        bg.push_rect(plus_x, top, NEW_TAB_BUTTON_WIDTH as f32, tab_h, plus_bg);
         let plus_text_x = plus_x + (NEW_TAB_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
-        let plus_text_y =
-            TAB_TOP_MARGIN as f32 + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
+        let plus_text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(fg, "+", plus_text_x, plus_text_y, tc.text_fg, glyphs, queue);
 
-        // Dropdown "▾" button (right of the "+" button)
+        // Dropdown "▾" button
         let dropdown_x = plus_x + NEW_TAB_BUTTON_WIDTH as f32;
         let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
         let dropdown_bg = if dropdown_hovered || params.dropdown_open {
@@ -1016,16 +958,9 @@ impl GpuRenderer {
         } else {
             tc.bar_bg
         };
-        bg.push_rect(
-            dropdown_x,
-            TAB_TOP_MARGIN as f32,
-            DROPDOWN_BUTTON_WIDTH as f32,
-            tab_bar_h - TAB_TOP_MARGIN as f32,
-            dropdown_bg,
-        );
+        bg.push_rect(dropdown_x, top, DROPDOWN_BUTTON_WIDTH as f32, tab_h, dropdown_bg);
         let dd_text_x = dropdown_x + (DROPDOWN_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
-        let dd_text_y =
-            TAB_TOP_MARGIN as f32 + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
+        let dd_text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(
             fg, "\u{25BE}", dd_text_x, dd_text_y, tc.text_fg, glyphs, queue,
         );
@@ -1033,6 +968,60 @@ impl GpuRenderer {
         // Window control buttons
         let controls_start = (params.width as usize).saturating_sub(CONTROLS_ZONE_WIDTH) as f32;
         self.build_window_controls(bg, controls_start, params, &tc);
+    }
+
+    /// Render a single tab's text content and close button.
+    #[allow(clippy::too_many_arguments)]
+    fn render_tab_content(
+        &mut self,
+        bg: &mut InstanceWriter,
+        fg: &mut InstanceWriter,
+        x0: f32,
+        tab_w: usize,
+        cell_w: usize,
+        cell_h: usize,
+        title: &str,
+        text_fg: [f32; 4],
+        tc: &TabBarColors,
+        tab_idx: usize,
+        params: &FrameParams<'_>,
+        glyphs: &mut FontSet,
+        queue: &wgpu::Queue,
+    ) {
+        let top = TAB_TOP_MARGIN as f32;
+        let tab_h = TAB_BAR_HEIGHT as f32 - top;
+
+        // Title text
+        let max_text_chars = (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / cell_w.max(1);
+        let display_title: String = if title.len() > max_text_chars {
+            let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
+            t.push('\u{2026}');
+            t
+        } else {
+            title.to_string()
+        };
+
+        let text_x = x0 + TAB_PADDING as f32;
+        let text_y = top + (tab_h - cell_h as f32) / 2.0;
+        self.push_text_instances(fg, &display_title, text_x, text_y, text_fg, glyphs, queue);
+
+        // Close button "×"
+        let close_x = x0 + (tab_w - CLOSE_BUTTON_WIDTH - CLOSE_BUTTON_RIGHT_PAD) as f32;
+        let close_hovered = params.hover_hit == TabBarHit::CloseTab(tab_idx);
+        if close_hovered {
+            let sq_y = top + (tab_h - CLOSE_BUTTON_WIDTH as f32) / 2.0;
+            bg.push_rect(
+                close_x, sq_y,
+                CLOSE_BUTTON_WIDTH as f32, CLOSE_BUTTON_WIDTH as f32,
+                lighten(tc.bar_bg, 0.10),
+            );
+        }
+        let close_fg = if close_hovered { tc.text_fg } else { tc.close_fg };
+        let close_text_x = close_x + (CLOSE_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
+        let close_text_y = top + (tab_h - cell_h as f32) / 2.0;
+        self.push_text_instances(
+            fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
+        );
     }
 
     #[cfg(target_os = "windows")]
@@ -1149,7 +1138,7 @@ impl GpuRenderer {
             } else {
                 tc.control_fg_dim
             };
-            let circle_bg = blend(circle_fg, tc.bar_bg, CONTROL_CIRCLE_ALPHA);
+            let circle_bg = lerp_color(tc.bar_bg, circle_fg, CONTROL_CIRCLE_ALPHA);
             // Draw filled circle as horizontal slices
             let d = CONTROL_BUTTON_DIAMETER as i32;
             for row in 0..d {
@@ -1207,6 +1196,46 @@ impl GpuRenderer {
                 }
             }
         }
+    }
+
+    // --- Instance building: Dragged tab overlay (rendered AFTER main bg+fg) ---
+
+    fn build_dragged_tab_overlay(
+        &mut self,
+        bg: &mut InstanceWriter,
+        fg: &mut InstanceWriter,
+        params: &FrameParams<'_>,
+        glyphs: &mut FontSet,
+        queue: &wgpu::Queue,
+    ) {
+        let (drag_idx, drag_x) = match params.dragged_tab {
+            Some(d) => d,
+            None => return,
+        };
+        let (_id, title) = match params.tab_info.get(drag_idx) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let tc = TabBarColors::from_palette(params.palette);
+        let layout = TabBarLayout::compute(params.tab_info.len(), params.width as usize);
+        let tab_w = layout.tab_width;
+        let tab_wf = tab_w as f32;
+        let cell_w = glyphs.cell_width;
+        let cell_h = glyphs.cell_height;
+        let top = TAB_TOP_MARGIN as f32;
+        let tab_h = TAB_BAR_HEIGHT as f32 - top;
+
+        // Opaque backing rect (covers underlying tab text from main FG pass)
+        bg.push_rect(drag_x, top, tab_wf, tab_h, tc.bar_bg);
+        // Rounded tab shape on top
+        bg.push_rounded_rect(drag_x, top, tab_wf, tab_h, tc.active_bg, 8.0);
+
+        // Tab content (text + close button)
+        self.render_tab_content(
+            bg, fg, drag_x, tab_w, cell_w, cell_h, title,
+            tc.text_fg, &tc, drag_idx, params, glyphs, queue,
+        );
     }
 
     // --- Instance building: Dropdown overlay (rendered AFTER grid so it's on top) ---
@@ -1716,7 +1745,7 @@ impl GpuRenderer {
             let name_color = if is_active {
                 title_fg
             } else {
-                blend(row_fg, win_bg, 0.75)
+                lerp_color(win_bg, row_fg, 0.75)
             };
             self.push_text_instances(
                 &mut fg, scheme.name, text_x, text_y, name_color, glyphs, &gpu.queue,
@@ -2075,7 +2104,7 @@ impl InstanceWriter {
         }
     }
 
-    /// Push a colored background rectangle (no texture).
+    /// Push a colored background rectangle (no texture, sharp corners).
     /// When opacity < 1.0, the color is premultiplied by opacity.
     fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, bg_color: [f32; 4]) {
         let color = if self.opacity < 1.0 {
@@ -2096,6 +2125,39 @@ impl InstanceWriter {
             [0.0, 0.0, 0.0, 0.0],
             color,
             0,
+            0.0,
+        );
+    }
+
+    /// Push a colored background rectangle with rounded top corners.
+    fn push_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        bg_color: [f32; 4],
+        radius: f32,
+    ) {
+        let color = if self.opacity < 1.0 {
+            [
+                bg_color[0] * self.opacity,
+                bg_color[1] * self.opacity,
+                bg_color[2] * self.opacity,
+                bg_color[3] * self.opacity,
+            ]
+        } else {
+            bg_color
+        };
+        self.push_raw(
+            [x, y],
+            [w, h],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            color,
+            0,
+            radius,
         );
     }
 
@@ -2120,6 +2182,7 @@ impl InstanceWriter {
             fg_color,
             bg_color,
             1,
+            0.0,
         );
     }
 
@@ -2134,6 +2197,7 @@ impl InstanceWriter {
         fg_color: [f32; 4],
         bg_color: [f32; 4],
         flags: u32,
+        corner_radius: f32,
     ) {
         for &v in &pos {
             self.data.extend_from_slice(&v.to_ne_bytes());
@@ -2154,8 +2218,9 @@ impl InstanceWriter {
             self.data.extend_from_slice(&v.to_ne_bytes());
         }
         self.data.extend_from_slice(&flags.to_ne_bytes());
-        // 12 bytes padding to reach 80-byte stride
-        self.data.extend_from_slice(&[0u8; 12]);
+        self.data.extend_from_slice(&corner_radius.to_ne_bytes());
+        // 8 bytes padding to reach 80-byte stride
+        self.data.extend_from_slice(&[0u8; 8]);
     }
 
     fn count(&self) -> u32 {

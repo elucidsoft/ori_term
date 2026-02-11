@@ -8,11 +8,12 @@
 ///   [32..48] `fg_color`: vec4<f32>  (foreground RGBA)
 ///   [48..64] `bg_color`: vec4<f32>  (background RGBA)
 ///   [64..68] flags:    u32
-///   [68..80] _pad:     12 bytes
+///   [68..72] `corner_radius`: f32  (0.0 = sharp rect)
+///   [72..80] _pad:     8 bytes
 pub const INSTANCE_STRIDE: u64 = 80;
 
 /// Instance vertex attributes — shared by both bg and fg pipelines.
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 7] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x2,
         offset: 0,
@@ -48,6 +49,11 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 7] = [
         offset: 64,
         shader_location: 6,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 68,
+        shader_location: 7,
+    },
 ];
 
 pub fn instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -78,27 +84,66 @@ struct CellInput {
     @location(4) fg_color: vec4<f32>,
     @location(5) bg_color: vec4<f32>,
     @location(6) flags: u32,
+    @location(7) corner_radius: f32,
 }
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) bg_color: vec4<f32>,
+    @location(1) local_pos: vec2<f32>,
+    @location(2) @interpolate(flat) rect_size: vec2<f32>,
+    @location(3) @interpolate(flat) radius: f32,
 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
-    // Generate quad corner from vertex index (triangle strip: 0,1,2,3)
     let corner = vec2<f32>(f32(vi & 1u), f32((vi >> 1u) & 1u));
     let pixel_pos = input.pos + input.size * corner;
 
     var out: VertexOutput;
     out.position = uniforms.projection * vec4<f32>(pixel_pos, 0.0, 1.0);
     out.bg_color = input.bg_color;
+    out.local_pos = corner * input.size;
+    out.rect_size = input.size;
+    out.radius = input.corner_radius;
     return out;
+}
+
+// Iq-style per-corner rounded box SDF.
+// p: position relative to box center
+// b: box half-size
+// r: per-corner radii (topRight, bottomRight, bottomLeft, topLeft)
+fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: vec4<f32>) -> f32 {
+    var rs = select(r.zw, r.xy, p.x > 0.0);
+    rs.x = select(rs.y, rs.x, p.y > 0.0);
+    let q = abs(p) - b + rs.x;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - rs.x;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    if (input.radius <= 0.0) {
+        return input.bg_color;
+    }
+
+    let half = input.rect_size * 0.5;
+    // local_pos is [0..size], remap to centered [-half..+half]
+    // y is flipped: top of quad = y=0, but SDF expects top = positive y
+    let p = vec2<f32>(
+        input.local_pos.x - half.x,
+        half.y - input.local_pos.y,
+    );
+
+    // Top corners rounded, bottom corners sharp (Chrome-style)
+    // r = (topRight, bottomRight, topLeft, bottomLeft)
+    let r = vec4<f32>(input.radius, 0.0, input.radius, 0.0);
+    let d = sd_rounded_box(p, half, r);
+
+    if (d > 0.5) {
+        discard;
+    }
+
+    // Hard clip at the boundary — no alpha blending, fully opaque inside
     return input.bg_color;
 }
 ";
@@ -123,6 +168,7 @@ struct CellInput {
     @location(4) fg_color: vec4<f32>,
     @location(5) bg_color: vec4<f32>,
     @location(6) flags: u32,
+    @location(7) corner_radius: f32,
 }
 
 struct VertexOutput {

@@ -2005,13 +2005,13 @@ impl App {
         tab_id: TabId,
         mouse_offset_in_tab: f64,
     ) {
-        let (tab_count, tab_w, win_width) = match self.windows.get(&window_id) {
+        let (tab_count, tab_w) = match self.windows.get(&window_id) {
             Some(tw) => {
                 let layout = TabBarLayout::compute(
                     tw.tabs.len(),
                     tw.window.inner_size().width as usize,
                 );
-                (tw.tabs.len(), layout.tab_width, tw.window.inner_size().width as f64)
+                (tw.tabs.len(), layout.tab_width)
             }
             None => return,
         };
@@ -2019,9 +2019,10 @@ impl App {
         let tab_wf = tab_w as f64;
 
         // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
+        // Clamp to tab zone: can't go past the last tab slot (don't overlap + button)
         let max_x = (TAB_LEFT_MARGIN as f64 + (tab_count - 1) as f64 * tab_wf) as f32;
         let dragged_x = ((position.x - mouse_offset_in_tab) as f32)
-            .clamp(TAB_LEFT_MARGIN as f32, max_x.min(win_width as f32 - tab_wf as f32));
+            .clamp(TAB_LEFT_MARGIN as f32, max_x);
 
         // 2. Compute insertion index from cursor center
         let cursor_center = dragged_x as f64 + tab_wf / 2.0;
