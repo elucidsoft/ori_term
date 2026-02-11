@@ -28,6 +28,9 @@ window-vibrancy = "0.7"
 [features]
 default = []
 
+[target.'cfg(not(windows))'.dependencies]
+arboard = "3"
+
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5.4"
 dwrote = "0.11"

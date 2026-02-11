@@ -1,8 +1,7 @@
 //! Thin platform wrapper for system clipboard access.
 //!
 //! On Windows, uses `clipboard-win` for real clipboard operations.
-//! On other platforms, provides no-op stubs (to be replaced by arboard or similar
-//! when Section 14 — Cross-Platform adds full clipboard support).
+//! On other platforms, uses `arboard` for real clipboard operations.
 
 /// Read text from the system clipboard.
 #[cfg(windows)]
@@ -10,10 +9,10 @@ pub fn get_text() -> Option<String> {
     clipboard_win::get_clipboard_string().ok()
 }
 
-/// Read text from the system clipboard (stub on non-Windows).
+/// Read text from the system clipboard (non-Windows, via arboard).
 #[cfg(not(windows))]
 pub fn get_text() -> Option<String> {
-    None
+    arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
 /// Write text to the system clipboard. Returns `true` on success.
@@ -22,9 +21,10 @@ pub fn set_text(text: &str) -> bool {
     clipboard_win::set_clipboard_string(text).is_ok()
 }
 
-/// Write text to the system clipboard (stub on non-Windows).
+/// Write text to the system clipboard (non-Windows, via arboard).
 #[cfg(not(windows))]
-#[allow(unused_variables)]
 pub fn set_text(text: &str) -> bool {
-    false
+    arboard::Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_owned()))
+        .is_ok()
 }
