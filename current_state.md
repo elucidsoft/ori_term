@@ -238,8 +238,9 @@ Terminal style):
   mapping), hyperlink support (OSC 8), DECALN screen alignment test, keypad
   application mode, text area size queries (CSI 8/4 t), reset state, substitute (SUB).
   A secondary raw `vte::Parser` with `RawInterceptor` (in `tab.rs`) handles OSC 7
-  (CWD), OSC 133 (prompt markers), and XTVERSION (CSI > q with build number from
-  BUILD_NUMBER file) -- sequences the high-level Processor drops.
+  (CWD), OSC 133 (prompt markers), OSC 9/99/777 (notifications), and XTVERSION
+  (CSI > q with build number from BUILD_NUMBER file) -- sequences the high-level
+  Processor drops.
 
 - **Full color support**: 270-entry palette (16 ANSI Catppuccin Mocha + 216 color
   cube + 24 grayscale + semantic colors). Per-cell foreground/background color
@@ -348,6 +349,14 @@ Terminal style):
   opens the URL. Handles Wikipedia-style parenthesized URLs and strips trailing
   punctuation. Skips cells that already have OSC 8 hyperlinks.
 
+- **Bell and notifications**: BEL (0x07) sets a timestamp on the tab via
+  `TermHandler::bell()`. OSC 9 (iTerm2), OSC 99 (Kitty), and OSC 777
+  (rxvt-unicode) notification sequences are intercepted by `RawInterceptor`
+  and logged. Inactive tabs that receive a bell show a subtle pulsing
+  background animation in the tab bar (0.5 Hz sine lerp between inactive and
+  hover colors). The badge clears when the tab becomes active. Configurable
+  via `[bell]` section in config (animation, duration_ms, color).
+
 - **Synchronized output**: Mode 2026 handled internally by vte 0.15 Processor.
   Buffers handler calls between BSU/ESU and dispatches as one batch.
 
@@ -372,7 +381,8 @@ Terminal style):
   (size, family), terminal (shell, scrollback, cursor_style), colors (scheme,
   foreground, background, cursor, selection_foreground, selection_background,
   ansi, bright), window (columns, rows, opacity, tab_bar_opacity, blur),
-  behavior (copy_on_select, bold_is_bright). All fields optional with sensible
+  behavior (copy_on_select, bold_is_bright), bell (animation, duration_ms,
+  color). All fields optional with sensible
   defaults via `#[serde(default)]`. Color overrides apply on top of the active
   scheme via `Palette::apply_overrides()`. Load/save with error fallback to defaults.
 

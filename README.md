@@ -22,6 +22,7 @@ Built by studying 18 terminal projects from the inside out — Alacritty, Ghostt
 - **Mouse reporting** — X10, normal, button-event, and any-event tracking with SGR encoding.
 - **Synchronized output** — DCS protocol to prevent flicker during rapid updates.
 - **Hyperlinks** *(pending)* — clickable URLs via OSC 8.
+- **Bell and notifications** — BEL triggers a subtle tab pulse on inactive tabs. OSC 9 (iTerm2), OSC 99 (Kitty), and OSC 777 (rxvt-unicode) notification sequences are intercepted and logged.
 - **Focus events** — notify applications when the terminal gains or loses focus.
 
 ### Rendering
@@ -150,6 +151,11 @@ blur = true              # Compositor blur behind transparent areas
 [behavior]
 copy_on_select = true    # Auto-copy to clipboard on mouse selection
 bold_is_bright = true    # Promote ANSI 0-7 to bright when bold
+
+[bell]
+animation = "ease_out"   # "ease_out", "linear", or "none"
+duration_ms = 150        # Duration in ms (0 = disabled)
+# color = "#FFFFFF"      # Flash color (reserved for future use)
 
 # Key binding overrides (repeatable section)
 # [[keybind]]
