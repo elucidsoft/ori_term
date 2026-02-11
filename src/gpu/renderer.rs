@@ -161,8 +161,6 @@ pub struct FrameParams<'a> {
     pub hover_url_range: Option<&'a [(usize, usize, usize)]>,
     pub minimum_contrast: f32,
     pub alpha_blending: AlphaBlending,
-    /// If set, draw a drop indicator line at this tab insertion index.
-    pub drop_indicator: Option<usize>,
 }
 
 /// GPU state shared across all windows.
@@ -937,16 +935,6 @@ impl GpuRenderer {
             self.push_text_instances(
                 fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
             );
-        }
-
-        // Drop indicator — 2px accent line at the insertion gap
-        if let Some(idx) = params.drop_indicator {
-            let indicator_x = (TAB_LEFT_MARGIN + idx * tab_w) as f32;
-            let indicator_top = TAB_TOP_MARGIN as f32;
-            let indicator_height = tab_bar_h - indicator_top;
-            // Bright accent color for the drop indicator
-            let accent = [0.4, 0.6, 1.0, 1.0];
-            bg.push_rect(indicator_x - 1.0, indicator_top, 2.0, indicator_height, accent);
         }
 
         // New tab "+" button
