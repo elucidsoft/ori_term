@@ -156,26 +156,38 @@ pub struct GpuState {
     /// support sRGB (e.g. DX12 `DirectComposition`).
     pub render_format: wgpu::TextureFormat,
     pub surface_alpha_mode: wgpu::CompositeAlphaMode,
+    /// Vulkan pipeline cache (compiled shaders cached to disk across sessions).
+    pub pipeline_cache: Option<wgpu::PipelineCache>,
+    pipeline_cache_path: Option<std::path::PathBuf>,
 }
 
 impl GpuState {
     /// Initialize GPU: create instance, surface, adapter, device, queue.
-    /// When `transparent` is true, prefer DX12 with `DirectComposition`
-    /// (`DxgiFromVisual`) — the only path that gives `PreMultiplied` alpha
-    /// on Windows HWND swapchains.
+    /// When `transparent` is true on Windows, uses DX12 with `DirectComposition`
+    /// (the only path that gives `PreMultiplied` alpha on Windows HWND swapchains).
+    /// Otherwise prefers Vulkan (supports pipeline caching for faster subsequent launches).
     pub fn new(window: &Arc<Window>, transparent: bool) -> Self {
+        #[cfg(not(target_os = "windows"))]
+        let _ = transparent;
+        // On Windows with transparency, DX12+DComp is the only path for PreMultiplied alpha
+        #[cfg(target_os = "windows")]
         if transparent {
-            // DX12 + DirectComposition: supports PreMultiplied alpha for transparency
             if let Some(state) = Self::try_init(window, wgpu::Backends::DX12, true) {
                 return state;
             }
-            crate::log("DX12 DComp init failed, falling back to standard backends");
+            crate::log("DX12 DComp init failed, falling back to Vulkan");
         }
-        // Vulkan first, then any backend (opaque only)
+
+        // Prefer Vulkan — it supports pipeline caching (compiled shaders persisted to disk)
         if let Some(state) = Self::try_init(window, wgpu::Backends::VULKAN, false) {
             return state;
         }
-        Self::try_init(window, wgpu::Backends::all(), false)
+        // Fall back to other primary backends (DX12, Metal)
+        if let Some(state) = Self::try_init(window, wgpu::Backends::PRIMARY, false) {
+            return state;
+        }
+        // Last resort: secondary backends (GL, etc.)
+        Self::try_init(window, wgpu::Backends::SECONDARY, false)
             .expect("failed to initialize GPU with any backend")
     }
 
@@ -198,17 +210,36 @@ impl GpuState {
 
         let surface = instance.create_surface(window.clone()).ok()?;
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .ok()?;
+        // Use enumerate_adapters instead of the slow request_adapter.
+        // Pick the first discrete GPU that supports our surface, falling
+        // back to any compatible adapter.
+        let mut adapter: Option<wgpu::Adapter> = None;
+        let mut fallback: Option<wgpu::Adapter> = None;
+        for a in pollster::block_on(instance.enumerate_adapters(backends)) {
+            if !a.is_surface_supported(&surface) {
+                continue;
+            }
+            let info = a.get_info();
+            if info.device_type == wgpu::DeviceType::DiscreteGpu {
+                adapter = Some(a);
+                break;
+            }
+            if fallback.is_none() {
+                fallback = Some(a);
+            }
+        }
+        let adapter = adapter.or(fallback)?;
+
+        // Request PIPELINE_CACHE if the adapter supports it (Vulkan only)
+        let mut features = wgpu::Features::empty();
+        if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
+            features |= wgpu::Features::PIPELINE_CACHE;
+        }
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("oriterm"),
-                required_features: wgpu::Features::empty(),
+                required_features: features,
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             },
@@ -271,6 +302,11 @@ impl GpuState {
             info.name, info.backend, caps.alpha_modes,
         ));
 
+        // Pipeline cache: Vulkan supports caching compiled shaders to disk.
+        // On subsequent launches, this skips shader recompilation.
+        let (pipeline_cache, pipeline_cache_path) =
+            Self::load_pipeline_cache(&device, &info);
+
         Some(Self {
             instance,
             adapter,
@@ -279,7 +315,66 @@ impl GpuState {
             surface_format,
             render_format,
             surface_alpha_mode,
+            pipeline_cache,
+            pipeline_cache_path,
         })
+    }
+
+    /// Load a pipeline cache from disk (Vulkan only).
+    /// Returns `(None, None)` on non-Vulkan backends.
+    ///
+    /// Safety: `create_pipeline_cache` is unsafe because it accepts arbitrary bytes.
+    /// If the data is corrupt or from a different driver version, Vulkan silently
+    /// ignores it and starts with an empty cache (we set `fallback: true`).
+    #[allow(unsafe_code)]
+    fn load_pipeline_cache(
+        device: &wgpu::Device,
+        adapter_info: &wgpu::AdapterInfo,
+    ) -> (Option<wgpu::PipelineCache>, Option<std::path::PathBuf>) {
+        let cache_key = match wgpu::util::pipeline_cache_key(adapter_info) {
+            Some(key) if device.features().contains(wgpu::Features::PIPELINE_CACHE) => key,
+            _ => return (None, None),
+        };
+        let cache_dir = crate::config::config_dir();
+        let cache_path = cache_dir.join(cache_key);
+        let cache_data = std::fs::read(&cache_path).ok();
+
+        // Safety: cache data came from a previous `get_data()` call on the same adapter.
+        // If the data is corrupt or from a different driver, wgpu/Vulkan silently ignores it.
+        let cache = unsafe {
+            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                label: Some("oriterm_pipeline_cache"),
+                data: cache_data.as_deref(),
+                fallback: true,
+            })
+        };
+
+        crate::log(&format!(
+            "pipeline cache: loaded from {} ({})",
+            cache_path.display(),
+            if cache_data.is_some() { "existing" } else { "new" },
+        ));
+
+        (Some(cache), Some(cache_path))
+    }
+
+    /// Save the pipeline cache to disk. Call before exit.
+    pub fn save_pipeline_cache(&self) {
+        let (Some(cache), Some(path)) = (&self.pipeline_cache, &self.pipeline_cache_path) else {
+            return;
+        };
+        let Some(data) = cache.get_data() else {
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Atomic write: write to temp, then rename
+        let temp = path.with_extension("tmp");
+        if std::fs::write(&temp, &data).is_ok() {
+            let _ = std::fs::rename(&temp, path);
+            crate::log(&format!("pipeline cache: saved {} bytes to {}", data.len(), path.display()));
+        }
     }
 
     /// Create and configure a new surface for a window.
@@ -338,7 +433,7 @@ pub struct GpuRenderer {
 }
 
 impl GpuRenderer {
-    pub fn new(gpu: &GpuState, glyphs: &mut FontSet, ui_glyphs: &mut FontSet) -> Self {
+    pub fn new(gpu: &GpuState, _glyphs: &mut FontSet, _ui_glyphs: &mut FontSet) -> Self {
         let device = &gpu.device;
         let format = gpu.render_format;
 
@@ -346,10 +441,11 @@ impl GpuRenderer {
         let uniform_layout = pipeline::create_uniform_bind_group_layout(device);
         let atlas_layout = pipeline::create_atlas_bind_group_layout(device);
 
-        // Pipelines
-        let bg_pipeline = pipeline::create_bg_pipeline(device, format, &uniform_layout);
+        // Pipelines (with pipeline cache for Vulkan shader reuse across sessions)
+        let pcache = gpu.pipeline_cache.as_ref();
+        let bg_pipeline = pipeline::create_bg_pipeline(device, format, &uniform_layout, pcache);
         let fg_pipeline =
-            pipeline::create_fg_pipeline(device, format, &uniform_layout, &atlas_layout);
+            pipeline::create_fg_pipeline(device, format, &uniform_layout, &atlas_layout, pcache);
 
         // Uniform buffer (80 bytes: mat4x4 + flags + min_contrast + padding)
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -369,9 +465,8 @@ impl GpuRenderer {
         });
 
         // Glyph atlas (holds both grid and UI font glyphs, keyed by size)
-        let mut atlas = GlyphAtlas::new(device);
-        atlas.precache_ascii(glyphs, &gpu.queue);
-        atlas.precache_ascii(ui_glyphs, &gpu.queue);
+        // Glyphs are rasterized on-demand via get_or_insert() during rendering.
+        let atlas = GlyphAtlas::new(device);
 
         // Sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -414,10 +509,8 @@ impl GpuRenderer {
     }
 
     /// Rebuild the atlas after font size change.
-    pub fn rebuild_atlas(&mut self, gpu: &GpuState, glyphs: &mut FontSet, ui_glyphs: &mut FontSet) {
+    pub fn rebuild_atlas(&mut self, gpu: &GpuState, _glyphs: &mut FontSet, _ui_glyphs: &mut FontSet) {
         self.atlas = GlyphAtlas::new(&gpu.device);
-        self.atlas.precache_ascii(glyphs, &gpu.queue);
-        self.atlas.precache_ascii(ui_glyphs, &gpu.queue);
 
         // Recreate atlas bind group with new texture view
         self.atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {

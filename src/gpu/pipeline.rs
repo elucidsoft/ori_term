@@ -343,6 +343,7 @@ pub fn create_bg_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     uniform_layout: &wgpu::BindGroupLayout,
+    pipeline_cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bg_shader"),
@@ -397,7 +398,7 @@ pub fn create_bg_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
-        cache: None,
+        cache: pipeline_cache,
     })
 }
 
@@ -407,6 +408,7 @@ pub fn create_fg_pipeline(
     format: wgpu::TextureFormat,
     uniform_layout: &wgpu::BindGroupLayout,
     atlas_layout: &wgpu::BindGroupLayout,
+    pipeline_cache: Option<&wgpu::PipelineCache>,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("fg_shader"),
@@ -462,6 +464,6 @@ pub fn create_fg_pipeline(
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
-        cache: None,
+        cache: pipeline_cache,
     })
 }

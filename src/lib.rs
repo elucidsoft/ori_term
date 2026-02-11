@@ -39,14 +39,25 @@ pub fn log_path() -> std::path::PathBuf {
         .join("oriterm_debug.log")
 }
 
+/// Persistent buffered log file handle — opened once, reused for all writes.
+static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::io::BufWriter<std::fs::File>>> =
+    std::sync::OnceLock::new();
+
+fn log_writer() -> &'static std::sync::Mutex<std::io::BufWriter<std::fs::File>> {
+    LOG_FILE.get_or_init(|| {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path())
+            .expect("failed to open log file");
+        std::sync::Mutex::new(std::io::BufWriter::new(file))
+    })
+}
+
 pub fn log(msg: &str) {
-    use std::fs::OpenOptions;
-    let _ = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path())
-        .and_then(|mut f| {
-            Write::write_all(&mut f, msg.as_bytes())?;
-            Write::write_all(&mut f, b"\n")
-        });
+    if let Ok(mut w) = log_writer().lock() {
+        let _ = w.write_all(msg.as_bytes());
+        let _ = w.write_all(b"\n");
+        let _ = w.flush();
+    }
 }

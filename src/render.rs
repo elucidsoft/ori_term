@@ -123,6 +123,104 @@ const FALLBACK_FONT_NAMES: &[&str] = &[
     "DejaVuSans.ttf",
 ];
 
+// --- DirectWrite font resolution (Windows) ---
+
+/// Font family names to try via DirectWrite, in priority order.
+#[cfg(target_os = "windows")]
+const DWRITE_FAMILIES: &[&str] = &[
+    "JetBrains Mono",
+    "JetBrainsMono Nerd Font",
+    "Cascadia Mono NF",
+    "Cascadia Mono",
+    "Consolas",
+    "Courier New",
+];
+
+/// Fallback font family names for DirectWrite resolution.
+#[cfg(target_os = "windows")]
+const DWRITE_FALLBACK_FAMILIES: &[&str] = &[
+    "Segoe UI Symbol",
+    "MS Gothic",
+    "Segoe UI",
+];
+
+/// Resolve a single font variant via DirectWrite by family name + weight + style.
+#[cfg(target_os = "windows")]
+fn resolve_font_dwrite(
+    family_name: &str,
+    weight: dwrote::FontWeight,
+    style: dwrote::FontStyle,
+) -> Option<std::path::PathBuf> {
+    let collection = dwrote::FontCollection::system();
+    let descriptor = dwrote::FontDescriptor {
+        family_name: family_name.to_string(),
+        weight,
+        stretch: dwrote::FontStretch::Normal,
+        style,
+    };
+    let font = collection.font_from_descriptor(&descriptor).ok().flatten()?;
+    let face = font.create_font_face();
+    let files = face.files().ok()?;
+    let file = files.first()?;
+    file.font_file_path().ok()
+}
+
+/// Resolve all 4 variant paths (Regular/Bold/Italic/BoldItalic) for a font family
+/// via DirectWrite. Returns `None` if the family doesn't exist (Regular not found).
+/// Bold/Italic/BoldItalic paths are filtered: if DirectWrite returns the same file
+/// as Regular (fuzzy fallback), the variant is treated as unavailable.
+#[cfg(target_os = "windows")]
+fn resolve_family_paths_dwrite(family_name: &str) -> Option<[Option<std::path::PathBuf>; 4]> {
+    let regular = resolve_font_dwrite(
+        family_name,
+        dwrote::FontWeight::Regular,
+        dwrote::FontStyle::Normal,
+    )?;
+
+    let bold = resolve_font_dwrite(
+        family_name,
+        dwrote::FontWeight::Bold,
+        dwrote::FontStyle::Normal,
+    ).filter(|p| *p != regular);
+
+    let italic = resolve_font_dwrite(
+        family_name,
+        dwrote::FontWeight::Regular,
+        dwrote::FontStyle::Italic,
+    ).filter(|p| *p != regular);
+
+    let bold_italic = resolve_font_dwrite(
+        family_name,
+        dwrote::FontWeight::Bold,
+        dwrote::FontStyle::Italic,
+    ).filter(|p| *p != regular);
+
+    Some([Some(regular), bold, italic, bold_italic])
+}
+
+/// Resolve fallback font paths via DirectWrite, with static paths as additional fallback.
+#[cfg(target_os = "windows")]
+fn resolve_fallback_paths_dwrite() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    for name in DWRITE_FALLBACK_FAMILIES {
+        if let Some(path) = resolve_font_dwrite(
+            name,
+            dwrote::FontWeight::Regular,
+            dwrote::FontStyle::Normal,
+        ) {
+            paths.push(path);
+        }
+    }
+    // Also try static paths not already found via DirectWrite
+    for p in FALLBACK_FONT_PATHS {
+        let path = std::path::PathBuf::from(*p);
+        if path.exists() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
 // --- Font discovery helpers ---
 
 #[cfg(not(target_os = "windows"))]
@@ -136,52 +234,49 @@ fn linux_font_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// Build a filename → full path index by scanning all font directories once.
 #[cfg(not(target_os = "windows"))]
-fn find_font_file(name: &str) -> Option<Vec<u8>> {
+fn build_font_index() -> HashMap<String, std::path::PathBuf> {
+    let mut index = HashMap::new();
     for dir in linux_font_dirs() {
-        if let Some(data) = find_font_in_dir(&dir, name) {
-            return Some(data);
-        }
+        index_font_dir(&dir, &mut index);
     }
-    None
+    index
 }
 
 #[cfg(not(target_os = "windows"))]
-fn find_font_in_dir(dir: &std::path::Path, name: &str) -> Option<Vec<u8>> {
-    let entries = std::fs::read_dir(dir).ok()?;
+fn index_font_dir(dir: &std::path::Path, index: &mut HashMap<String, std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            if let Some(data) = find_font_in_dir(&path, name) {
-                return Some(data);
-            }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some(name) {
-            return std::fs::read(&path).ok();
-        } else {
-            // Not a match, continue scanning
+            index_font_dir(&path, index);
+        } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            index.entry(name.to_owned()).or_insert(path);
         }
     }
-    None
 }
 
-#[cfg(target_os = "windows")]
-fn load_font_from_paths(paths: &[&str]) -> Option<Vec<u8>> {
-    for path in paths {
-        if let Ok(data) = std::fs::read(path) {
-            return Some(data);
-        }
-    }
-    None
-}
-
+/// Look up a font variant path by trying multiple candidate filenames.
 #[cfg(not(target_os = "windows"))]
-fn load_font_variant(names: &[&str]) -> Option<Vec<u8>> {
+fn find_font_variant_path(names: &[&str], index: &HashMap<String, std::path::PathBuf>) -> Option<std::path::PathBuf> {
     for name in names {
-        if let Some(data) = find_font_file(name) {
-            return Some(data);
+        if let Some(path) = index.get(*name) {
+            return Some(path.clone());
         }
     }
     None
+}
+
+/// Resolve fallback font paths from the pre-built index.
+#[cfg(not(target_os = "windows"))]
+fn resolve_fallback_paths(font_index: &HashMap<String, std::path::PathBuf>) -> Vec<std::path::PathBuf> {
+    FALLBACK_FONT_NAMES.iter()
+        .filter_map(|name| font_index.get(*name).cloned())
+        .collect()
 }
 
 fn parse_font(data: &[u8]) -> Option<fontdue::Font> {
@@ -191,9 +286,20 @@ fn parse_font(data: &[u8]) -> Option<fontdue::Font> {
 // --- FontSet ---
 
 pub struct FontSet {
-    fonts: [fontdue::Font; 4],
+    /// Loaded font objects. Index 0 (Regular) is always `Some`.
+    /// Bold/Italic/BoldItalic are loaded lazily on first use.
+    fonts: [Option<fontdue::Font>; 4],
+    /// True if a real (non-Regular-fallback) font exists for this variant.
+    /// Set during font discovery based on path availability.
     has_variant: [bool; 4],
+    /// File paths for deferred loading of font variants.
+    font_paths: [Option<std::path::PathBuf>; 4],
+    /// Loaded fallback font objects (populated lazily).
     fallback_fonts: Vec<fontdue::Font>,
+    /// File paths for deferred loading of fallback fonts.
+    fallback_paths: Vec<std::path::PathBuf>,
+    /// Whether fallback fonts have been loaded from `fallback_paths`.
+    fallbacks_loaded: bool,
     pub size: f32,
     pub cell_width: usize,
     pub cell_height: usize,
@@ -208,15 +314,37 @@ impl FontSet {
     pub fn load(size: f32, family: Option<&str>) -> Self {
         let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
 
+        // Build the font directory index once on Linux (avoids 20-36+ recursive walks)
+        #[cfg(not(target_os = "windows"))]
+        let font_index = build_font_index();
+
         if let Some(name) = family {
-            if let Some(fs) = Self::try_load_by_name(name, size) {
+            #[cfg(not(target_os = "windows"))]
+            let result = Self::try_load_by_name(name, size, &font_index);
+            #[cfg(target_os = "windows")]
+            let result = Self::try_load_by_name(name, size);
+
+            if let Some(fs) = result {
                 return fs;
             }
             crate::log(&format!("font: custom family {name:?} not found, using platform default"));
         }
 
+        // On Windows: try DirectWrite families first (instant OS-indexed lookup)
+        #[cfg(target_os = "windows")]
+        for name in DWRITE_FAMILIES {
+            if let Some(fs) = Self::try_load_family_dwrite(name, size) {
+                return fs;
+            }
+        }
+
         for fam in FONT_FAMILIES {
-            if let Some(fs) = Self::try_load_family(fam, size) {
+            #[cfg(not(target_os = "windows"))]
+            let result = Self::try_load_family(fam, size, &font_index);
+            #[cfg(target_os = "windows")]
+            let result = Self::try_load_family(fam, size);
+
+            if let Some(fs) = result {
                 return fs;
             }
         }
@@ -230,14 +358,21 @@ impl FontSet {
 
         let fonts = self.fonts.clone();
         let has_variant = self.has_variant;
+        let font_paths = self.font_paths.clone();
         let fallback_fonts = self.fallback_fonts.clone();
+        let fallback_paths = self.fallback_paths.clone();
+        let fallbacks_loaded = self.fallbacks_loaded;
 
-        let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], new_size);
+        let regular = fonts[0].as_ref().expect("Regular font must always be loaded");
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(regular, new_size);
 
         Self {
             fonts,
             has_variant,
+            font_paths,
             fallback_fonts,
+            fallback_paths,
+            fallbacks_loaded,
             size: new_size,
             cell_width,
             cell_height,
@@ -246,46 +381,128 @@ impl FontSet {
         }
     }
 
-    fn try_load_family(family: &FontFamily, size: f32) -> Option<Self> {
-        #[cfg(target_os = "windows")]
-        let regular_data = load_font_from_paths(family.regular)?;
-        #[cfg(not(target_os = "windows"))]
-        let regular_data = load_font_variant(family.regular)?;
+    /// Try to load a font family via DirectWrite by family name.
+    /// Only loads the Regular variant eagerly; Bold/Italic/BoldItalic paths are
+    /// stored for lazy loading on first use.
+    #[cfg(target_os = "windows")]
+    fn try_load_family_dwrite(family_name: &str, size: f32) -> Option<Self> {
+        let paths = resolve_family_paths_dwrite(family_name)?;
 
+        // Load Regular font immediately
+        let regular_path = paths[0].as_ref()?;
+        let regular_data = std::fs::read(regular_path).ok()?;
         let regular = parse_font(&regular_data)?;
 
-        let mut fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
-        let mut has_variant = [true, false, false, false];
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&regular, size);
 
-        // Try loading each variant
-        let variant_specs: [(usize, &[&str]); 3] = [
-            (1, family.bold),
-            (2, family.italic),
-            (3, family.bold_italic),
+        let has_variant = [
+            true,
+            paths[1].is_some(),
+            paths[2].is_some(),
+            paths[3].is_some(),
         ];
 
-        for (idx, paths) in variant_specs {
-            #[cfg(target_os = "windows")]
-            let data = load_font_from_paths(paths);
-            #[cfg(not(target_os = "windows"))]
-            let data = load_font_variant(paths);
+        let fallback_paths = resolve_fallback_paths_dwrite();
 
-            if let Some(data) = data {
-                if let Some(font) = parse_font(&data) {
-                    fonts[idx] = font;
+        crate::log(&format!("font: loaded {:?} via DirectWrite ({} fallback paths)", family_name, fallback_paths.len()));
+
+        Some(Self {
+            fonts: [Some(regular), None, None, None],
+            has_variant,
+            font_paths: paths,
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
+            size,
+            cell_width,
+            cell_height,
+            baseline,
+            cache: HashMap::new(),
+        })
+    }
+
+    /// Try to load a font family from hardcoded file paths (Windows fallback).
+    /// Only loads the Regular variant eagerly; other variants are lazy-loaded.
+    #[cfg(target_os = "windows")]
+    fn try_load_family(family: &FontFamily, size: f32) -> Option<Self> {
+        // Find and load Regular font
+        let regular_path = family.regular.iter()
+            .map(|p| std::path::PathBuf::from(*p))
+            .find(|p| p.exists())?;
+        let regular_data = std::fs::read(&regular_path).ok()?;
+        let regular = parse_font(&regular_data)?;
+
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&regular, size);
+
+        // Resolve variant paths without loading
+        let mut font_paths: [Option<std::path::PathBuf>; 4] = [
+            Some(regular_path), None, None, None,
+        ];
+        let mut has_variant = [true, false, false, false];
+
+        for (idx, candidates) in [(1usize, family.bold), (2, family.italic), (3, family.bold_italic)] {
+            for path_str in candidates {
+                let path = std::path::PathBuf::from(*path_str);
+                if path.exists() {
+                    font_paths[idx] = Some(path);
                     has_variant[idx] = true;
+                    break;
                 }
             }
         }
 
-        let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], size);
-
-        let fallback_fonts = Self::load_fallback_fonts();
+        // Resolve fallback paths (prefer DirectWrite, fall back to static paths)
+        let fallback_paths = resolve_fallback_paths_dwrite();
 
         Some(Self {
-            fonts,
+            fonts: [Some(regular), None, None, None],
             has_variant,
-            fallback_fonts,
+            font_paths,
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
+            size,
+            cell_width,
+            cell_height,
+            baseline,
+            cache: HashMap::new(),
+        })
+    }
+
+    /// Try to load a font family from the pre-built font index (Linux).
+    /// Only loads the Regular variant eagerly; other variants are lazy-loaded.
+    #[cfg(not(target_os = "windows"))]
+    fn try_load_family(family: &FontFamily, size: f32, font_index: &HashMap<String, std::path::PathBuf>) -> Option<Self> {
+        // Find and load Regular font
+        let regular_path = find_font_variant_path(family.regular, font_index)?;
+        let regular_data = std::fs::read(&regular_path).ok()?;
+        let regular = parse_font(&regular_data)?;
+
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&regular, size);
+
+        // Resolve variant paths without loading
+        let mut font_paths: [Option<std::path::PathBuf>; 4] = [
+            Some(regular_path), None, None, None,
+        ];
+        let mut has_variant = [true, false, false, false];
+
+        for (idx, names) in [(1usize, family.bold), (2, family.italic), (3, family.bold_italic)] {
+            if let Some(path) = find_font_variant_path(names, font_index) {
+                font_paths[idx] = Some(path);
+                has_variant[idx] = true;
+            }
+        }
+
+        // Resolve fallback paths without loading
+        let fallback_paths = resolve_fallback_paths(font_index);
+
+        Some(Self {
+            fonts: [Some(regular), None, None, None],
+            has_variant,
+            font_paths,
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
             size,
             cell_width,
             cell_height,
@@ -295,38 +512,64 @@ impl FontSet {
     }
 
     /// Try to load a font by a user-specified name or path.
-    /// On Windows, treats the name as a filename under `C:\Windows\Fonts\`.
-    /// On Linux, searches font directories for the filename.
+    /// On Windows, tries DirectWrite by family name first, then falls back to
+    /// treating the name as a filename under `C:\Windows\Fonts\`.
+    #[cfg(target_os = "windows")]
     fn try_load_by_name(name: &str, size: f32) -> Option<Self> {
-        #[cfg(target_os = "windows")]
-        let regular_data = {
-            let path = if std::path::Path::new(name).is_absolute() {
-                std::path::PathBuf::from(name)
-            } else {
-                std::path::PathBuf::from(r"C:\Windows\Fonts").join(name)
-            };
-            std::fs::read(&path).ok()
-        };
-        #[cfg(not(target_os = "windows"))]
-        let regular_data = {
-            if std::path::Path::new(name).is_absolute() {
-                std::fs::read(name).ok()
-            } else {
-                find_font_file(name)
-            }
-        };
+        // First try DirectWrite by family name (supports "Fira Code", "Consolas", etc.)
+        if let Some(fs) = Self::try_load_family_dwrite(name, size) {
+            return Some(fs);
+        }
 
-        let regular_data = regular_data?;
+        // Fall back to file path
+        let path = if std::path::Path::new(name).is_absolute() {
+            std::path::PathBuf::from(name)
+        } else {
+            std::path::PathBuf::from(r"C:\Windows\Fonts").join(name)
+        };
+        let regular_data = std::fs::read(&path).ok()?;
         let regular = parse_font(&regular_data)?;
-        let fonts = [regular.clone(), regular.clone(), regular.clone(), regular];
-        let has_variant = [true, false, false, false];
-        let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], size);
-        let fallback_fonts = Self::load_fallback_fonts();
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&regular, size);
+        let fallback_paths = resolve_fallback_paths_dwrite();
 
         Some(Self {
-            fonts,
-            has_variant,
-            fallback_fonts,
+            fonts: [Some(regular), None, None, None],
+            has_variant: [true, false, false, false],
+            font_paths: [Some(path), None, None, None],
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
+            size,
+            cell_width,
+            cell_height,
+            baseline,
+            cache: HashMap::new(),
+        })
+    }
+
+    /// Try to load a font by a user-specified name or path (Linux).
+    #[cfg(not(target_os = "windows"))]
+    fn try_load_by_name(name: &str, size: f32, font_index: &HashMap<String, std::path::PathBuf>) -> Option<Self> {
+        let (regular_data, regular_path) = if std::path::Path::new(name).is_absolute() {
+            let path = std::path::PathBuf::from(name);
+            let data = std::fs::read(&path).ok()?;
+            (data, path)
+        } else {
+            let path = font_index.get(name)?.clone();
+            let data = std::fs::read(&path).ok()?;
+            (data, path)
+        };
+        let regular = parse_font(&regular_data)?;
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&regular, size);
+        let fallback_paths = resolve_fallback_paths(font_index);
+
+        Some(Self {
+            fonts: [Some(regular), None, None, None],
+            has_variant: [true, false, false, false],
+            font_paths: [Some(regular_path), None, None, None],
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
             size,
             cell_width,
             cell_height,
@@ -344,49 +587,63 @@ impl FontSet {
         (cell_width, cell_height, baseline)
     }
 
-    fn load_fallback_fonts() -> Vec<fontdue::Font> {
-        let mut fallbacks = Vec::new();
-
-        #[cfg(target_os = "windows")]
-        {
-            for path in FALLBACK_FONT_PATHS {
-                if let Ok(data) = std::fs::read(path) {
-                    if let Some(font) = parse_font(&data) {
-                        fallbacks.push(font);
-                    }
+    /// Lazily load a font variant from its stored path.
+    fn ensure_font_loaded(&mut self, idx: usize) {
+        if self.fonts[idx].is_some() {
+            return;
+        }
+        if let Some(path) = self.font_paths[idx].as_ref() {
+            if let Ok(data) = std::fs::read(path) {
+                if let Some(font) = parse_font(&data) {
+                    self.fonts[idx] = Some(font);
+                    return;
                 }
             }
+            // Loading failed — mark variant unavailable
+            crate::log(&format!("font: failed to load variant {} from {:?}", idx, self.font_paths[idx]));
+            self.has_variant[idx] = false;
+            self.font_paths[idx] = None;
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            for name in FALLBACK_FONT_NAMES {
-                if let Some(data) = find_font_file(name) {
-                    if let Some(font) = parse_font(&data) {
-                        fallbacks.push(font);
-                    }
-                }
-            }
-        }
-
-        fallbacks
     }
 
-    /// Rasterize a glyph with the fallback chain.
-    fn rasterize_with_fallback(&self, ch: char, style: FontStyle) -> (fontdue::Metrics, Vec<u8>) {
+    /// Lazily load fallback fonts from their stored paths.
+    fn ensure_fallbacks_loaded(&mut self) {
+        if self.fallbacks_loaded {
+            return;
+        }
+        self.fallbacks_loaded = true;
+        for path in &self.fallback_paths {
+            if let Ok(data) = std::fs::read(path) {
+                if let Some(font) = parse_font(&data) {
+                    self.fallback_fonts.push(font);
+                }
+            }
+        }
+    }
+
+    /// Rasterize a glyph with the fallback chain, lazy-loading fonts as needed.
+    fn rasterize_with_fallback(&mut self, ch: char, style: FontStyle) -> (fontdue::Metrics, Vec<u8>) {
         let idx = style as usize;
 
-        // 1. Try requested style font
-        if self.fonts[idx].has_glyph(ch) {
-            return self.fonts[idx].rasterize(ch, self.size);
+        // 1. Try requested style font (lazy-load if needed)
+        self.ensure_font_loaded(idx);
+        if let Some(ref font) = self.fonts[idx] {
+            if font.has_glyph(ch) {
+                return font.rasterize(ch, self.size);
+            }
         }
 
-        // 2. Try Regular font (style fallback)
-        if style != FontStyle::Regular && self.fonts[0].has_glyph(ch) {
-            return self.fonts[0].rasterize(ch, self.size);
+        // 2. Try Regular font (style fallback — always loaded)
+        if style != FontStyle::Regular {
+            if let Some(ref font) = self.fonts[0] {
+                if font.has_glyph(ch) {
+                    return font.rasterize(ch, self.size);
+                }
+            }
         }
 
-        // 3. Try fallback fonts
+        // 3. Try fallback fonts (lazy-load if needed)
+        self.ensure_fallbacks_loaded();
         for fb in &self.fallback_fonts {
             if fb.has_glyph(ch) {
                 return fb.rasterize(ch, self.size);
@@ -394,8 +651,10 @@ impl FontSet {
         }
 
         // 4. Replacement character
-        if self.fonts[0].has_glyph('\u{FFFD}') {
-            return self.fonts[0].rasterize('\u{FFFD}', self.size);
+        if let Some(ref font) = self.fonts[0] {
+            if font.has_glyph('\u{FFFD}') {
+                return font.rasterize('\u{FFFD}', self.size);
+            }
         }
 
         // 5. Last resort: return empty glyph
@@ -416,7 +675,7 @@ impl FontSet {
         self.cache.get(&(ch, style))
     }
 
-    /// Whether bold needs synthetic rendering (no real bold font loaded).
+    /// Whether bold needs synthetic rendering (no real bold font available).
     pub fn needs_synthetic_bold(&self) -> bool {
         !self.has_variant[FontStyle::Bold as usize]
     }

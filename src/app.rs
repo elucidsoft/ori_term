@@ -101,25 +101,31 @@ impl App {
         }));
 
         let _ = std::fs::remove_file(crate::log_path());
+        let startup = Instant::now();
         log("starting");
 
+        let t0 = Instant::now();
         let config = Config::load();
         log(&format!(
             "config: font_size={}, scheme={}, shell={:?}, scrollback={}, cols={}, rows={}, \
-             opacity={}, tab_bar_opacity={}, blur={}, cursor={}, copy_on_select={}, bold_is_bright={}",
+             opacity={}, tab_bar_opacity={}, blur={}, cursor={}, copy_on_select={}, bold_is_bright={} \
+             ({:.1}ms)",
             config.font.size, config.colors.scheme, config.terminal.shell,
             config.terminal.scrollback, config.window.columns, config.window.rows,
             config.window.effective_opacity(), config.window.effective_tab_bar_opacity(),
             config.window.blur,
             config.terminal.cursor_style, config.behavior.copy_on_select,
             config.behavior.bold_is_bright,
+            t0.elapsed().as_secs_f64() * 1000.0,
         ));
 
+        let t0 = Instant::now();
         let glyphs = FontSet::load(config.font.size, config.font.family.as_deref());
         let ui_glyphs = glyphs.resize(glyphs.size * UI_FONT_SCALE);
         log(&format!(
-            "font loaded: cell={}x{}, baseline={}, size={} (ui: {})",
-            glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size, ui_glyphs.size
+            "font loaded: cell={}x{}, baseline={}, size={} (ui: {}) ({:.1}ms)",
+            glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size, ui_glyphs.size,
+            t0.elapsed().as_secs_f64() * 1000.0,
         ));
 
         let bindings = keybindings::merge_bindings(&config.keybind);
@@ -127,12 +133,15 @@ impl App {
         let active_scheme = palette::find_scheme(&config.colors.scheme)
             .map_or("Catppuccin Mocha", |s| s.name);
 
+        let t0 = Instant::now();
         let event_loop = EventLoop::<TermEvent>::with_user_event()
             .build()
             .expect("event loop");
         let proxy = event_loop.create_proxy();
+        log(&format!("event loop created: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0));
 
         let config_monitor = ConfigMonitor::new(proxy.clone());
+        log(&format!("pre-event-loop total: {:.1}ms", startup.elapsed().as_secs_f64() * 1000.0));
 
         let mut app = Self {
             config,
@@ -440,6 +449,7 @@ impl App {
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
+        saved_pos: Option<&config::WindowState>,
     ) -> Option<WindowId> {
         let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32 + GRID_PADDING_LEFT as u32;
         let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
@@ -463,6 +473,7 @@ impl App {
             attrs = attrs.with_no_redirection_bitmap(true);
         }
 
+        let create_start = Instant::now();
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -470,11 +481,18 @@ impl App {
                 return None;
             }
         };
+        log(&format!("window created: {:.1}ms", create_start.elapsed().as_secs_f64() * 1000.0));
 
         // Initialize GPU on first window creation
         if self.gpu.is_none() {
+            let t0 = Instant::now();
             let gpu = GpuState::new(&window, use_transparent);
+            log(&format!("GPU init: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0));
+
+            let t0 = Instant::now();
             let renderer = GpuRenderer::new(&gpu, &mut self.glyphs, &mut self.ui_glyphs);
+            log(&format!("renderer init: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0));
+
             self.gpu = Some(gpu);
             self.renderer = Some(renderer);
         }
@@ -484,21 +502,38 @@ impl App {
 
         let tw = TermWindow::new(window.clone(), gpu)?;
 
-        // Render a dark clear frame before showing the window
+        // Render a clear frame using the configured color scheme's background
+        // before showing the window (prevents gray/white flash on startup)
         if let Some(renderer) = &self.renderer {
             let s = crate::gpu::renderer::srgb_to_linear;
-            let bg = [s(0x1e as f32 / 255.0), s(0x1e as f32 / 255.0), s(0x2e as f32 / 255.0), 1.0];
+            let scheme_bg = palette::find_scheme(&self.config.colors.scheme)
+                .map_or(vte::ansi::Rgb { r: 0x1e, g: 0x1e, b: 0x2e }, |sc| sc.bg);
+            let bg = [
+                s(scheme_bg.r as f32 / 255.0),
+                s(scheme_bg.g as f32 / 255.0),
+                s(scheme_bg.b as f32 / 255.0),
+                1.0,
+            ];
             renderer.clear_surface(gpu, &tw.surface, bg, self.config.window.effective_opacity());
+            // Wait for the GPU to finish so the frame reaches the compositor
+            // before the window becomes visible (prevents gray flash)
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         }
 
         // Apply compositor blur/vibrancy + layered window transparency
         apply_window_effects(&window, &self.config.window);
 
-        // Now show the window with the dark frame already rendered
+        // Restore saved position before showing — avoids gray flash from
+        // moving a visible window which triggers a WM repaint.
+        if let Some(state) = saved_pos {
+            window.set_outer_position(PhysicalPosition::new(state.x, state.y));
+        }
+
+        // Now show the window with the dark frame already presented
         window.set_visible(true);
 
         self.windows.insert(id, tw);
-        log(&format!("created window {id:?}"));
+        log(&format!("window visible: {id:?} ({:.1}ms total create_window)", create_start.elapsed().as_secs_f64() * 1000.0));
         Some(id)
     }
 
@@ -630,6 +665,11 @@ impl App {
                 };
                 state.save();
             }
+        }
+
+        // Save Vulkan pipeline cache to disk for faster next launch
+        if let Some(gpu) = &self.gpu {
+            gpu.save_pipeline_cache();
         }
 
         for tab in self.tabs.values_mut() {
@@ -1752,7 +1792,7 @@ impl App {
         let grab_y = (TAB_BAR_HEIGHT / 2) as f64;
 
         // Create new frameless window at cursor position
-        if let Some(new_wid) = self.create_window(event_loop) {
+        if let Some(new_wid) = self.create_window(event_loop, None) {
             if let Some(tw) = self.windows.get_mut(&new_wid) {
                 tw.add_tab(tab_id);
                 // Position so cursor is at grab_offset within the client area.
@@ -2254,14 +2294,12 @@ impl ApplicationHandler<TermEvent> for App {
         }
         self.first_window_created = true;
 
-        if let Some(wid) = self.create_window(event_loop) {
-            // Restore saved window position (window is already visible from create_window).
-            if let Some(state) = config::WindowState::load() {
-                if let Some(tw) = self.windows.get(&wid) {
-                    tw.window.set_outer_position(PhysicalPosition::new(state.x, state.y));
-                }
-            }
+        // Load saved window position before creating the window so we can
+        // apply it before making the window visible (avoids gray flash from
+        // moving a visible window).
+        let saved_pos = config::WindowState::load();
 
+        if let Some(wid) = self.create_window(event_loop, saved_pos.as_ref()) {
             // Query actual DPI scale factor and reload fonts if needed
             if let Some(tw) = self.windows.get(&wid) {
                 let sf = tw.window.scale_factor();
