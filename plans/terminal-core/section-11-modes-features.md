@@ -18,7 +18,7 @@ sections:
     status: complete
   - id: "11.5"
     title: Hyperlinks
-    status: not-started
+    status: complete
   - id: "11.6"
     title: Image Protocol
     status: not-started
@@ -143,16 +143,22 @@ to `term_handler.rs` for documentation.
 
 OSC 8 hyperlink support for clickable URLs.
 
-- [ ] Parse OSC 8 sequences: `OSC 8 ; params ; uri ST`
-  - [ ] Start hyperlink: `OSC 8 ; id=foo ; https://example.com ST`
-  - [ ] End hyperlink: `OSC 8 ; ; ST`
-- [ ] Store hyperlink in `CellExtra` for cells within the hyperlink span
-- [ ] Rendering: underline hyperlinked text (or change color on hover)
-- [ ] Mouse hover: detect when cursor is over a hyperlinked cell
-  - [ ] Show URL in status bar or tooltip
-  - [ ] Change cursor to pointing hand
-- [ ] Ctrl+click or click: open URL in default browser
-- [ ] Auto-detect URLs in terminal output (optional, configurable)
+- [x] Parse OSC 8 sequences: `OSC 8 ; params ; uri ST` (handled by vte)
+  - [x] Start hyperlink: `OSC 8 ; id=foo ; https://example.com ST`
+  - [x] End hyperlink: `OSC 8 ; ; ST`
+- [x] Store hyperlink in `CellExtra` for cells within the hyperlink span
+- [x] Rendering: dotted underline on hyperlinked text, solid underline on hover
+- [x] Mouse hover: detect when Ctrl held and cursor is over a hyperlinked cell
+  - [x] Change cursor to pointing hand (`CursorIcon::Pointer`)
+- [x] Ctrl+click: open URL in default browser (platform Command)
+  - [x] URL scheme validation (http/https/ftp/file only)
+- [x] Auto-detect plain-text URLs in terminal output (implicit URL detection)
+  - [x] Regex-based URL detection across soft-wrapped logical lines
+  - [x] Lazy detection on Ctrl+hover/click with per-logical-line caching
+  - [x] Ctrl+hover shows pointer cursor + solid underline on full URL span
+  - [x] Ctrl+click opens detected URL in default browser
+  - [x] Skips cells with existing OSC 8 hyperlinks
+  - [x] Handles Wikipedia-style parenthesized URLs, strips trailing punctuation
 
 **Ref:** Ghostty hyperlink support, WezTerm hyperlink handling, OSC 8 spec
 
@@ -189,7 +195,7 @@ Display images inline in the terminal.
 - [ ] Cursor blinking toggles on timer — deferred
 - [x] Focus events sent when window focused/unfocused
 - [x] Synchronized output prevents flicker (vte handles internally)
-- [ ] OSC 8 hyperlinks render and are clickable — deferred (11.5)
+- [x] OSC 8 hyperlinks render and are clickable (Ctrl+click)
 - [ ] Kitty image protocol displays inline images — deferred (11.6)
 - [ ] All modes persist across save/restore cursor — deferred
 

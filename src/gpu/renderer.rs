@@ -129,6 +129,8 @@ pub struct FrameParams<'a> {
     pub dropdown_open: bool,
     pub opacity: f32,
     pub tab_bar_opacity: f32,
+    pub hover_hyperlink: Option<&'a str>,
+    pub hover_url_range: Option<&'a [(usize, usize, usize)]>,
 }
 
 /// GPU state shared across all windows.
@@ -1184,6 +1186,40 @@ impl GpuRenderer {
                         bg.push_rect(x0, underline_y, draw_w, 1.0, ul_color);
                     } else {
                         // No underline decoration
+                    }
+                }
+
+                // Hyperlink underline (only when cell doesn't already have an underline)
+                if cell.hyperlink().is_some()
+                    && !cell.flags.intersects(CellFlags::ANY_UNDERLINE)
+                {
+                    let underline_y = y0 + ch as f32 - 2.0;
+                    let is_hovered = params.hover_hyperlink.is_some_and(|hover_uri| {
+                        cell.hyperlink().is_some_and(|h| h.uri == hover_uri)
+                    });
+                    if is_hovered {
+                        // Solid underline on hover
+                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
+                    } else {
+                        // Dotted underline (every other pixel)
+                        let steps = cell_w as usize;
+                        for dx in (0..steps).step_by(2) {
+                            bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, fg_rgba);
+                        }
+                    }
+                }
+
+                // Implicit URL underline (when hovered via Ctrl, no OSC 8, no explicit underline)
+                if let Some(segments) = params.hover_url_range {
+                    let in_url = segments.iter().any(|&(r, sc, ec)| {
+                        abs_row == r && col >= sc && col <= ec
+                    });
+                    if in_url
+                        && cell.hyperlink().is_none()
+                        && !cell.flags.intersects(CellFlags::ANY_UNDERLINE)
+                    {
+                        let underline_y = y0 + ch as f32 - 2.0;
+                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
                     }
                 }
 

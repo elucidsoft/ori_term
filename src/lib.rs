@@ -15,6 +15,7 @@ pub mod cell;
 pub mod key_encoding;
 pub mod keybindings;
 pub mod search;
+pub mod url_detect;
 pub mod selection;
 pub mod grid;
 pub mod palette;

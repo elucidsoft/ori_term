@@ -115,7 +115,7 @@ fn cell_in_match(m: &SearchMatch, abs_row: usize, col: usize) -> bool {
 
 /// Extract text from a single grid row, returning the text and a mapping
 /// from character index (in the returned string) to column index.
-fn extract_row_text(row: &crate::grid::row::Row) -> (String, Vec<usize>) {
+pub(crate) fn extract_row_text(row: &crate::grid::row::Row) -> (String, Vec<usize>) {
     let mut text = String::new();
     let mut col_map = Vec::new();
     for (col, cell) in row.iter().enumerate() {
@@ -224,7 +224,7 @@ fn find_matches(
 
 /// Convert a byte span in the extracted text to column indices.
 /// Returns `(start_col, end_col)` inclusive, or `None` if the span is empty.
-fn byte_span_to_cols(
+pub(crate) fn byte_span_to_cols(
     text: &str,
     col_map: &[usize],
     byte_start: usize,

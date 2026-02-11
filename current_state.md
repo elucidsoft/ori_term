@@ -43,10 +43,15 @@ src/
   drag.rs                      DragState / DragPhase -- Chrome-style drag state machine
   cell.rs                      Rich Cell (24 bytes), CellFlags (u16 bitflags), CellExtra (Arc),
                                Hyperlink struct, ANY_UNDERLINE composite flag
+  search.rs                    SearchState, find_matches (plain text + regex), cell_match_type
+                               with binary search, extract_row_text / byte_span_to_cols helpers
   selection.rs                 Selection model (3-point: anchor/pivot/end), SelectionMode
                                (Char/Word/Line/Block), SelectionPoint with sub-cell Side,
                                word_boundaries, logical_line_start/end, extract_text,
                                contains() for hit-testing
+  url_detect.rs                Implicit URL detection: DetectedUrl (multi-row segments),
+                               UrlDetectCache (per-logical-line, lazy), regex URL matching
+                               across soft-wrapped lines, trim_url_trailing (balanced parens)
   clipboard.rs                 Platform clipboard wrapper: clipboard-win on Windows, no-op stubs
                                on other platforms. get_text() / set_text().
   grid/
@@ -329,6 +334,20 @@ Terminal style):
 - **Focus events**: DECSET 1004 sends `ESC[I` on focus gain and `ESC[O` on focus
   loss to the PTY. Settings window excluded from focus reporting.
 
+- **Hyperlinks (OSC 8)**: OSC 8 hyperlink sequences parsed by vte, stored in
+  `CellExtra.hyperlink`. Hyperlinked cells rendered with dotted underline (solid
+  on hover). Ctrl+hover shows pointing hand cursor. Ctrl+click opens URL in
+  default browser via platform command (cmd /C start, xdg-open, open). URL scheme
+  validation: only http/https/ftp/file allowed.
+
+- **Implicit URL detection**: Plain-text URLs (http/https/ftp/file) in terminal
+  output are automatically detected and made clickable. Regex-based detection
+  runs lazily on Ctrl+hover/click with per-logical-line caching. Handles URLs
+  that wrap across soft-wrapped rows (multi-row segment tracking). Ctrl+hover
+  shows pointer cursor and solid underline across the full URL span. Ctrl+click
+  opens the URL. Handles Wikipedia-style parenthesized URLs and strips trailing
+  punctuation. Skips cells that already have OSC 8 hyperlinks.
+
 - **Synchronized output**: Mode 2026 handled internally by vte 0.15 Processor.
   Buffers handler calls between BSU/ESU and dispatches as one batch.
 
@@ -392,8 +411,6 @@ Terminal style):
   but is an optimization opportunity.
 
 - **No cursor blinking**: Cursor shape changes work but blinking is not implemented.
-
-- **No search**: No Ctrl+F search through scrollback history.
 
 - **Transparency only on Windows**: DX12 DirectComposition path is Windows-only.
   macOS vibrancy and Linux compositor blur are coded but untested.
@@ -732,6 +749,7 @@ The app writes log files next to the executable:
 | `base64` | 0.22 | OSC 52 clipboard payload encoding/decoding |
 | `toml` | 0.8 | TOML config file parsing/serialization |
 | `serde` | 1 (derive) | Config struct serialization/deserialization |
+| `regex` | 1 | URL detection in terminal output, search regex support |
 | `clipboard-win` | 5.4 | Windows clipboard access (cfg(windows) only) |
 | `unicode-width` | 0.2 | Wide character width detection in term_handler and tab_bar |
 | `crossterm` | 0.28 | Library scaffolding modules (not used by emulator yet) |

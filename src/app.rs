@@ -11,6 +11,7 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 
 use crate::clipboard;
 use crate::search::SearchState;
+use crate::url_detect::{UrlDetectCache, UrlSegment};
 use crate::config::{self, Config};
 use crate::config_monitor::ConfigMonitor;
 use crate::keybindings::{self, Action, KeyBinding};
@@ -64,6 +65,11 @@ pub struct App {
     last_mouse_cell: Option<(usize, usize)>,
     // Search
     search_active: Option<WindowId>,
+    // Hyperlink hover
+    hover_hyperlink: Option<(WindowId, String)>,
+    // Implicit URL detection
+    url_cache: UrlDetectCache,
+    hover_url_range: Option<Vec<UrlSegment>>,
     // Dropdown menu & settings
     dropdown_open: Option<WindowId>,
     settings_window: Option<WindowId>,
@@ -132,6 +138,9 @@ impl App {
             click_count: 0,
             last_mouse_cell: None,
             search_active: None,
+            hover_hyperlink: None,
+            url_cache: UrlDetectCache::default(),
+            hover_url_range: None,
             dropdown_open: None,
             settings_window: None,
             active_scheme,
@@ -610,6 +619,10 @@ impl App {
                 dropdown_open,
                 opacity: self.config.window.effective_opacity(),
                 tab_bar_opacity: self.config.window.effective_tab_bar_opacity(),
+                hover_hyperlink: self.hover_hyperlink.as_ref()
+                    .filter(|(wid, _)| *wid == window_id)
+                    .map(|(_, uri)| uri.as_str()),
+                hover_url_range: self.hover_url_range.as_deref(),
             });
 
         let Some(frame_params) = frame_params else {
@@ -744,6 +757,37 @@ impl App {
     /// Convert a viewport line to an absolute row index.
     fn viewport_to_absolute(grid: &crate::grid::Grid, line: usize) -> usize {
         grid.scrollback.len().saturating_sub(grid.display_offset) + line
+    }
+
+    /// Open a URL in the default browser. Only allows safe schemes.
+    fn open_url(uri: &str) {
+        let allowed = uri.starts_with("http://")
+            || uri.starts_with("https://")
+            || uri.starts_with("ftp://")
+            || uri.starts_with("file://");
+        if !allowed {
+            log(&format!("hyperlink: blocked URI with disallowed scheme: {uri}"));
+            return;
+        }
+        log(&format!("hyperlink: opening {uri}"));
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "start", "", uri])
+                .spawn();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = std::process::Command::new("xdg-open")
+                .arg(uri)
+                .spawn();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = std::process::Command::new("open")
+                .arg(uri)
+                .spawn();
+        }
     }
 
     /// Detect click count (1=char, 2=word, 3=line), cycling on rapid clicks.
@@ -1096,6 +1140,29 @@ impl App {
             None => return,
         };
 
+        // Ctrl+click: open hyperlink URL (OSC 8 first, then implicit URL)
+        if self.modifiers.control_key() {
+            let uri: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
+                let row = tab.grid().absolute_row(abs_row)?;
+                if col >= row.len() { return None; }
+                row[col].hyperlink().map(|h| h.uri.clone())
+            });
+            if let Some(ref uri) = uri {
+                Self::open_url(uri);
+                return;
+            }
+            // Fall through to implicit URL detection
+            let implicit_url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
+                let grid = tab.grid();
+                let hit = self.url_cache.url_at(grid, abs_row, col)?;
+                Some(hit.url)
+            });
+            if let Some(ref url) = implicit_url {
+                Self::open_url(url);
+                return;
+            }
+        }
+
         let click_count = self.detect_click_count(window_id, col, line);
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
@@ -1270,14 +1337,65 @@ impl App {
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
 
-        // Update cursor icon for resize borders only
+        // Update cursor icon for resize borders and hyperlink hover
         let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
             dir.into()
         } else {
             CursorIcon::Default
         };
+
+        // Hyperlink hover: detect when Ctrl is held and mouse is over a hyperlinked cell
+        let (cursor_icon, new_hover, new_url_range) = if cursor_icon == CursorIcon::Default
+            && self.modifiers.control_key()
+            && !self.is_settings_window(window_id)
+        {
+            if let Some((col, line)) = self.pixel_to_cell(position) {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                // Check OSC 8 hyperlink first
+                let osc8_uri: Option<String> = tab_id.and_then(|tid| {
+                    let tab = self.tabs.get(&tid)?;
+                    let grid = tab.grid();
+                    let abs_row = Self::viewport_to_absolute(grid, line);
+                    let row = grid.absolute_row(abs_row)?;
+                    if col >= row.len() { return None; }
+                    row[col].hyperlink().map(|h| h.uri.clone())
+                });
+                if let Some(ref uri) = osc8_uri {
+                    (CursorIcon::Pointer, Some((window_id, uri.clone())), None)
+                } else {
+                    // Fall through to implicit URL detection
+                    let implicit = tab_id.and_then(|tid| {
+                        let tab = self.tabs.get(&tid)?;
+                        let grid = tab.grid();
+                        let abs_row = Self::viewport_to_absolute(grid, line);
+                        let row = grid.absolute_row(abs_row)?;
+                        if col >= row.len() { return None; }
+                        let hit = self.url_cache.url_at(grid, abs_row, col)?;
+                        Some((hit.url, hit.segments))
+                    });
+                    if let Some((url, segments)) = implicit {
+                        (CursorIcon::Pointer, Some((window_id, url)), Some(segments))
+                    } else {
+                        (cursor_icon, None, None)
+                    }
+                }
+            } else {
+                (cursor_icon, None, None)
+            }
+        } else {
+            (cursor_icon, None, None)
+        };
+
+        let hover_changed = self.hover_hyperlink != new_hover
+            || self.hover_url_range != new_url_range;
+        self.hover_hyperlink = new_hover;
+        self.hover_url_range = new_url_range;
+
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.set_cursor(cursor_icon);
+            if hover_changed {
+                tw.window.request_redraw();
+            }
         }
 
         // Mouse motion reporting (before selection drag).
@@ -1998,6 +2116,7 @@ impl ApplicationHandler<TermEvent> for App {
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
                 }
+                self.url_cache.invalidate();
                 // Redraw the window containing this tab
                 if let Some(wid) = self.window_containing_tab(tab_id) {
                     // Only redraw if this is the active tab in that window
