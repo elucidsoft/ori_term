@@ -1,6 +1,8 @@
 pub mod cursor;
 pub mod row;
 
+use std::collections::VecDeque;
+
 use vte::ansi::{ClearMode, LineClearMode, TabulationClearMode};
 
 use crate::cell::{Cell, CellFlags};
@@ -19,7 +21,7 @@ pub struct Grid {
     scroll_top: usize,
     scroll_bottom: usize,
     pub tab_stops: Vec<bool>,
-    pub scrollback: Vec<Row>,
+    pub scrollback: VecDeque<Row>,
     pub max_scrollback: usize,
     pub display_offset: usize,
 }
@@ -42,7 +44,7 @@ impl Grid {
             scroll_top: 0,
             scroll_bottom: lines.saturating_sub(1),
             tab_stops,
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             max_scrollback,
             display_offset: 0,
         }
@@ -262,7 +264,7 @@ impl Grid {
             // Push to scrollback only if scrolling the full screen region at top
             if top == 0 {
                 if self.scrollback.len() >= self.max_scrollback {
-                    self.scrollback.remove(0);
+                    self.scrollback.pop_front();
                     // If we evicted from scrollback while user is scrolled up,
                     // reduce offset so they don't drift past the top
                     if self.display_offset > 0 {
@@ -272,7 +274,7 @@ impl Grid {
                     // Scrollback grew — bump offset to keep viewport anchored
                     self.display_offset += 1;
                 }
-                self.scrollback.push(scrolled_row);
+                self.scrollback.push_back(scrolled_row);
             }
 
             // Shift rows up
@@ -611,9 +613,9 @@ impl Grid {
                     if !self.rows.is_empty() {
                         let row = self.rows.remove(0);
                         if self.scrollback.len() >= self.max_scrollback {
-                            self.scrollback.remove(0);
+                            self.scrollback.pop_front();
                         }
-                        self.scrollback.push(row);
+                        self.scrollback.push_back(row);
                         self.cursor.row = self.cursor.row.saturating_sub(1);
                     }
                 }
@@ -634,7 +636,7 @@ impl Grid {
                     let from_scrollback = delta.min(self.scrollback.len());
                     let mut prepend = Vec::new();
                     for _ in 0..from_scrollback {
-                        prepend.push(self.scrollback.pop().expect("checked len"));
+                        prepend.push(self.scrollback.pop_back().expect("checked len"));
                     }
                     prepend.reverse();
                     self.cursor.row += from_scrollback;

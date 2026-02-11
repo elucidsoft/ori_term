@@ -206,6 +206,7 @@ impl App {
     /// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
     /// On Linux/macOS we use the native `drag_window()` which lets the compositor
     /// handle the move (required on Wayland where clients can't set their own position).
+    #[allow(clippy::needless_pass_by_ref_mut)] // Windows path mutates self.window_drag
     fn start_window_drag(&mut self, window_id: WindowId, cursor: PhysicalPosition<f64>) {
         let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
@@ -216,7 +217,6 @@ impl App {
         {
             let _ = cursor;
             let _ = tw.window.drag_window();
-            return;
         }
 
         #[cfg(target_os = "windows")]
@@ -754,6 +754,31 @@ impl App {
         let tab_offsets = self.tab_anim_offsets.get(&window_id)
             .map_or(empty_offsets.as_slice(), |v| v.as_slice());
 
+        // Clear bell badge on the active tab (it's now visible, no need for badge).
+        if let Some(tab_id) = active_tab_id {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.has_bell_badge = false;
+            }
+        }
+
+        // Build bell badges for each tab in this window.
+        let bell_badges: Vec<bool> = if let Some(tw) = self.windows.get(&window_id) {
+            tw.tabs.iter().map(|id| {
+                self.tabs.get(id).is_some_and(|t| t.has_bell_badge)
+            }).collect()
+        } else {
+            Vec::new()
+        };
+        let any_bell_badge = bell_badges.iter().any(|&b| b);
+
+        // Smooth sine pulse for bell badge animation (~0.5 Hz).
+        let bell_phase = if any_bell_badge {
+            let secs = self.last_anim_time.elapsed().as_secs_f32();
+            (secs * std::f32::consts::TAU * 0.5).sin() * 0.5 + 0.5
+        } else {
+            0.0
+        };
+
         // Build FrameParams — need the active tab's grid
         let frame_params = active_tab_id
             .and_then(|tab_id| self.tabs.get(&tab_id))
@@ -781,6 +806,8 @@ impl App {
                 alpha_blending: self.config.colors.alpha_blending,
                 dragged_tab,
                 tab_offsets,
+                bell_badges: &bell_badges,
+                bell_phase,
             });
 
         let Some(frame_params) = frame_params else {
@@ -809,6 +836,13 @@ impl App {
             &mut self.glyphs,
             &mut self.ui_glyphs,
         );
+
+        // Keep redrawing while bell badge pulse is animating.
+        if any_bell_badge {
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.request_redraw();
+            }
+        }
     }
 
     /// Detect if cursor is in the resize border zone. Returns the resize direction
@@ -2597,12 +2631,35 @@ impl ApplicationHandler<TermEvent> for App {
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
                 }
+
+                // Process bell state: if this tab rang the bell and is NOT active,
+                // set the bell badge so the tab bar shows an indicator.
+                let is_active = self.window_containing_tab(tab_id)
+                    .and_then(|wid| self.windows.get(&wid))
+                    .is_some_and(|tw| tw.active_tab_id() == Some(tab_id));
+                if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                    if tab.bell_start.is_some() && !is_active {
+                        tab.has_bell_badge = true;
+                    }
+                    // Drain pending notifications and log them.
+                    for notif in tab.pending_notifications.drain(..) {
+                        if notif.title.is_empty() {
+                            log(&format!("notification: {}", notif.body));
+                        } else {
+                            log(&format!("notification: {} — {}", notif.title, notif.body));
+                        }
+                    }
+                }
+
                 self.url_cache.invalidate();
                 // Redraw the window containing this tab
                 if let Some(wid) = self.window_containing_tab(tab_id) {
-                    // Only redraw if this is the active tab in that window
                     if let Some(tw) = self.windows.get(&wid) {
-                        if tw.active_tab_id() == Some(tab_id) {
+                        // Redraw if active tab, or if bell is active (for flash animation)
+                        let bell_active = self.tabs.get(&tab_id)
+                            .and_then(|t| t.bell_start)
+                            .is_some();
+                        if tw.active_tab_id() == Some(tab_id) || bell_active {
                             tw.window.request_redraw();
                         }
                     }

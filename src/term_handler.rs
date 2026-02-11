@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -44,6 +45,7 @@ pub struct TermHandler<'a> {
     grapheme: &'a mut GraphemeState,
     keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
     inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
+    bell_start: &'a mut Option<Instant>,
 }
 
 impl<'a> TermHandler<'a> {
@@ -62,6 +64,7 @@ impl<'a> TermHandler<'a> {
         grapheme: &'a mut GraphemeState,
         keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
         inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
+        bell_start: &'a mut Option<Instant>,
     ) -> Self {
         Self {
             grid,
@@ -77,6 +80,7 @@ impl<'a> TermHandler<'a> {
             grapheme,
             keyboard_mode_stack,
             inactive_keyboard_mode_stack,
+            bell_start,
         }
     }
 
@@ -720,7 +724,7 @@ impl Handler for TermHandler<'_> {
     }
 
     fn bell(&mut self) {
-        // Could emit a system bell sound — skip for now
+        *self.bell_start = Some(Instant::now());
     }
 
     fn text_area_size_chars(&mut self) {

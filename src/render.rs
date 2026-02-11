@@ -256,6 +256,8 @@ fn index_font_dir(dir: &std::path::Path, index: &mut HashMap<String, std::path::
             index_font_dir(&path, index);
         } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             index.entry(name.to_owned()).or_insert(path);
+        } else {
+            // Non-UTF-8 filename — skip
         }
     }
 }

@@ -247,7 +247,7 @@ Terminal style):
   (24-bit RGB) support. OSC 4 palette mutation, OSC 104 reset. OSC 10/11/12
   foreground/background/cursor color queries.
 
-- **Scrollback buffer**: Vec-based scrollback with configurable max (10,000 lines).
+- **Scrollback buffer**: VecDeque-based scrollback with configurable max (10,000 lines).
   display_offset viewport scrolling. Mouse wheel scroll (3 lines/tick). Keyboard
   shortcuts: Shift+PageUp/Down (page scroll), Shift+Home/End (top/bottom). Viewport
   anchoring when scrolled up. Auto-scroll to live on keyboard input. ED 3 clears
@@ -402,9 +402,6 @@ Terminal style):
   which shifts as the window moves. A more robust approach would use absolute screen
   coordinates or platform-specific drag APIs.
 
-- **Vec-based scrollback**: Scrollback uses `Vec<Row>` with O(n) removal at front.
-  Should be upgraded to ring buffer for O(1) rotation (performance optimization).
-
 - **Clipboard stubs on non-Windows**: The `clipboard.rs` module uses `clipboard-win`
   on Windows but provides no-op stubs on other platforms. Needs arboard or similar
   for cross-platform clipboard support.
@@ -547,7 +544,7 @@ Composite flag `ANY_UNDERLINE` combines all underline variants for efficient tes
 - `saved_cursor: Cursor` -- for DECSC/DECRC
 - `scroll_top` / `scroll_bottom` -- scroll region bounds
 - `tab_stops: Vec<bool>` -- tab stop positions
-- `scrollback: Vec<Row>` -- history buffer
+- `scrollback: VecDeque<Row>` -- history buffer (O(1) push/pop at both ends)
 - `max_scrollback: usize` -- cap (default 10,000)
 - `display_offset: usize` -- viewport offset into scrollback
 

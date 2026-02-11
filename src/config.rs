@@ -17,6 +17,7 @@ pub struct Config {
     pub colors: ColorConfig,
     pub window: WindowConfig,
     pub behavior: BehaviorConfig,
+    pub bell: BellConfig,
     #[serde(default)]
     pub keybind: Vec<KeybindConfig>,
 }
@@ -89,6 +90,17 @@ pub struct WindowConfig {
 pub struct BehaviorConfig {
     pub copy_on_select: bool,
     pub bold_is_bright: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BellConfig {
+    /// Visual bell animation: `ease_out`, `linear`, `none`
+    pub animation: String,
+    /// Duration in milliseconds (0 = disabled)
+    pub duration_ms: u16,
+    /// Flash color as "#RRGGBB" hex (default: white)
+    pub color: Option<String>,
 }
 
 impl Default for FontConfig {
@@ -167,6 +179,23 @@ impl Default for BehaviorConfig {
             copy_on_select: true,
             bold_is_bright: true,
         }
+    }
+}
+
+impl Default for BellConfig {
+    fn default() -> Self {
+        Self {
+            animation: "ease_out".into(),
+            duration_ms: 150,
+            color: None,
+        }
+    }
+}
+
+impl BellConfig {
+    /// Returns true when the visual bell is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.duration_ms > 0 && self.animation != "none"
     }
 }
 

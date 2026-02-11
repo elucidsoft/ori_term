@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::thread;
+use std::time::Instant;
 
 use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
 use vte::Perform;
@@ -61,13 +62,20 @@ pub enum PromptState {
     OutputStart,
 }
 
+/// A desktop notification from OSC 9, 99, or 777.
+pub struct Notification {
+    pub title: String,
+    pub body: String,
+}
+
 /// Raw VTE `Perform` implementation that intercepts sequences the high-level
 /// `vte::ansi::Processor` drops: OSC 7 (CWD), OSC 133 (prompt markers),
-/// and XTVERSION (CSI > q).
+/// OSC 9/99/777 (notifications), and XTVERSION (CSI > q).
 struct RawInterceptor<'a> {
     pty_writer: &'a mut Option<Box<dyn Write + Send>>,
     cwd: &'a mut Option<String>,
     prompt_state: &'a mut PromptState,
+    pending_notifications: &'a mut Vec<Notification>,
 }
 
 impl Perform for RawInterceptor<'_> {
@@ -107,6 +115,34 @@ impl Perform for RawInterceptor<'_> {
                         b'C' => *self.prompt_state = PromptState::OutputStart,
                         b'D' => *self.prompt_state = PromptState::None,
                         _ => {}
+                    }
+                }
+            }
+            // OSC 9 — iTerm2 simple notification: ESC]9;body ST
+            // OSC 99 — Kitty notification protocol: ESC]99;body ST
+            b"9" | b"99" => {
+                let body = if params.len() >= 2 {
+                    String::from_utf8_lossy(params[1]).into_owned()
+                } else {
+                    String::new()
+                };
+                self.pending_notifications.push(Notification {
+                    title: String::new(),
+                    body,
+                });
+            }
+            // OSC 777 — rxvt-unicode notification: ESC]777;notify;title;body ST
+            b"777" => {
+                if params.len() >= 2 {
+                    let action = std::str::from_utf8(params[1]).unwrap_or_default();
+                    if action == "notify" {
+                        let title = params.get(2)
+                            .map(|p| String::from_utf8_lossy(p).into_owned())
+                            .unwrap_or_default();
+                        let body = params.get(3)
+                            .map(|p| String::from_utf8_lossy(p).into_owned())
+                            .unwrap_or_default();
+                        self.pending_notifications.push(Notification { title, body });
                     }
                 }
             }
@@ -158,6 +194,12 @@ pub struct Tab {
     grapheme_state: GraphemeState,
     pub keyboard_mode_stack: Vec<KeyboardModes>,
     inactive_keyboard_mode_stack: Vec<KeyboardModes>,
+    /// When the bell (BEL 0x07) last rang — drives visual bell flash decay.
+    pub bell_start: Option<Instant>,
+    /// True when an inactive tab received a bell — shows badge in tab bar.
+    pub has_bell_badge: bool,
+    /// Notifications received via OSC 9/99/777.
+    pub pending_notifications: Vec<Notification>,
 }
 
 #[derive(Debug)]
@@ -242,6 +284,9 @@ impl Tab {
             grapheme_state: GraphemeState::default(),
             keyboard_mode_stack: Vec::new(),
             inactive_keyboard_mode_stack: Vec::new(),
+            bell_start: None,
+            has_bell_badge: false,
+            pending_notifications: Vec::new(),
         })
     }
 
@@ -275,12 +320,13 @@ impl Tab {
     }
 
     pub fn process_output(&mut self, data: &[u8]) {
-        // Run the raw interceptor first to capture OSC 7/133/XTVERSION
+        // Run the raw interceptor first to capture OSC 7/133/9/99/777/XTVERSION
         // (sequences that vte::ansi::Processor silently drops).
         let mut interceptor = RawInterceptor {
             pty_writer: &mut self.pty_writer,
             cwd: &mut self.cwd,
             prompt_state: &mut self.prompt_state,
+            pending_notifications: &mut self.pending_notifications,
         };
         self.raw_parser.advance(&mut interceptor, data);
 
@@ -299,6 +345,7 @@ impl Tab {
             &mut self.grapheme_state,
             &mut self.keyboard_mode_stack,
             &mut self.inactive_keyboard_mode_stack,
+            &mut self.bell_start,
         );
         self.processor.advance(&mut handler, data);
     }

@@ -233,6 +233,10 @@ pub struct FrameParams<'a> {
     pub dragged_tab: Option<(usize, f32)>,
     /// Per-tab X offsets for dodge animation.
     pub tab_offsets: &'a [f32],
+    /// Per-tab bell badge: true for tabs that received a bell while inactive.
+    pub bell_badges: &'a [bool],
+    /// Sine pulse phase for bell badge animation (0.0–1.0).
+    pub bell_phase: f32,
 }
 
 /// GPU state shared across all windows.
@@ -957,7 +961,16 @@ impl GpuRenderer {
             let x0 = base_x + params.tab_offsets.get(i).copied().unwrap_or(0.0);
             let is_hovered = params.hover_hit == TabBarHit::Tab(i);
 
-            let tab_bg = if is_hovered { tc.tab_hover_bg } else { tc.inactive_bg };
+            let has_bell = params.bell_badges.get(i).copied().unwrap_or(false);
+            let tab_bg = if is_hovered {
+                tc.tab_hover_bg
+            } else if has_bell {
+                // Subtle sine pulse between inactive and hover bg
+                let t = params.bell_phase.clamp(0.0, 1.0);
+                lerp_color(tc.inactive_bg, tc.tab_hover_bg, t)
+            } else {
+                tc.inactive_bg
+            };
 
             bg.push_rounded_rect(x0, top, tab_wf, tab_h, tab_bg, 8.0);
 
