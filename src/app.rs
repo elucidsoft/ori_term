@@ -426,7 +426,8 @@ impl App {
 
         // Render a dark clear frame before showing the window
         if let Some(renderer) = &self.renderer {
-            let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
+            let s = crate::gpu::renderer::srgb_to_linear;
+            let bg = [s(0x1e as f32 / 255.0), s(0x1e as f32 / 255.0), s(0x2e as f32 / 255.0), 1.0];
             renderer.clear_surface(gpu, &tw.surface, bg, self.config.window.effective_opacity());
         }
 
@@ -760,6 +761,10 @@ impl App {
     }
 
     /// Open a URL in the default browser. Only allows safe schemes.
+    ///
+    /// On Windows, uses `ShellExecuteW` directly (like Windows Terminal and
+    /// `WezTerm`) instead of `cmd /C start` which mangles `&` and `%` in URLs.
+    #[allow(unsafe_code)]
     fn open_url(uri: &str) {
         let allowed = uri.starts_with("http://")
             || uri.starts_with("https://")
@@ -769,12 +774,30 @@ impl App {
             log(&format!("hyperlink: blocked URI with disallowed scheme: {uri}"));
             return;
         }
-        log(&format!("hyperlink: opening {uri}"));
+        log(&format!("hyperlink: opening ({} chars) {uri}", uri.len()));
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("cmd")
-                .args(["/C", "start", "", uri])
-                .spawn();
+            use std::os::windows::ffi::OsStrExt;
+            let wide_open: Vec<u16> = std::ffi::OsStr::new("open")
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            let wide_uri: Vec<u16> = std::ffi::OsStr::new(uri)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+            // SAFETY: ShellExecuteW is a standard Windows API call with
+            // null-terminated wide strings. No memory safety concerns.
+            unsafe {
+                windows_sys::Win32::UI::Shell::ShellExecuteW(
+                    std::ptr::null_mut(),
+                    wide_open.as_ptr(),
+                    wide_uri.as_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                );
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -1369,7 +1392,9 @@ impl App {
                         let grid = tab.grid();
                         let abs_row = Self::viewport_to_absolute(grid, line);
                         let row = grid.absolute_row(abs_row)?;
-                        if col >= row.len() { return None; }
+                        if col >= row.len() {
+                            return None;
+                        }
                         let hit = self.url_cache.url_at(grid, abs_row, col)?;
                         Some((hit.url, hit.segments))
                     });
@@ -1936,7 +1961,8 @@ impl App {
 
         // Render a dark clear frame (settings window is always opaque)
         if let Some(renderer) = &self.renderer {
-            let bg = [0x1e as f32 / 255.0, 0x1e as f32 / 255.0, 0x2e as f32 / 255.0, 1.0];
+            let s = crate::gpu::renderer::srgb_to_linear;
+            let bg = [s(0x1e as f32 / 255.0), s(0x1e as f32 / 255.0), s(0x2e as f32 / 255.0), 1.0];
             renderer.clear_surface(gpu, &tw.surface, bg, 1.0);
         }
 

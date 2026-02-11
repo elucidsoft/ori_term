@@ -73,13 +73,25 @@ impl UrlDetectCache {
     }
 }
 
-/// Walk backwards to find the start of a logical (soft-wrapped) line.
+/// Check if a row's content continues onto the next row.
+/// True when WRAPLINE is set (terminal auto-wrap) OR the row is completely
+/// filled with non-space content (application-driven wrapping, e.g. a CLI
+/// that explicitly breaks long URLs at the terminal width).
+fn row_continues(row: &crate::grid::row::Row) -> bool {
+    let cols = row.len();
+    if cols == 0 {
+        return false;
+    }
+    let last = &row[cols - 1];
+    last.flags.contains(CellFlags::WRAPLINE) || (last.c != '\0' && last.c != ' ')
+}
+
+/// Walk backwards to find the start of contiguous text for URL detection.
 fn logical_line_start(grid: &Grid, abs_row: usize) -> usize {
     let mut r = abs_row;
     while r > 0 {
         if let Some(prev_row) = grid.absolute_row(r - 1) {
-            let cols = prev_row.len();
-            if cols > 0 && prev_row[cols - 1].flags.contains(CellFlags::WRAPLINE) {
+            if row_continues(prev_row) {
                 r -= 1;
             } else {
                 break;
@@ -91,13 +103,12 @@ fn logical_line_start(grid: &Grid, abs_row: usize) -> usize {
     r
 }
 
-/// Walk forwards to find the end of a logical (soft-wrapped) line.
+/// Walk forwards to find the end of contiguous text for URL detection.
 fn logical_line_end(grid: &Grid, abs_row: usize) -> usize {
     let total = grid.scrollback.len() + grid.lines;
     let mut r = abs_row;
     while let Some(row) = grid.absolute_row(r) {
-        let cols = row.len();
-        if cols > 0 && row[cols - 1].flags.contains(CellFlags::WRAPLINE) && r + 1 < total {
+        if row_continues(row) && r + 1 < total {
             r += 1;
         } else {
             break;

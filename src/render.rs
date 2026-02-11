@@ -42,6 +42,18 @@ struct FontFamily {
 #[cfg(target_os = "windows")]
 const FONT_FAMILIES: &[FontFamily] = &[
     FontFamily {
+        regular: &[r"C:\Windows\Fonts\JetBrainsMono-Regular.ttf"],
+        bold: &[r"C:\Windows\Fonts\JetBrainsMono-Bold.ttf"],
+        italic: &[r"C:\Windows\Fonts\JetBrainsMono-Italic.ttf"],
+        bold_italic: &[r"C:\Windows\Fonts\JetBrainsMono-BoldItalic.ttf"],
+    },
+    FontFamily {
+        regular: &[r"C:\Windows\Fonts\JetBrainsMonoNerdFont-Regular.ttf"],
+        bold: &[r"C:\Windows\Fonts\JetBrainsMonoNerdFont-Bold.ttf"],
+        italic: &[r"C:\Windows\Fonts\JetBrainsMonoNerdFont-Italic.ttf"],
+        bold_italic: &[r"C:\Windows\Fonts\JetBrainsMonoNerdFont-BoldItalic.ttf"],
+    },
+    FontFamily {
         regular: &[r"C:\Windows\Fonts\CascadiaMonoNF.ttf"],
         bold: &[r"C:\Windows\Fonts\CascadiaMonoNF-Bold.ttf"],
         italic: &[r"C:\Windows\Fonts\CascadiaMonoNF-Italic.ttf"],

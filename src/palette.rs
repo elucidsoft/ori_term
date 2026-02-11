@@ -189,8 +189,34 @@ pub const TOKYO_NIGHT: ColorScheme = ColorScheme {
     cursor: Rgb { r: 0xc0, g: 0xca, b: 0xf5 },
 };
 
+pub const WEZTERM_DEFAULT: ColorScheme = ColorScheme {
+    name: "WezTerm Default",
+    ansi: [
+        Rgb { r: 0x00, g: 0x00, b: 0x00 }, // Black
+        Rgb { r: 0xcc, g: 0x55, b: 0x55 }, // Red (Maroon)
+        Rgb { r: 0x55, g: 0xcc, b: 0x55 }, // Green
+        Rgb { r: 0xcd, g: 0xcd, b: 0x55 }, // Yellow (Olive)
+        Rgb { r: 0x54, g: 0x55, b: 0xcb }, // Blue (Navy)
+        Rgb { r: 0xcc, g: 0x55, b: 0xcc }, // Magenta (Purple)
+        Rgb { r: 0x7a, g: 0xca, b: 0xca }, // Cyan (Teal)
+        Rgb { r: 0xcc, g: 0xcc, b: 0xcc }, // White (Silver)
+        Rgb { r: 0x55, g: 0x55, b: 0x55 }, // Bright Black (Grey)
+        Rgb { r: 0xff, g: 0x55, b: 0x55 }, // Bright Red
+        Rgb { r: 0x55, g: 0xff, b: 0x55 }, // Bright Green
+        Rgb { r: 0xff, g: 0xff, b: 0x55 }, // Bright Yellow
+        Rgb { r: 0x55, g: 0x55, b: 0xff }, // Bright Blue
+        Rgb { r: 0xff, g: 0x55, b: 0xff }, // Bright Magenta
+        Rgb { r: 0x55, g: 0xff, b: 0xff }, // Bright Cyan
+        Rgb { r: 0xff, g: 0xff, b: 0xff }, // Bright White
+    ],
+    fg: Rgb { r: 0xb2, g: 0xb2, b: 0xb2 },
+    bg: Rgb { r: 0x00, g: 0x00, b: 0x00 },
+    cursor: Rgb { r: 0x52, g: 0xad, b: 0x70 },
+};
+
 /// All built-in color schemes.
 pub const BUILTIN_SCHEMES: &[&ColorScheme] = &[
+    &WEZTERM_DEFAULT,
     &CATPPUCCIN_MOCHA,
     &CATPPUCCIN_LATTE,
     &ONE_DARK,

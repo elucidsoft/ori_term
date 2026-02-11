@@ -137,9 +137,17 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
     return out;
 }
 
+// Linearize glyph coverage for correct blending on an sRGB surface.
+// fontdue produces raw area-coverage values; pow(c, gamma) compensates
+// for the heavier edges that linear-space alpha blending would produce.
+fn linearize_coverage(c: f32) -> f32 {
+    return pow(c, 2.2);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let alpha = textureSample(glyph_texture, glyph_sampler, input.uv).r;
+    let coverage = textureSample(glyph_texture, glyph_sampler, input.uv).r;
+    let alpha = linearize_coverage(coverage);
     return vec4<f32>(input.fg_color.rgb, input.fg_color.a * alpha);
 }
 ";

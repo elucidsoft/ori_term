@@ -103,13 +103,20 @@ const CONTROL_BUTTON_WIDTH: usize = 58;
 const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3;
 const ICON_SIZE: usize = 10;
 
+/// Convert an sRGB u8 triplet to linear RGBA at compile time (approximate).
+/// Uses a simple gamma-2.2 power curve (close enough for UI constants).
 const fn rgb_const(r: u8, g: u8, b: u8) -> [f32; 4] {
-    [
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        1.0,
-    ]
+    // Approximate sRGB→linear via x^2.2.  We need const fn so we use a
+    // piecewise quadratic approximation: (x/255)^2.2 ≈ pow22(x).
+    // For exact conversion at runtime, see `srgb_to_linear`.
+    const fn pow22(v: u8) -> f32 {
+        let x = v as f32 / 255.0;
+        // x^2.2 ≈ x^2 * x^0.2;  x^0.2 ≈ 1 - 0.8*(1-x) for x>0.04
+        // Simpler: just use x*x as a rough gamma-2.0 approximation which
+        // is close enough for compile-time UI element colors.
+        x * x
+    }
+    [pow22(r), pow22(g), pow22(b), 1.0]
 }
 
 /// Frame data needed to build a frame.
@@ -139,7 +146,12 @@ pub struct GpuState {
     pub adapter: wgpu::Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// The native surface format (used for surface configuration).
     pub surface_format: wgpu::TextureFormat,
+    /// The sRGB format used for render passes and pipelines.
+    /// May differ from `surface_format` when the surface doesn't natively
+    /// support sRGB (e.g. DX12 `DirectComposition`).
+    pub render_format: wgpu::TextureFormat,
     pub surface_alpha_mode: wgpu::CompositeAlphaMode,
 }
 
@@ -202,14 +214,20 @@ impl GpuState {
         .ok()?;
 
         let caps = surface.get_capabilities(&adapter);
-        // Use a non-sRGB format so our sRGB color values pass through without
-        // double gamma correction. Terminal colors are already in sRGB space.
-        let surface_format = caps
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
+        // Pick the native surface format, then derive an sRGB render format.
+        // Some backends (DX12 DirectComposition) only expose non-sRGB surface
+        // formats.  We use `view_formats` + `add_srgb_suffix()` so the GPU
+        // still performs gamma-aware blending in all cases.
+        let surface_format = caps.formats[0];
+        let render_format = surface_format.add_srgb_suffix();
+
+        // view_formats lets us create an sRGB view of a non-sRGB surface
+        let view_formats = if render_format == surface_format {
+            vec![]
+        } else {
+            vec![render_format]
+        };
+
         // Prefer a non-opaque alpha mode so the compositor can see our
         // transparent pixels and show blur/acrylic through them.
         let surface_alpha_mode = if caps
@@ -237,14 +255,15 @@ impl GpuState {
                 height: size.height.max(1),
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: surface_alpha_mode,
-                view_formats: vec![],
+                view_formats,
                 desired_maximum_frame_latency: 2,
             },
         );
 
         let info = adapter.get_info();
         crate::log(&format!(
-            "GPU init: adapter={}, backend={:?}, format={surface_format:?}, \
+            "GPU init: adapter={}, backend={:?}, surface_format={surface_format:?}, \
+             render_format={render_format:?}, \
              alpha_mode={surface_alpha_mode:?} (available: {:?})",
             info.name, info.backend, caps.alpha_modes,
         ));
@@ -255,6 +274,7 @@ impl GpuState {
             device,
             queue,
             surface_format,
+            render_format,
             surface_alpha_mode,
         })
     }
@@ -266,6 +286,11 @@ impl GpuState {
     ) -> Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)> {
         let surface = self.instance.create_surface(window.clone()).ok()?;
         let size = window.inner_size();
+        let view_formats = if self.render_format == self.surface_format {
+            vec![]
+        } else {
+            vec![self.render_format]
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: self.surface_format,
@@ -273,7 +298,7 @@ impl GpuState {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: self.surface_alpha_mode,
-            view_formats: vec![],
+            view_formats,
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&self.device, &config);
@@ -306,12 +331,13 @@ pub struct GpuRenderer {
     atlas_bind_group: wgpu::BindGroup,
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    render_format: wgpu::TextureFormat,
 }
 
 impl GpuRenderer {
     pub fn new(gpu: &GpuState, glyphs: &mut FontSet) -> Self {
         let device = &gpu.device;
-        let format = gpu.surface_format;
+        let format = gpu.render_format;
 
         // Bind group layouts
         let uniform_layout = pipeline::create_uniform_bind_group_layout(device);
@@ -379,6 +405,7 @@ impl GpuRenderer {
             atlas_bind_group,
             atlas_layout,
             sampler,
+            render_format: format,
         }
     }
 
@@ -417,7 +444,10 @@ impl GpuRenderer {
             Ok(f) => f,
             Err(_) => return,
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.render_format),
+                ..Default::default()
+            });
         let mut encoder =
             gpu.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -1234,6 +1264,11 @@ impl GpuRenderer {
                     continue;
                 }
 
+                // Custom block character rendering (pixel-perfect, no font glyph)
+                if draw_block_char(cell.c, x0, y0, cell_w, ch as f32, fg_rgba, bg) {
+                    continue;
+                }
+
                 let style = FontStyle::from_cell_flags(cell.flags);
                 let entry =
                     self.atlas
@@ -1339,10 +1374,11 @@ impl GpuRenderer {
             let brd = lighten(bg_dark, 0.25);
             (bg_dark, text, text, hover, brd)
         } else {
-            let bg_dark = [0.08, 0.08, 0.12, 1.0];
-            let text = [0.8, 0.84, 0.96, 1.0];
-            let hover = [0.18, 0.18, 0.25, 1.0];
-            let brd = [0.3, 0.3, 0.4, 1.0];
+            let s = srgb_to_linear;
+            let bg_dark = [s(0.08), s(0.08), s(0.12), 1.0];
+            let text = [s(0.8), s(0.84), s(0.96), 1.0];
+            let hover = [s(0.18), s(0.18), s(0.25), 1.0];
+            let brd = [s(0.3), s(0.3), s(0.4), 1.0];
             (bg_dark, text, text, hover, brd)
         };
 
@@ -1552,6 +1588,196 @@ impl GpuRenderer {
     }
 }
 
+// --- Block character rendering ---
+
+/// Draw a Unicode block element (U+2580–U+259F) as pixel-perfect rectangles.
+/// Returns `true` if the character was handled, `false` to fall through to the
+/// normal glyph path.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+fn draw_block_char(
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fg: [f32; 4],
+    bg: &mut InstanceWriter,
+) -> bool {
+    match c {
+        // ▀ Upper half block
+        '\u{2580}' => {
+            bg.push_rect(x, y, w, (h / 2.0).round(), fg);
+        }
+        // ▁ Lower 1/8
+        '\u{2581}' => {
+            let bh = (h / 8.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▂ Lower 1/4
+        '\u{2582}' => {
+            let bh = (h / 4.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▃ Lower 3/8
+        '\u{2583}' => {
+            let bh = (h * 3.0 / 8.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▄ Lower half
+        '\u{2584}' => {
+            let bh = (h / 2.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▅ Lower 5/8
+        '\u{2585}' => {
+            let bh = (h * 5.0 / 8.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▆ Lower 3/4
+        '\u{2586}' => {
+            let bh = (h * 3.0 / 4.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // ▇ Lower 7/8
+        '\u{2587}' => {
+            let bh = (h * 7.0 / 8.0).round();
+            bg.push_rect(x, y + h - bh, w, bh, fg);
+        }
+        // █ Full block
+        '\u{2588}' => {
+            bg.push_rect(x, y, w, h, fg);
+        }
+        // ▉ Left 7/8
+        '\u{2589}' => {
+            bg.push_rect(x, y, (w * 7.0 / 8.0).round(), h, fg);
+        }
+        // ▊ Left 3/4
+        '\u{258A}' => {
+            bg.push_rect(x, y, (w * 3.0 / 4.0).round(), h, fg);
+        }
+        // ▋ Left 5/8
+        '\u{258B}' => {
+            bg.push_rect(x, y, (w * 5.0 / 8.0).round(), h, fg);
+        }
+        // ▌ Left half
+        '\u{258C}' => {
+            bg.push_rect(x, y, (w / 2.0).round(), h, fg);
+        }
+        // ▍ Left 3/8
+        '\u{258D}' => {
+            bg.push_rect(x, y, (w * 3.0 / 8.0).round(), h, fg);
+        }
+        // ▎ Left 1/4
+        '\u{258E}' => {
+            bg.push_rect(x, y, (w / 4.0).round(), h, fg);
+        }
+        // ▏ Left 1/8
+        '\u{258F}' => {
+            bg.push_rect(x, y, (w / 8.0).round(), h, fg);
+        }
+        // ▐ Right half
+        '\u{2590}' => {
+            let hw = (w / 2.0).round();
+            bg.push_rect(x + w - hw, y, hw, h, fg);
+        }
+        // ░ Light shade (25%)
+        '\u{2591}' => {
+            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.25];
+            bg.push_rect(x, y, w, h, shade);
+        }
+        // ▒ Medium shade (50%)
+        '\u{2592}' => {
+            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.5];
+            bg.push_rect(x, y, w, h, shade);
+        }
+        // ▓ Dark shade (75%)
+        '\u{2593}' => {
+            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.75];
+            bg.push_rect(x, y, w, h, shade);
+        }
+        // ▔ Upper 1/8
+        '\u{2594}' => {
+            bg.push_rect(x, y, w, (h / 8.0).round(), fg);
+        }
+        // ▕ Right 1/8
+        '\u{2595}' => {
+            let bw = (w / 8.0).round();
+            bg.push_rect(x + w - bw, y, bw, h, fg);
+        }
+        // Quadrant block elements (U+2596–U+259F)
+        // Each is a combination of quarter-cell fills:
+        //   TL = top-left, TR = top-right, BL = bottom-left, BR = bottom-right
+        '\u{2596}' => {
+            // ▖ Quadrant lower left
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y + hh, hw, h - hh, fg);
+        }
+        '\u{2597}' => {
+            // ▗ Quadrant lower right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg);
+        }
+        '\u{2598}' => {
+            // ▘ Quadrant upper left
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y, hw, hh, fg);
+        }
+        '\u{2599}' => {
+            // ▙ Quadrant upper left + lower left + lower right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y, hw, hh, fg);           // TL
+            bg.push_rect(x, y + hh, w, h - hh, fg);   // full bottom
+        }
+        '\u{259A}' => {
+            // ▚ Quadrant upper left + lower right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y, hw, hh, fg);                    // TL
+            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg); // BR
+        }
+        '\u{259B}' => {
+            // ▛ Quadrant upper left + upper right + lower left
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y, w, hh, fg);            // full top
+            bg.push_rect(x, y + hh, hw, h - hh, fg);  // BL
+        }
+        '\u{259C}' => {
+            // ▜ Quadrant upper left + upper right + lower right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x, y, w, hh, fg);                     // full top
+            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg);  // BR
+        }
+        '\u{259D}' => {
+            // ▝ Quadrant upper right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x + hw, y, w - hw, hh, fg);
+        }
+        '\u{259E}' => {
+            // ▞ Quadrant upper right + lower left
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x + hw, y, w - hw, hh, fg);       // TR
+            bg.push_rect(x, y + hh, hw, h - hh, fg);       // BL
+        }
+        '\u{259F}' => {
+            // ▟ Quadrant upper right + lower left + lower right
+            let hw = (w / 2.0).round();
+            let hh = (h / 2.0).round();
+            bg.push_rect(x + hw, y, w - hw, hh, fg);   // TR
+            bg.push_rect(x, y + hh, w, h - hh, fg);    // full bottom
+        }
+        _ => return false,
+    }
+    true
+}
+
 // --- Instance data serialization ---
 
 /// Writes cell instance data to a byte buffer without unsafe code.
@@ -1660,27 +1886,36 @@ impl InstanceWriter {
 
 // --- Color conversion helpers ---
 
-/// Convert VTE RGB to [f32; 4] RGBA (sRGB, alpha=1.0).
+/// Convert an sRGB component (0.0–1.0) to linear light.
+pub(crate) fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Convert VTE RGB to [f32; 4] RGBA in **linear** space (alpha=1.0).
 fn vte_rgb_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
     [
-        f32::from(rgb.r) / 255.0,
-        f32::from(rgb.g) / 255.0,
-        f32::from(rgb.b) / 255.0,
+        srgb_to_linear(f32::from(rgb.r) / 255.0),
+        srgb_to_linear(f32::from(rgb.g) / 255.0),
+        srgb_to_linear(f32::from(rgb.b) / 255.0),
         1.0,
     ]
 }
 
-/// Convert palette `default_bg()` to RGBA.
+/// Convert palette `default_bg()` to RGBA (linear).
 fn palette_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
     vte_rgb_to_rgba(rgb)
 }
 
-/// Convert a u32 color (0x00RRGGBB) to [f32; 4] RGBA.
+/// Convert a u32 color (0x00RRGGBB) to [f32; 4] RGBA in **linear** space.
 fn u32_to_rgba(c: u32) -> [f32; 4] {
     [
-        ((c >> 16) & 0xFF) as f32 / 255.0,
-        ((c >> 8) & 0xFF) as f32 / 255.0,
-        (c & 0xFF) as f32 / 255.0,
+        srgb_to_linear(((c >> 16) & 0xFF) as f32 / 255.0),
+        srgb_to_linear(((c >> 8) & 0xFF) as f32 / 255.0),
+        srgb_to_linear((c & 0xFF) as f32 / 255.0),
         1.0,
     ]
 }
