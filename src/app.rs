@@ -41,6 +41,16 @@ const DOUBLE_CLICK_MS: u128 = 400;
 // Scroll lines per mouse wheel tick
 const SCROLL_LINES: usize = 3;
 
+/// Manual window drag state — replaces OS native `drag_window()` to avoid
+/// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
+struct WindowDrag {
+    window_id: WindowId,
+    /// Screen-space cursor position at drag start.
+    start_screen: (f64, f64),
+    /// Window outer position at drag start.
+    start_window: (i32, i32),
+}
+
 pub struct App {
     config: Config,
     windows: HashMap<WindowId, TermWindow>,
@@ -49,6 +59,7 @@ pub struct App {
     gpu: Option<GpuState>,
     renderer: Option<GpuRenderer>,
     drag: Option<DragState>,
+    window_drag: Option<WindowDrag>,
     next_tab_id: u64,
     proxy: EventLoopProxy<TermEvent>,
     cursor_pos: HashMap<WindowId, PhysicalPosition<f64>>,
@@ -126,6 +137,7 @@ impl App {
             gpu: None,
             renderer: None,
             drag: None,
+            window_drag: None,
             next_tab_id: 1,
             proxy,
             cursor_pos: HashMap::new(),
@@ -160,11 +172,33 @@ impl App {
         id
     }
 
-    /// Start an OS-native window drag (blocking).
-    fn start_native_drag(&self, window_id: WindowId) {
-        if let Some(tw) = self.windows.get(&window_id) {
-            let _ = tw.window.drag_window();
-        }
+    /// Begin a manual window drag (non-blocking).
+    ///
+    /// Avoids `Window::drag_window()` because winit's `WM_DPICHANGED` handler
+    /// calls `SetWindowPos` inside the Win32 modal move loop, which can
+    /// reposition the window across a DPI boundary and cause infinite
+    /// oscillation.  Instead we track the drag ourselves and move the window
+    /// with `set_outer_position` in `CursorMoved`.
+    fn start_window_drag(&mut self, window_id: WindowId, cursor: PhysicalPosition<f64>) {
+        let tw = match self.windows.get(&window_id) {
+            Some(tw) => tw,
+            None => return,
+        };
+        let win_pos = match tw.window.outer_position() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let inner_pos = match tw.window.inner_position() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let screen_x = inner_pos.x as f64 + cursor.x;
+        let screen_y = inner_pos.y as f64 + cursor.y;
+        self.window_drag = Some(WindowDrag {
+            window_id,
+            start_screen: (screen_x, screen_y),
+            start_window: (win_pos.x, win_pos.y),
+        });
     }
 
     fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
@@ -745,13 +779,6 @@ impl App {
         if (scale_factor - self.scale_factor).abs() < 0.01 {
             return;
         }
-        log(&format!(
-            "scale_factor changed: {:.2} -> {:.2}",
-            self.scale_factor, scale_factor
-        ));
-        // Just record the new factor.  The heavy work (font reload, atlas
-        // rebuild) happens in handle_resize which fires right after with the
-        // correct window dimensions.
         self.scale_factor = scale_factor;
     }
 
@@ -1097,7 +1124,7 @@ impl App {
                                 // Single click: start window drag
                                 self.last_click_time = Some(now);
                                 self.last_click_window = Some(window_id);
-                                self.start_native_drag(window_id);
+                                self.start_window_drag(window_id, pos);
                             }
                         }
                         TabBarHit::Tab(idx) => {
@@ -1108,7 +1135,7 @@ impl App {
                             let tab_count = tw.tabs.len();
                             if tab_count <= 1 {
                                 // Only one tab — drag the window (same as DragArea).
-                                self.start_native_drag(window_id);
+                                self.start_window_drag(window_id, pos);
                             } else {
                                 // Multiple tabs — select and start potential tab drag
                                 if let Some(&tab_id) = tw.tabs.get(idx) {
@@ -1128,6 +1155,9 @@ impl App {
                 }
             }
             ElementState::Released => {
+                // End manual window drag
+                self.window_drag = None;
+
                 // Finalize selection and auto-copy
                 if self.left_mouse_down {
                     self.left_mouse_down = false;
@@ -1392,6 +1422,26 @@ impl App {
 
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
+
+        // Manual window drag — move window to follow cursor
+        if let Some(ref wd) = self.window_drag {
+            if wd.window_id == window_id {
+                if let Some(tw) = self.windows.get(&window_id) {
+                    if let Ok(ip) = tw.window.inner_position() {
+                        let sx = ip.x as f64 + position.x;
+                        let sy = ip.y as f64 + position.y;
+                        let dx = sx - wd.start_screen.0;
+                        let dy = sy - wd.start_screen.1;
+                        let new_x = wd.start_window.0 + dx as i32;
+                        let new_y = wd.start_window.1 + dy as i32;
+                        tw.window.set_outer_position(
+                            PhysicalPosition::new(new_x, new_y),
+                        );
+                    }
+                }
+                return; // Don't process hover/selection during window drag
+            }
+        }
 
         // Update cursor icon for resize borders and hyperlink hover
         let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
@@ -1681,13 +1731,8 @@ impl App {
                 tw.window.request_redraw();
             }
 
-            // Hand off to the OS native move loop. This is blocking —
-            // Windows handles the drag with full Aero Snap support.
-            // When the user releases the mouse, this returns.
-            self.start_native_drag(new_wid);
-
-            // Native drag finished (mouse released). Clear our drag state.
-            self.drag = None;
+            // The drag continues via CursorMoved (DragPhase::TornOff)
+            // until mouse release.
         }
 
         // If source window is empty, close it
@@ -2223,10 +2268,6 @@ impl ApplicationHandler<TermEvent> for App {
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                // Let the OS resize the window to maintain logical size.
-                // The subsequent Resized event will reload fonts at the new
-                // DPI so cell dimensions scale proportionally — the grid
-                // keeps the same column/row count.
                 self.handle_scale_factor_changed(window_id, scale_factor);
             }
 
