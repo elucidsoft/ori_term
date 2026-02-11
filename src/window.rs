@@ -51,6 +51,12 @@ impl TermWindow {
         self.active_tab = self.tabs.len() - 1;
     }
 
+    pub fn insert_tab_at(&mut self, id: TabId, index: usize) {
+        let idx = index.min(self.tabs.len());
+        self.tabs.insert(idx, id);
+        self.active_tab = idx;
+    }
+
     pub fn remove_tab(&mut self, id: TabId) -> bool {
         if let Some(pos) = self.tabs.iter().position(|t| *t == id) {
             self.tabs.remove(pos);

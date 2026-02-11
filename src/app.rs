@@ -92,6 +92,8 @@ pub struct App {
     _config_monitor: Option<ConfigMonitor>,
     bindings: Vec<KeyBinding>,
     scale_factor: f64,
+    /// Drop target during tab tear-off: (target window, insertion index).
+    drop_target: Option<(WindowId, usize)>,
 }
 
 impl App {
@@ -175,6 +177,7 @@ impl App {
             _config_monitor: config_monitor,
             bindings,
             scale_factor: 1.0,
+            drop_target: None,
         };
 
         event_loop.run_app(&mut app)?;
@@ -751,6 +754,9 @@ impl App {
                 hover_url_range: self.hover_url_range.as_deref(),
                 minimum_contrast: self.config.colors.effective_minimum_contrast(),
                 alpha_blending: self.config.colors.alpha_blending,
+                drop_indicator: self.drop_target
+                    .filter(|(wid, _)| *wid == window_id)
+                    .map(|(_, idx)| idx),
             });
 
         let Some(frame_params) = frame_params else {
@@ -1217,19 +1223,12 @@ impl App {
                                 Some(tw) => tw,
                                 None => return,
                             };
-                            let tab_count = tw.tabs.len();
-                            if tab_count <= 1 {
-                                // Only one tab — drag the window (same as DragArea).
-                                self.start_window_drag(window_id, pos);
-                            } else {
-                                // Multiple tabs — select and start potential tab drag
-                                if let Some(&tab_id) = tw.tabs.get(idx) {
-                                    if let Some(tw) = self.windows.get_mut(&window_id) {
-                                        tw.active_tab = idx;
-                                        tw.window.request_redraw();
-                                    }
-                                    self.drag = Some(DragState::new(tab_id, window_id, pos, idx));
+                            if let Some(&tab_id) = tw.tabs.get(idx) {
+                                if let Some(tw) = self.windows.get_mut(&window_id) {
+                                    tw.active_tab = idx;
+                                    tw.window.request_redraw();
                                 }
+                                self.drag = Some(DragState::new(tab_id, window_id, pos, idx));
                             }
                         }
                         TabBarHit::None => {}
@@ -1271,11 +1270,24 @@ impl App {
                     let torn_wid = drag.source_window;
                     match drag.phase {
                         DragPhase::TornOff => {
-                            // Check if we're over another window's tab bar
-                            if let Some(target_wid) = self.find_window_at_cursor(torn_wid) {
-                                self.reattach_tab(drag.tab_id, torn_wid, target_wid, pos);
+                            // Compute screen cursor from the event window (which
+                            // has mouse capture — may differ from the torn-off
+                            // window).
+                            let screen = self.windows.get(&window_id)
+                                .and_then(|tw| tw.window.inner_position().ok())
+                                .map(|ip| (ip.x as f64 + pos.x, ip.y as f64 + pos.y));
+                            if let Some((sx, sy)) = screen {
+                                if let Some((target_wid, screen_x)) =
+                                    self.find_window_at_cursor(torn_wid, sx, sy)
+                                {
+                                    let idx =
+                                        self.compute_drop_index(target_wid, screen_x);
+                                    self.reattach_tab(
+                                        drag.tab_id, torn_wid, target_wid, idx,
+                                    );
+                                }
                             }
-                            // Window is already created — nothing else needed
+                            self.drop_target = None;
                         }
                         DragPhase::DraggingInBar | DragPhase::Pending => {
                             // Tab reorder finalized / was just a click — nothing extra needed
@@ -1734,10 +1746,25 @@ impl App {
             match phase {
                 DragPhase::Pending => {
                     if dist >= DRAG_START_THRESHOLD {
-                        if let Some(ref mut drag) = self.drag {
-                            drag.phase = DragPhase::DraggingInBar;
+                        let is_single_tab = self
+                            .windows
+                            .get(&source_wid)
+                            .is_some_and(|tw| tw.tabs.len() <= 1);
+                        if is_single_tab {
+                            // Single-tab window: skip DraggingInBar, go straight
+                            // to TornOff so the whole window can be dropped onto
+                            // another window's tab bar.
+                            if let Some(ref mut drag) = self.drag {
+                                drag.phase = DragPhase::TornOff;
+                                drag.grab_offset = position;
+                            }
+                            log("drag: pending -> torn off (single tab)");
+                        } else {
+                            if let Some(ref mut drag) = self.drag {
+                                drag.phase = DragPhase::DraggingInBar;
+                            }
+                            log("drag: pending -> dragging in bar");
                         }
-                        log("drag: pending -> dragging in bar");
                     }
                 }
                 DragPhase::DraggingInBar => {
@@ -1768,6 +1795,28 @@ impl App {
                                 tw.window.set_outer_position(
                                     PhysicalPosition::new(new_x as i32, new_y as i32),
                                 );
+                            }
+
+                            // Compute drop target for visual indicator
+                            let old_target = self.drop_target;
+                            self.drop_target = self
+                                .find_window_at_cursor(wid, sx, sy)
+                                .map(|(target_wid, screen_x)| {
+                                    let idx = self.compute_drop_index(target_wid, screen_x);
+                                    (target_wid, idx)
+                                });
+                            // Request redraws on affected windows when target changes
+                            if self.drop_target != old_target {
+                                if let Some((old_wid, _)) = old_target {
+                                    if let Some(tw) = self.windows.get(&old_wid) {
+                                        tw.window.request_redraw();
+                                    }
+                                }
+                                if let Some((new_wid, _)) = self.drop_target {
+                                    if let Some(tw) = self.windows.get(&new_wid) {
+                                        tw.window.request_redraw();
+                                    }
+                                }
                             }
                         }
                     }
@@ -1820,6 +1869,12 @@ impl App {
                 tw.window.set_visible(true);
             }
 
+            // Update drag.source_window to the torn-off window so the
+            // release handler uses the correct window id.
+            if let Some(ref mut drag) = self.drag {
+                drag.source_window = new_wid;
+            }
+
             // The drag continues via CursorMoved (DragPhase::TornOff)
             // until mouse release.
         }
@@ -1839,16 +1894,16 @@ impl App {
         tab_id: TabId,
         source_wid: WindowId,
         target_wid: WindowId,
-        _cursor: PhysicalPosition<f64>,
+        insert_idx: usize,
     ) {
         // Remove from source window
         if let Some(tw) = self.windows.get_mut(&source_wid) {
             tw.remove_tab(tab_id);
         }
 
-        // Add to target window
+        // Add to target window at the requested position
         if let Some(tw) = self.windows.get_mut(&target_wid) {
-            tw.add_tab(tab_id);
+            tw.insert_tab_at(tab_id, insert_idx);
             tw.window.request_redraw();
         }
 
@@ -1896,10 +1951,50 @@ impl App {
         None
     }
 
-    fn find_window_at_cursor(&self, _exclude: WindowId) -> Option<WindowId> {
-        // For Phase 4: check if cursor is in another window's tab bar.
-        // Simplified for now — would need screen coordinates.
+    fn find_window_at_cursor(
+        &self,
+        exclude: WindowId,
+        screen_x: f64,
+        screen_y: f64,
+    ) -> Option<(WindowId, f64)> {
+        for (&wid, tw) in &self.windows {
+            if wid == exclude {
+                continue;
+            }
+            let pos = match tw.window.outer_position() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let size = tw.window.inner_size();
+            let wx = pos.x as f64;
+            let wy = pos.y as f64;
+            if screen_x >= wx
+                && screen_x < wx + size.width as f64
+                && screen_y >= wy
+                && screen_y < wy + TAB_BAR_HEIGHT as f64
+            {
+                return Some((wid, screen_x));
+            }
+        }
         None
+    }
+
+    fn compute_drop_index(&self, target_wid: WindowId, screen_x: f64) -> usize {
+        let tw = match self.windows.get(&target_wid) {
+            Some(tw) => tw,
+            None => return 0,
+        };
+        let target_x = tw
+            .window
+            .outer_position()
+            .map(|p| p.x as f64)
+            .unwrap_or(0.0);
+        let local_x = (screen_x - target_x) as usize;
+        let layout =
+            TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
+        let tab_x = local_x.saturating_sub(TAB_LEFT_MARGIN);
+        let raw = (tab_x + layout.tab_width / 2) / layout.tab_width.max(1);
+        raw.min(tw.tabs.len())
     }
 
     // --- Search helpers ---
@@ -2436,6 +2531,7 @@ impl ApplicationHandler<TermEvent> for App {
                     if self.drag.is_some() {
                         // Cancel drag — revert to original state
                         self.drag = None;
+                        self.drop_target = None;
                         // Redraw all windows
                         for tw in self.windows.values() {
                             tw.window.request_redraw();
