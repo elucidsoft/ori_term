@@ -160,6 +160,13 @@ impl App {
         id
     }
 
+    /// Start an OS-native window drag (blocking).
+    fn start_native_drag(&self, window_id: WindowId) {
+        if let Some(tw) = self.windows.get(&window_id) {
+            let _ = tw.window.drag_window();
+        }
+    }
+
     fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
         let cw = self.glyphs.cell_width;
         let ch = self.glyphs.cell_height;
@@ -701,16 +708,22 @@ impl App {
             return;
         }
 
-        let (cols, rows) = self.grid_dims_for_size(width, height);
-        log(&format!(
-            "handle_resize: window={width}x{height} cell={}x{} cols={cols} rows={rows}",
-            self.glyphs.cell_width, self.glyphs.cell_height
-        ));
-
         // Resize the wgpu surface
         if let (Some(tw), Some(gpu)) = (self.windows.get_mut(&window_id), self.gpu.as_ref()) {
             tw.resize_surface(&gpu.device, width, height);
         }
+
+        // If the DPI changed, reload fonts before calculating grid dimensions
+        // so that cell metrics match the new scale factor.
+        let expected_size = self.config.font.size * self.scale_factor as f32;
+        if (self.glyphs.size - expected_size).abs() > 0.1 {
+            self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
+            if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+                renderer.rebuild_atlas(gpu, &mut self.glyphs);
+            }
+        }
+
+        let (cols, rows) = self.grid_dims_for_size(width, height);
 
         let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
@@ -728,7 +741,7 @@ impl App {
         }
     }
 
-    fn handle_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
+    fn handle_scale_factor_changed(&mut self, _window_id: WindowId, scale_factor: f64) {
         if (scale_factor - self.scale_factor).abs() < 0.01 {
             return;
         }
@@ -736,34 +749,10 @@ impl App {
             "scale_factor changed: {:.2} -> {:.2}",
             self.scale_factor, scale_factor
         ));
+        // Just record the new factor.  The heavy work (font reload, atlas
+        // rebuild) happens in handle_resize which fires right after with the
+        // correct window dimensions.
         self.scale_factor = scale_factor;
-
-        // Reload fonts at scaled size
-        let scaled_size = self.config.font.size * scale_factor as f32;
-        self.glyphs = FontSet::load(scaled_size, self.config.font.family.as_deref());
-        log(&format!(
-            "dpi reload: font size={}, cell={}x{}",
-            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
-        ));
-
-        // Rebuild atlas for new font size
-        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs);
-        }
-
-        // Resize grids in all windows (winit sends Resized after ScaleFactorChanged,
-        // so surface reconfiguration happens automatically)
-        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
-        for wid in window_ids {
-            if !self.is_settings_window(wid) {
-                self.resize_all_tabs_in_window(wid);
-            }
-        }
-
-        // Redraw the affected window
-        if let Some(tw) = self.windows.get(&window_id) {
-            tw.window.request_redraw();
-        }
     }
 
     /// Convert pixel coordinates to grid cell (col, `viewport_line`).
@@ -1108,23 +1097,26 @@ impl App {
                                 // Single click: start window drag
                                 self.last_click_time = Some(now);
                                 self.last_click_window = Some(window_id);
-                                if let Some(tw) = self.windows.get(&window_id) {
-                                    let _ = tw.window.drag_window();
-                                }
+                                self.start_native_drag(window_id);
                             }
                         }
                         TabBarHit::Tab(idx) => {
-                            // Start potential drag
                             let tw = match self.windows.get(&window_id) {
                                 Some(tw) => tw,
                                 None => return,
                             };
-                            if let Some(&tab_id) = tw.tabs.get(idx) {
-                                self.drag = Some(DragState::new(tab_id, window_id, pos, idx));
-                                // Also select this tab
-                                if let Some(tw) = self.windows.get_mut(&window_id) {
-                                    tw.active_tab = idx;
-                                    tw.window.request_redraw();
+                            let tab_count = tw.tabs.len();
+                            if tab_count <= 1 {
+                                // Only one tab — drag the window (same as DragArea).
+                                self.start_native_drag(window_id);
+                            } else {
+                                // Multiple tabs — select and start potential tab drag
+                                if let Some(&tab_id) = tw.tabs.get(idx) {
+                                    if let Some(tw) = self.windows.get_mut(&window_id) {
+                                        tw.active_tab = idx;
+                                        tw.window.request_redraw();
+                                    }
+                                    self.drag = Some(DragState::new(tab_id, window_id, pos, idx));
                                 }
                             }
                         }
@@ -1687,12 +1679,12 @@ impl App {
                         .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
                 tw.window.request_redraw();
-
-                // Hand off to the OS native move loop. This is blocking —
-                // Windows handles the drag with full Aero Snap support.
-                // When the user releases the mouse, this returns.
-                let _ = tw.window.drag_window();
             }
+
+            // Hand off to the OS native move loop. This is blocking —
+            // Windows handles the drag with full Aero Snap support.
+            // When the user releases the mouse, this returns.
+            self.start_native_drag(new_wid);
 
             // Native drag finished (mouse released). Clear our drag state.
             self.drag = None;
@@ -2231,6 +2223,10 @@ impl ApplicationHandler<TermEvent> for App {
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Let the OS resize the window to maintain logical size.
+                // The subsequent Resized event will reload fonts at the new
+                // DPI so cell dimensions scale proportionally — the grid
+                // keeps the same column/row count.
                 self.handle_scale_factor_changed(window_id, scale_factor);
             }
 
