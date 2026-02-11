@@ -137,18 +137,16 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
     return out;
 }
 
-// Linearize glyph coverage for correct blending on an sRGB surface.
-// fontdue produces raw area-coverage values; pow(c, gamma) compensates
-// for the heavier edges that linear-space alpha blending would produce.
-fn linearize_coverage(c: f32) -> f32 {
-    return pow(c, 2.2);
-}
+// sRGB render target handles gamma-correct blending automatically:
+// the GPU reads the framebuffer in linear, blends in linear, and writes
+// back sRGB.  fontdue's area-coverage is already linear, so raw coverage
+// is the correct alpha — no manual gamma correction needed.
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let coverage = textureSample(glyph_texture, glyph_sampler, input.uv).r;
-    let alpha = linearize_coverage(coverage);
-    return vec4<f32>(input.fg_color.rgb, input.fg_color.a * alpha);
+    // Premultiplied alpha output
+    return vec4<f32>(input.fg_color.rgb * coverage, coverage) * input.fg_color.a;
 }
 ";
 
@@ -293,8 +291,9 @@ pub fn create_fg_pipeline(
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState {
+                    // Premultiplied alpha: shader outputs (rgb * a, a)
                     color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::SrcAlpha,
+                        src_factor: wgpu::BlendFactor::One,
                         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                         operation: wgpu::BlendOperation::Add,
                     },

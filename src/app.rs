@@ -76,6 +76,7 @@ pub struct App {
     active_scheme: &'static str,
     _config_monitor: Option<ConfigMonitor>,
     bindings: Vec<KeyBinding>,
+    scale_factor: f64,
 }
 
 impl App {
@@ -146,6 +147,7 @@ impl App {
             active_scheme,
             _config_monitor: config_monitor,
             bindings,
+            scale_factor: 1.0,
         };
 
         event_loop.run_app(&mut app)?;
@@ -169,7 +171,7 @@ impl App {
     }
 
     fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
-        let new_size = self.glyphs.size + delta;
+        let new_size = self.glyphs.size + delta * self.scale_factor as f32;
         self.glyphs = self.glyphs.resize(new_size);
         log(&format!(
             "font resize: size={}, cell={}x{}",
@@ -183,7 +185,8 @@ impl App {
     }
 
     fn reset_font_size(&mut self, window_id: WindowId) {
-        self.glyphs = self.glyphs.resize(self.config.font.size);
+        let scaled_size = self.config.font.size * self.scale_factor as f32;
+        self.glyphs = self.glyphs.resize(scaled_size);
         log(&format!(
             "font reset: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -722,6 +725,44 @@ impl App {
                 tab.selection = None;
                 tab.resize(cols, rows, pixel_w, pixel_h);
             }
+        }
+    }
+
+    fn handle_scale_factor_changed(&mut self, window_id: WindowId, scale_factor: f64) {
+        if (scale_factor - self.scale_factor).abs() < 0.01 {
+            return;
+        }
+        log(&format!(
+            "scale_factor changed: {:.2} -> {:.2}",
+            self.scale_factor, scale_factor
+        ));
+        self.scale_factor = scale_factor;
+
+        // Reload fonts at scaled size
+        let scaled_size = self.config.font.size * scale_factor as f32;
+        self.glyphs = FontSet::load(scaled_size, self.config.font.family.as_deref());
+        log(&format!(
+            "dpi reload: font size={}, cell={}x{}",
+            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+        ));
+
+        // Rebuild atlas for new font size
+        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+            renderer.rebuild_atlas(gpu, &mut self.glyphs);
+        }
+
+        // Resize grids in all windows (winit sends Resized after ScaleFactorChanged,
+        // so surface reconfiguration happens automatically)
+        let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
+        for wid in window_ids {
+            if !self.is_settings_window(wid) {
+                self.resize_all_tabs_in_window(wid);
+            }
+        }
+
+        // Redraw the affected window
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
         }
     }
 
@@ -2078,7 +2119,8 @@ impl App {
         let font_changed = (new_config.font.size - self.config.font.size).abs() > f32::EPSILON
             || new_config.font.family != self.config.font.family;
         if font_changed {
-            self.glyphs = FontSet::load(new_config.font.size, new_config.font.family.as_deref());
+            let scaled_size = new_config.font.size * self.scale_factor as f32;
+            self.glyphs = FontSet::load(scaled_size, new_config.font.family.as_deref());
             log(&format!(
                 "config reload: font size={}, cell={}x{}",
                 self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -2130,6 +2172,13 @@ impl ApplicationHandler<TermEvent> for App {
         self.first_window_created = true;
 
         if let Some(wid) = self.create_window(event_loop) {
+            // Query actual DPI scale factor and reload fonts if needed
+            if let Some(tw) = self.windows.get(&wid) {
+                let sf = tw.window.scale_factor();
+                if (sf - self.scale_factor).abs() > 0.01 {
+                    self.handle_scale_factor_changed(wid, sf);
+                }
+            }
             self.new_tab_in_window(wid);
         }
     }
@@ -2179,6 +2228,10 @@ impl ApplicationHandler<TermEvent> for App {
                 if let Some(tw) = self.windows.get(&window_id) {
                     tw.window.request_redraw();
                 }
+            }
+
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.handle_scale_factor_changed(window_id, scale_factor);
             }
 
             WindowEvent::ModifiersChanged(mods) => {
