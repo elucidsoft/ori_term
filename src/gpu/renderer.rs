@@ -36,7 +36,8 @@ struct TabBarColors {
     bar_bg: [f32; 4],
     active_bg: [f32; 4],
     inactive_bg: [f32; 4],
-    hover_bg: [f32; 4],
+    tab_hover_bg: [f32; 4],
+    button_hover_bg: [f32; 4],
     separator: [f32; 4],
     text_fg: [f32; 4],
     inactive_text: [f32; 4],
@@ -51,29 +52,43 @@ impl TabBarColors {
         let base = vte_rgb_to_rgba(palette.default_bg());
         let fg = vte_rgb_to_rgba(palette.default_fg());
 
-        // Chrome dark-mode style:
-        //   bar_bg       = noticeably darker than content
-        //   active_bg    = content bg (merges with grid below)
-        //   inactive_bg  = lighter than bar (visible step up)
-        //   hover_bg     = brighter still
-        // lighten() adds toward white — works correctly in linear space
-        // where dark values are compressed near zero.
-        let bar_bg = darken(base, 0.35);
+        // Derive tab bar colors using OKLab for colored themes (preserves hue),
+        // neutral gray shading for near-black/achromatic themes.
+        let lab = to_oklab(base);
+        let oklab_chroma = lab[1].hypot(lab[2]);
         let active_bg = base;
-        let inactive_bg = lighten(bar_bg, 0.15);
-        let hover_bg = lighten(bar_bg, 0.22);
-        let separator = lighten(bar_bg, 0.06);
+
+        let (bar_bg, inactive_bg, tab_hover_bg, button_hover_bg, separator, control_hover_bg);
+        if oklab_chroma > 0.01 {
+            // Colored theme — shift lightness in OKLab, preserving hue exactly
+            bar_bg = oklab_shift(base, -0.06);
+            inactive_bg = oklab_shift(base, -0.04);
+            tab_hover_bg = oklab_shift(base, 0.04);
+            button_hover_bg = oklab_shift(bar_bg, 0.06);
+            separator = oklab_shift(bar_bg, 0.03);
+            control_hover_bg = oklab_shift(bar_bg, 0.06);
+        } else {
+            // Near-black/achromatic — use neutral gray shading
+            let gray = [0.04, 0.04, 0.04, 1.0];
+            bar_bg = darken(gray, 0.35);
+            inactive_bg = darken(gray, 0.15);
+            tab_hover_bg = lighten(gray, 0.08);
+            button_hover_bg = lighten(bar_bg, 0.15);
+            separator = lighten(bar_bg, 0.06);
+            control_hover_bg = lighten(bar_bg, 0.15);
+        }
+
         let inactive_text = lerp_color(fg, bar_bg, 0.40);
         let close_fg = inactive_text;
         let control_fg = fg;
         let control_fg_dim = lerp_color(fg, bar_bg, 0.50);
-        let control_hover_bg = lighten(bar_bg, 0.12);
 
         Self {
             bar_bg,
             active_bg,
             inactive_bg,
-            hover_bg,
+            tab_hover_bg,
+            button_hover_bg,
             separator,
             text_fg: fg,
             inactive_text,
@@ -101,6 +116,7 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
+
 /// Linear interpolation between two colors.  t=0 → a, t=1 → b.  Alpha always 1.0.
 fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [
@@ -109,6 +125,44 @@ fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         a[2] + (b[2] - a[2]) * t,
         1.0,
     ]
+}
+
+/// Convert linear RGB to `OKLab` (L, a, b).
+#[allow(clippy::excessive_precision)]
+fn to_oklab(c: [f32; 4]) -> [f32; 3] {
+    let l_ = (0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]).cbrt();
+    let m_ = (0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]).cbrt();
+    let s_ = (0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2]).cbrt();
+    [
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+    ]
+}
+
+/// Convert `OKLab` (L, a, b) back to linear RGB with alpha=1, clamped to sRGB gamut.
+#[allow(clippy::excessive_precision)]
+fn from_oklab(lab: [f32; 3]) -> [f32; 4] {
+    let l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
+    let m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
+    let s_ = lab[0] - 0.0894841775 * lab[1] - 1.2914855480 * lab[2];
+    let l_ = l_ * l_ * l_;
+    let m_ = m_ * m_ * m_;
+    let s_ = s_ * s_ * s_;
+    [
+        (4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_).clamp(0.0, 1.0),
+        (-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_).clamp(0.0, 1.0),
+        (-0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_).clamp(0.0, 1.0),
+        1.0,
+    ]
+}
+
+/// Adjust a color's perceptual lightness in `OKLab` space while preserving hue and chroma.
+/// Positive delta = lighter, negative delta = darker.
+fn oklab_shift(c: [f32; 4], delta_l: f32) -> [f32; 4] {
+    let mut lab = to_oklab(c);
+    lab[0] = (lab[0] + delta_l).clamp(0.0, 1.0);
+    from_oklab(lab)
 }
 
 const TAB_TOP_MARGIN: usize = 8;
@@ -903,7 +957,7 @@ impl GpuRenderer {
             let x0 = base_x + params.tab_offsets.get(i).copied().unwrap_or(0.0);
             let is_hovered = params.hover_hit == TabBarHit::Tab(i);
 
-            let tab_bg = if is_hovered { tc.hover_bg } else { tc.inactive_bg };
+            let tab_bg = if is_hovered { tc.tab_hover_bg } else { tc.inactive_bg };
 
             bg.push_rounded_rect(x0, top, tab_wf, tab_h, tab_bg, 8.0);
 
@@ -944,7 +998,7 @@ impl GpuRenderer {
         // New tab "+" button
         let plus_x = (TAB_LEFT_MARGIN + tab_count * tab_w) as f32;
         let plus_hovered = params.hover_hit == TabBarHit::NewTab;
-        let plus_bg = if plus_hovered { tc.hover_bg } else { tc.bar_bg };
+        let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
         bg.push_rect(plus_x, top, NEW_TAB_BUTTON_WIDTH as f32, tab_h, plus_bg);
         let plus_text_x = plus_x + (NEW_TAB_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
         let plus_text_y = top + (tab_h - cell_h as f32) / 2.0;
@@ -954,7 +1008,7 @@ impl GpuRenderer {
         let dropdown_x = plus_x + NEW_TAB_BUTTON_WIDTH as f32;
         let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
         let dropdown_bg = if dropdown_hovered || params.dropdown_open {
-            tc.hover_bg
+            tc.button_hover_bg
         } else {
             tc.bar_bg
         };

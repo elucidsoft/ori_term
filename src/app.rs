@@ -42,7 +42,7 @@ const DOUBLE_CLICK_MS: u128 = 400;
 const SCROLL_LINES: usize = 3;
 
 // UI font scale relative to grid font (tab bar, search bar, menus)
-const UI_FONT_SCALE: f32 = 0.85;
+const UI_FONT_SCALE: f32 = 0.75;
 
 /// Manual window drag state — replaces OS native `drag_window()` to avoid
 /// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.

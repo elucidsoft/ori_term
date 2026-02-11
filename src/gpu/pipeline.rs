@@ -138,13 +138,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // r = (topRight, bottomRight, topLeft, bottomLeft)
     let r = vec4<f32>(input.radius, 0.0, input.radius, 0.0);
     let d = sd_rounded_box(p, half, r);
+    let aa = 1.0 - smoothstep(-0.5, 0.5, d);
 
-    if (d > 0.5) {
+    if (aa <= 0.0) {
         discard;
     }
 
-    // Hard clip at the boundary — no alpha blending, fully opaque inside
-    return input.bg_color;
+    return vec4<f32>(input.bg_color.rgb * aa, input.bg_color.a * aa);
 }
 ";
 
