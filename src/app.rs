@@ -2016,6 +2016,7 @@ impl App {
             // release handler uses the correct window id.
             if let Some(ref mut drag) = self.drag {
                 drag.source_window = new_wid;
+                drag.grab_offset = PhysicalPosition::new(grab_x, grab_y);
             }
 
             // The drag continues via CursorMoved (DragPhase::TornOff)
