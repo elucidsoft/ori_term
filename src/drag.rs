@@ -28,6 +28,9 @@ pub struct DragState {
     /// Where in the torn-off window the cursor "grabs" — the window moves
     /// so the cursor stays at this position within it.
     pub grab_offset: PhysicalPosition<f64>,
+    /// X distance from the tab's left edge to the cursor at drag start.
+    /// Used for pixel-perfect tab tracking during in-bar drag.
+    pub mouse_offset_in_tab: f64,
 }
 
 impl DragState {
@@ -44,6 +47,7 @@ impl DragState {
             phase: DragPhase::Pending,
             original_index,
             grab_offset: PhysicalPosition::new(0.0, 0.0),
+            mouse_offset_in_tab: 0.0,
         }
     }
 

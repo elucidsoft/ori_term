@@ -161,6 +161,10 @@ pub struct FrameParams<'a> {
     pub hover_url_range: Option<&'a [(usize, usize, usize)]>,
     pub minimum_contrast: f32,
     pub alpha_blending: AlphaBlending,
+    /// Dragged tab: (index, pixel X). Rendered at this X, drawn on top.
+    pub dragged_tab: Option<(usize, f32)>,
+    /// Per-tab X offsets for dodge animation.
+    pub tab_offsets: &'a [f32],
 }
 
 /// GPU state shared across all windows.
@@ -867,8 +871,16 @@ impl GpuRenderer {
         let cell_w = glyphs.cell_width;
         let cell_h = glyphs.cell_height;
 
+        let dragged_idx = params.dragged_tab.map(|(idx, _)| idx);
+
         for (i, (_id, title)) in params.tab_info.iter().enumerate() {
-            let x0 = (TAB_LEFT_MARGIN + i * tab_w) as f32;
+            // Skip dragged tab — it's drawn last (on top)
+            if Some(i) == dragged_idx {
+                continue;
+            }
+
+            let base_x = (TAB_LEFT_MARGIN + i * tab_w) as f32;
+            let x0 = base_x + params.tab_offsets.get(i).copied().unwrap_or(0.0);
             let is_active = i == params.active_tab;
             let is_hovered = params.hover_hit == TabBarHit::Tab(i);
 
@@ -935,6 +947,49 @@ impl GpuRenderer {
             self.push_text_instances(
                 fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
             );
+        }
+
+        // Draw dragged tab last (on top of neighbors)
+        if let Some((drag_idx, drag_x)) = params.dragged_tab {
+            if let Some((_id, title)) = params.tab_info.get(drag_idx) {
+                let x0 = drag_x;
+                let tab_bg = vte_rgb_to_rgba(params.palette.default_bg());
+                let text_fg = tc.text_fg;
+
+                let top = TAB_TOP_MARGIN as f32;
+                let bot = tab_bar_h;
+                bg.push_rect(x0, top, tab_w as f32, bot - top, tab_bg);
+
+                let border_x = x0 + tab_w as f32 - 1.0;
+                bg.push_rect(border_x, top + 2.0, 1.0, bot - top - 4.0, tc.border);
+
+                let max_text_chars =
+                    (tab_w - TAB_PADDING * 2 - CLOSE_BUTTON_WIDTH) / cell_w.max(1);
+                let display_title: String = if title.len() > max_text_chars {
+                    let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
+                    t.push('\u{2026}');
+                    t
+                } else {
+                    title.clone()
+                };
+
+                let text_x = x0 + TAB_PADDING as f32;
+                let text_y = TAB_TOP_MARGIN as f32
+                    + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
+                self.push_text_instances(
+                    fg, &display_title, text_x, text_y, text_fg, glyphs, queue,
+                );
+
+                let close_x =
+                    x0 + (tab_w - CLOSE_BUTTON_WIDTH - CLOSE_BUTTON_RIGHT_PAD) as f32;
+                let close_fg = tc.close_fg;
+                let close_text_x = close_x + (CLOSE_BUTTON_WIDTH as f32 - cell_w as f32) / 2.0;
+                let close_text_y = TAB_TOP_MARGIN as f32
+                    + (TAB_BAR_HEIGHT - TAB_TOP_MARGIN - cell_h) as f32 / 2.0;
+                self.push_text_instances(
+                    fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
+                );
+            }
         }
 
         // New tab "+" button

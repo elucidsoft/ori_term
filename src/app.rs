@@ -95,6 +95,12 @@ pub struct App {
     /// Chrome-style preview: when a torn-off tab hovers over another window's
     /// tab bar, the tab is temporarily inserted and the torn-off window hides.
     drop_preview: Option<(WindowId, usize)>,
+    /// Per-tab X offsets for dodge animation, keyed by window.
+    tab_anim_offsets: HashMap<WindowId, Vec<f32>>,
+    /// Last animation tick time (for time-based decay).
+    last_anim_time: Instant,
+    /// Pixel X position of the dragged tab within its window, for rendering.
+    drag_visual_x: Option<(WindowId, f32)>,
 }
 
 impl App {
@@ -179,6 +185,9 @@ impl App {
             bindings,
             scale_factor: 1.0,
             drop_preview: None,
+            tab_anim_offsets: HashMap::new(),
+            last_anim_time: Instant::now(),
+            drag_visual_x: None,
         };
 
         event_loop.run_app(&mut app)?;
@@ -730,6 +739,21 @@ impl App {
         let hover = self.hover_hit.get(&window_id).copied().unwrap_or(TabBarHit::None);
         let dropdown_open = self.dropdown_open == Some(window_id);
 
+        // Drag visual: if this window has a dragged tab, pass its pixel X and
+        // the current animation offsets.
+        let dragged_tab = self.drag_visual_x
+            .filter(|(wid, _)| *wid == window_id)
+            .and_then(|(_, px)| {
+                self.drag.as_ref().and_then(|d| {
+                    self.windows.get(&window_id)
+                        .and_then(|tw| tw.tab_index(d.tab_id))
+                        .map(|idx| (idx, px))
+                })
+            });
+        let empty_offsets: Vec<f32> = Vec::new();
+        let tab_offsets = self.tab_anim_offsets.get(&window_id)
+            .map_or(empty_offsets.as_slice(), |v| v.as_slice());
+
         // Build FrameParams — need the active tab's grid
         let frame_params = active_tab_id
             .and_then(|tab_id| self.tabs.get(&tab_id))
@@ -755,6 +779,8 @@ impl App {
                 hover_url_range: self.hover_url_range.as_deref(),
                 minimum_contrast: self.config.colors.effective_minimum_contrast(),
                 alpha_blending: self.config.colors.alpha_blending,
+                dragged_tab,
+                tab_offsets,
             });
 
         let Some(frame_params) = frame_params else {
@@ -1222,11 +1248,20 @@ impl App {
                                 None => return,
                             };
                             if let Some(&tab_id) = tw.tabs.get(idx) {
+                                let layout = TabBarLayout::compute(
+                                    tw.tabs.len(),
+                                    tw.window.inner_size().width as usize,
+                                );
+                                let tab_left = TAB_LEFT_MARGIN as f64
+                                    + idx as f64 * layout.tab_width as f64;
+                                let offset_in_tab = pos.x - tab_left;
                                 if let Some(tw) = self.windows.get_mut(&window_id) {
                                     tw.active_tab = idx;
                                     tw.window.request_redraw();
                                 }
-                                self.drag = Some(DragState::new(tab_id, window_id, pos, idx));
+                                let mut drag = DragState::new(tab_id, window_id, pos, idx);
+                                drag.mouse_offset_in_tab = offset_in_tab;
+                                self.drag = Some(drag);
                             }
                         }
                         TabBarHit::None => {}
@@ -1268,7 +1303,10 @@ impl App {
                     let torn_wid = drag.source_window;
                     match drag.phase {
                         DragPhase::TornOff => {
+                            // Clear drag visuals for any target window
+                            self.drag_visual_x = None;
                             if let Some((target_wid, _)) = self.drop_preview.take() {
+                                self.tab_anim_offsets.remove(&target_wid);
                                 // Preview active — tab is already in the
                                 // target window. Just finalize: close the
                                 // (hidden, empty) torn-off window.
@@ -1286,7 +1324,12 @@ impl App {
                             // No preview — torn-off window stays as-is.
                         }
                         DragPhase::DraggingInBar | DragPhase::Pending => {
-                            // Tab reorder finalized / was just a click — nothing extra needed
+                            // Clear drag visuals
+                            self.drag_visual_x = None;
+                            self.tab_anim_offsets.remove(&drag.source_window);
+                            if let Some(tw) = self.windows.get(&drag.source_window) {
+                                tw.window.request_redraw();
+                            }
                         }
                     }
                 }
@@ -1735,10 +1778,11 @@ impl App {
         // Handle drag — extract values to avoid borrow conflicts with self
         let drag_action = self.drag.as_ref().map(|drag| {
             (drag.phase, drag.tab_id, drag.source_window, drag.grab_offset,
-             drag.distance_from_origin(position), drag.vertical_distance(position))
+             drag.distance_from_origin(position), drag.vertical_distance(position),
+             drag.mouse_offset_in_tab)
         });
 
-        if let Some((phase, tab_id, source_wid, grab_offset, dist, vert_dist)) = drag_action {
+        if let Some((phase, tab_id, source_wid, grab_offset, dist, vert_dist, mouse_off)) = drag_action {
             match phase {
                 DragPhase::Pending => {
                     if dist >= DRAG_START_THRESHOLD {
@@ -1770,8 +1814,11 @@ impl App {
                         if let Some(ref mut drag) = self.drag {
                             drag.phase = DragPhase::TornOff;
                         }
+                        // Clear drag visuals for the source window
+                        self.drag_visual_x = None;
+                        self.tab_anim_offsets.remove(&source_wid);
                     } else {
-                        self.reorder_tab_in_bar(window_id, position);
+                        self.update_drag_in_bar(window_id, position, tab_id, mouse_off);
                     }
                 }
                 DragPhase::TornOff => {
@@ -1822,6 +1869,8 @@ impl App {
                                     tw.window.set_visible(false);
                                 }
                                 self.drop_preview = Some((target_wid, idx));
+                                // Set pixel-tracking for preview tab in target
+                                self.set_preview_visual(target_wid, sx, mouse_off);
                             }
                             (Some((old_twid, _)), Some((new_twid, new_idx))) => {
                                 if old_twid == new_twid {
@@ -1837,6 +1886,8 @@ impl App {
                                     self.drop_preview = Some((new_twid, idx));
                                 } else {
                                     // Switched to different target window.
+                                    self.drag_visual_x = None;
+                                    self.tab_anim_offsets.remove(&old_twid);
                                     if let Some(tw) = self.windows.get_mut(&old_twid) {
                                         tw.remove_tab(tab_id);
                                         tw.window.request_redraw();
@@ -1847,10 +1898,13 @@ impl App {
                                     }
                                     self.drop_preview = Some((new_twid, new_idx));
                                 }
+                                self.set_preview_visual(new_twid, sx, mouse_off);
                             }
                             (Some((old_twid, _)), None) => {
                                 // Left target: undo preview, show torn-off
                                 // window at cursor.
+                                self.drag_visual_x = None;
+                                self.tab_anim_offsets.remove(&old_twid);
                                 if let Some(tw) = self.windows.get_mut(&old_twid) {
                                     tw.remove_tab(tab_id);
                                     tw.window.request_redraw();
@@ -1899,8 +1953,10 @@ impl App {
             .map(|wp| (wp.x + cursor.x as i32, wp.y + cursor.y as i32));
 
         // The grab offset: where the cursor will be within the new window.
-        // Put it at a comfortable spot — center-ish of a tab, vertically in tab bar.
-        let grab_x = 75.0; // roughly half a tab width
+        // Use mouse_offset_in_tab so the window appears with the cursor at the
+        // exact spot the user grabbed the tab.
+        let grab_x = self.drag.as_ref()
+            .map_or(75.0, |d| d.mouse_offset_in_tab);
         let grab_y = (TAB_BAR_HEIGHT / 2) as f64;
 
         // Create new frameless window at cursor position
@@ -1942,27 +1998,108 @@ impl App {
         }
     }
 
-    fn reorder_tab_in_bar(&mut self, window_id: WindowId, position: PhysicalPosition<f64>) {
-        let drag = match &self.drag {
-            Some(d) => d,
+    fn update_drag_in_bar(
+        &mut self,
+        window_id: WindowId,
+        position: PhysicalPosition<f64>,
+        tab_id: TabId,
+        mouse_offset_in_tab: f64,
+    ) {
+        let (tab_count, tab_w, win_width) = match self.windows.get(&window_id) {
+            Some(tw) => {
+                let layout = TabBarLayout::compute(
+                    tw.tabs.len(),
+                    tw.window.inner_size().width as usize,
+                );
+                (tw.tabs.len(), layout.tab_width, tw.window.inner_size().width as f64)
+            }
             None => return,
         };
-        let tab_id = drag.tab_id;
 
-        let tw = match self.windows.get_mut(&window_id) {
-            Some(tw) => tw,
-            None => return,
-        };
+        let tab_wf = tab_w as f64;
 
-        let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
-        let new_idx = (position.x as usize / layout.tab_width).min(tw.tabs.len().saturating_sub(1));
+        // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
+        let max_x = (TAB_LEFT_MARGIN as f64 + (tab_count - 1) as f64 * tab_wf) as f32;
+        let dragged_x = ((position.x - mouse_offset_in_tab) as f32)
+            .clamp(TAB_LEFT_MARGIN as f32, max_x.min(win_width as f32 - tab_wf as f32));
 
-        if let Some(current_idx) = tw.tab_index(tab_id) {
-            if current_idx != new_idx {
-                tw.tabs.remove(current_idx);
-                tw.tabs.insert(new_idx, tab_id);
-                tw.active_tab = new_idx;
-                tw.window.request_redraw();
+        // 2. Compute insertion index from cursor center
+        let cursor_center = dragged_x as f64 + tab_wf / 2.0;
+        let new_idx = ((cursor_center - TAB_LEFT_MARGIN as f64) / tab_wf)
+            .clamp(0.0, (tab_count - 1) as f64) as usize;
+
+        // 3. If index changed, swap tab and set animation offsets
+        if let Some(tw) = self.windows.get_mut(&window_id) {
+            if let Some(current_idx) = tw.tab_index(tab_id) {
+                if current_idx != new_idx {
+                    // Compute old positions
+                    let old_positions: Vec<f32> = (0..tab_count)
+                        .map(|i| (TAB_LEFT_MARGIN + i * tab_w) as f32)
+                        .collect();
+
+                    // Swap
+                    tw.tabs.remove(current_idx);
+                    tw.tabs.insert(new_idx, tab_id);
+                    tw.active_tab = new_idx;
+
+                    // Compute new positions and set animation offsets
+                    let offsets = self.tab_anim_offsets
+                        .entry(window_id)
+                        .or_insert_with(|| vec![0.0; tab_count]);
+                    offsets.resize(tab_count, 0.0);
+
+                    // For each tab that moved, offset = old_pos - new_pos
+                    // Only tabs between current_idx and new_idx are affected
+                    let lo = current_idx.min(new_idx);
+                    let hi = current_idx.max(new_idx);
+                    #[allow(clippy::needless_range_loop)]
+                    for i in lo..=hi {
+                        if i == new_idx {
+                            continue; // dragged tab — rendered at cursor, not at index
+                        }
+                        let new_pos = (TAB_LEFT_MARGIN + i * tab_w) as f32;
+                        // Find where this tab was before the swap
+                        let old_i = if current_idx < new_idx {
+                            // Tab moved right → tabs in [current+1..=new] shifted left by 1
+                            i + 1
+                        } else {
+                            // Tab moved left → tabs in [new..current-1] shifted right by 1
+                            i - 1
+                        };
+                        if old_i < old_positions.len() {
+                            offsets[i] += old_positions[old_i] - new_pos;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Decay existing animation offsets (time-based)
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_anim_time).as_secs_f32();
+        self.last_anim_time = now;
+        let decay = (-dt * 15.0_f32).exp(); // ~67ms time constant
+        if let Some(offsets) = self.tab_anim_offsets.get_mut(&window_id) {
+            for offset in offsets.iter_mut() {
+                *offset *= decay;
+                if offset.abs() < 0.5 {
+                    *offset = 0.0;
+                }
+            }
+        }
+
+        // 5. Store dragged_x for FrameParams
+        self.drag_visual_x = Some((window_id, dragged_x));
+
+        // 6. Request redraw; keep animating if offsets are nonzero
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+        if let Some(offsets) = self.tab_anim_offsets.get(&window_id) {
+            if offsets.iter().any(|o| o.abs() > 0.5) {
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
             }
         }
     }
@@ -2020,6 +2157,16 @@ impl App {
         let tab_x = local_x.saturating_sub(TAB_LEFT_MARGIN);
         let raw = (tab_x + layout.tab_width / 2) / layout.tab_width.max(1);
         raw.min(tw.tabs.len())
+    }
+
+    /// Set pixel-tracking visual for a preview tab being dragged into a target window.
+    fn set_preview_visual(&mut self, target_wid: WindowId, screen_x: f64, mouse_off: f64) {
+        let target_x = self.windows.get(&target_wid)
+            .and_then(|tw| tw.window.outer_position().ok())
+            .map_or(0.0, |p| p.x as f64);
+        let local_x = screen_x - target_x;
+        let dragged_x = (local_x - mouse_off) as f32;
+        self.drag_visual_x = Some((target_wid, dragged_x.max(TAB_LEFT_MARGIN as f32)));
     }
 
     // --- Search helpers ---
@@ -2556,6 +2703,7 @@ impl ApplicationHandler<TermEvent> for App {
                     if self.drag.is_some() {
                         // Undo preview if active
                         if let Some((target_wid, _)) = self.drop_preview.take() {
+                            self.tab_anim_offsets.remove(&target_wid);
                             if let Some(drag) = &self.drag {
                                 let tab_id = drag.tab_id;
                                 let torn_wid = drag.source_window;
@@ -2570,6 +2718,11 @@ impl ApplicationHandler<TermEvent> for App {
                                 }
                             }
                         }
+                        // Clear drag visuals and animation state
+                        if let Some(drag) = &self.drag {
+                            self.tab_anim_offsets.remove(&drag.source_window);
+                        }
+                        self.drag_visual_x = None;
                         // Cancel drag — revert to original state
                         self.drag = None;
                         // Redraw all windows
