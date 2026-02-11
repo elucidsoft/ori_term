@@ -1,0 +1,176 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Cancel previous runs on the same tag (e.g., if tag is force-pushed)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on main branch
+        run: |
+          if ! git merge-base --is-ancestor ${{ github.sha }} origin/main; then
+            echo "ERROR: Release tags must be on the main branch."
+            echo ""
+            echo "The tagged commit (${{ github.sha }}) is not on main."
+            echo "Please ensure you're tagging a commit that has been merged to main."
+            exit 1
+          fi
+          echo "Tag is on main branch - OK"
+
+      - name: Extract expected version from tag
+        id: tag_version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "Tag version: $TAG_VERSION"
+
+      - name: Extract Cargo.toml version
+        id: cargo_version
+        run: |
+          CARGO_VERSION=$(grep -E '^version\s*=' Cargo.toml | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/')
+          echo "cargo_version=$CARGO_VERSION" >> $GITHUB_OUTPUT
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+      - name: Validate tag matches Cargo.toml
+        run: |
+          if [[ "${{ steps.tag_version.outputs.tag_version }}" != "${{ steps.cargo_version.outputs.cargo_version }}" ]]; then
+            echo "ERROR: Tag version (${{ steps.tag_version.outputs.tag_version }}) does not match Cargo.toml version (${{ steps.cargo_version.outputs.cargo_version }})"
+            echo ""
+            echo "To fix:"
+            echo "  1. Delete the tag: git tag -d ${{ github.ref_name }} && git push origin :refs/tags/${{ github.ref_name }}"
+            echo "  2. Update Cargo.toml version to match"
+            echo "  3. Commit, tag, and push again"
+            exit 1
+          fi
+          echo "Version validation passed!"
+
+  build-linux:
+    name: Build Linux (x86_64)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Strip binary
+        run: strip target/release/oriterm
+
+      - name: Package
+        run: |
+          cd target/release
+          tar -czvf ../../oriterm-${{ github.ref_name }}-linux-x86_64.tar.gz oriterm
+          cd ../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oriterm-linux-x86_64
+          path: oriterm-${{ github.ref_name }}-linux-x86_64.tar.gz
+
+  build-windows:
+    name: Build Windows (x86_64)
+    needs: validate
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Package
+        run: |
+          cd target/x86_64-pc-windows-msvc/release
+          7z a ../../../oriterm-${{ github.ref_name }}-windows-x86_64.zip oriterm.exe
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oriterm-windows-x86_64
+          path: oriterm-${{ github.ref_name }}-windows-x86_64.zip
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: oriterm-linux-x86_64
+          path: artifacts
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: oriterm-windows-x86_64
+          path: artifacts
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum oriterm-* > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Determine release type
+        id: release_type
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$VERSION" == *"alpha"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "name=oriterm $VERSION (Alpha)" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" == *"beta"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "name=oriterm $VERSION (Beta)" >> $GITHUB_OUTPUT
+          elif [[ "$VERSION" == *"rc"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "name=oriterm $VERSION (Release Candidate)" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "name=oriterm $VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.release_type.outputs.name }}
+          files: |
+            artifacts/*
+          generate_release_notes: true
+          prerelease: ${{ steps.release_type.outputs.prerelease }}
+          make_latest: ${{ steps.release_type.outputs.prerelease != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
