@@ -399,12 +399,6 @@ Terminal style):
 
 ## What's Not Working Yet / Known Issues
 
-- **Re-attach not implemented**: `find_window_at_cursor()` is a stub that always
-  returns `None`. Dropping a torn-off tab over another window's tab bar does not
-  merge it. The `reattach_tab()` method exists and is structurally complete, but
-  never gets called because the hit-detection logic needs screen-space coordinate
-  comparison against each window's outer position and size.
-
 - **Torn-off window drag tracking has positioning bugs**: The `TornOff` phase
   adjusts window position via `set_outer_position` based on the difference between
   cursor position and grab offset. This can cause jitter or drift because
