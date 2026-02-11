@@ -1,6 +1,6 @@
 [package]
 name = "ori_term"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 description = "A Rust console/TUI library that gets terminal interaction right"
 license = "MIT"
