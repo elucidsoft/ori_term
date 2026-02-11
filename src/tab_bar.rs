@@ -16,12 +16,29 @@ const CLOSE_BUTTON_RIGHT_PAD: usize = 8;  // padding from right edge of tab
 pub const NEW_TAB_BUTTON_WIDTH: usize = 38;
 pub const DROPDOWN_BUTTON_WIDTH: usize = 30;
 
-// Window control button constants (Windows 10/11 proportions)
+// Window control button constants — Windows 10/11 proportions
+#[cfg(target_os = "windows")]
 const CONTROL_BUTTON_WIDTH: usize = 58;
+#[cfg(target_os = "windows")]
 const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3; // 174px for 3 buttons
-
-// Window control icon size (10x10 pixel icons, centered in buttons)
+#[cfg(target_os = "windows")]
 const ICON_SIZE: usize = 10;
+
+// Window control button constants — Linux (GNOME-style circles)
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_DIAMETER: usize = 24;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_SPACING: usize = 8;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_MARGIN: usize = 12;
+#[cfg(not(target_os = "windows"))]
+const CONTROLS_ZONE_WIDTH: usize =
+    CONTROL_BUTTON_MARGIN + 3 * CONTROL_BUTTON_DIAMETER + 2 * CONTROL_BUTTON_SPACING + CONTROL_BUTTON_MARGIN;
+// = 12 + 60 + 16 + 12 = 100px
+#[cfg(not(target_os = "windows"))]
+const ICON_SIZE: usize = 8;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_CIRCLE_ALPHA: u32 = 77; // 0–255, semi-transparent (~30%)
 
 // Catppuccin Mocha colors
 const TAB_BAR_BG: u32 = 0x00181825;       // mantle
@@ -34,14 +51,32 @@ const TAB_BORDER: u32 = 0x00282838;        // subtle border, close to mantle
 const _CLOSE_HOVER_BG: u32 = 0x00333345;   // dark gray (on hover, reserved for future use)
 const CLOSE_FG: u32 = 0x00a6adc8;         // subtext0
 
-// Window control colors (Windows 10/11 style)
+// Window control colors — Windows 10/11 style
+#[cfg(target_os = "windows")]
 const CONTROL_HOVER_BG: u32 = 0x00333345;       // subtle lighten for min/max hover
+#[cfg(target_os = "windows")]
 const CONTROL_CLOSE_HOVER_BG: u32 = 0x00e81123;  // Windows red
+#[cfg(target_os = "windows")]
 const CONTROL_FG: u32 = 0x00cdd6f4;              // text color (bright for dark bg)
+#[cfg(target_os = "windows")]
 const CONTROL_CLOSE_HOVER_FG: u32 = 0x00ffffff;   // white on red
 
-// Window border
+// Window control colors — Linux (GNOME-style)
+#[cfg(not(target_os = "windows"))]
+const CONTROL_CIRCLE_BG: u32 = 0x00404050;        // subtle gray circle
+#[cfg(not(target_os = "windows"))]
+const CONTROL_HOVER_BG: u32 = 0x00505060;         // lighter on hover
+#[cfg(not(target_os = "windows"))]
+const CONTROL_CLOSE_HOVER_BG: u32 = 0x00c01c28;   // GNOME red
+#[cfg(not(target_os = "windows"))]
+const CONTROL_FG: u32 = 0x00cdd6f4;               // icon color
+#[cfg(not(target_os = "windows"))]
+const CONTROL_CLOSE_HOVER_FG: u32 = 0x00ffffff;    // white on red
+
+// Window border (Windows only — on Linux the WM draws its own border/shadow)
+#[cfg(target_os = "windows")]
 pub const WINDOW_BORDER_COLOR: u32 = 0x00585b70;  // overlay0 accent border
+#[cfg(target_os = "windows")]
 pub const WINDOW_BORDER_WIDTH: usize = 1;
 
 // Grid inset from window edges
@@ -95,13 +130,36 @@ impl TabBarLayout {
         // Check window controls zone (rightmost CONTROLS_ZONE_WIDTH pixels)
         let controls_start = self.bar_width.saturating_sub(CONTROLS_ZONE_WIDTH);
         if x >= controls_start {
-            let offset = x - controls_start;
-            let button_idx = offset / CONTROL_BUTTON_WIDTH;
-            return match button_idx {
-                0 => TabBarHit::Minimize,
-                1 => TabBarHit::Maximize,
-                _ => TabBarHit::CloseWindow,
-            };
+            #[cfg(target_os = "windows")]
+            {
+                let offset = x - controls_start;
+                let button_idx = offset / CONTROL_BUTTON_WIDTH;
+                return match button_idx {
+                    0 => TabBarHit::Minimize,
+                    1 => TabBarHit::Maximize,
+                    _ => TabBarHit::CloseWindow,
+                };
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                // GNOME-style: circular hit-test for each button
+                let cy = TAB_BAR_HEIGHT / 2;
+                let r = CONTROL_BUTTON_DIAMETER / 2;
+                let buttons = [
+                    (controls_start + CONTROL_BUTTON_MARGIN + r, TabBarHit::Minimize),
+                    (controls_start + CONTROL_BUTTON_MARGIN + CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING + r, TabBarHit::Maximize),
+                    (controls_start + CONTROL_BUTTON_MARGIN + 2 * (CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING) + r, TabBarHit::CloseWindow),
+                ];
+                for &(cx, hit) in &buttons {
+                    let dx = x as isize - cx as isize;
+                    let dy = y as isize - cy as isize;
+                    if dx * dx + dy * dy <= (r as isize) * (r as isize) {
+                        return hit;
+                    }
+                }
+                // Click in the controls zone but not on a circle = drag area
+                return TabBarHit::DragArea;
+            }
         }
 
         // Tabs start after the left margin
@@ -291,6 +349,8 @@ pub fn render_tab_bar(
 
 /// Draw a 1px border around the entire window (Windows 10 style accent border).
 /// Call this after all other rendering so it's on top.
+/// On Linux, the WM draws its own border/shadow — this is a no-op.
+#[cfg(target_os = "windows")]
 pub fn render_window_border(buffer: &mut [u32], buf_w: usize, buf_h: usize, is_maximized: bool) {
     if is_maximized {
         return; // No border when maximized — fills the screen edge-to-edge
@@ -321,6 +381,12 @@ pub fn render_window_border(buffer: &mut [u32], buf_w: usize, buf_h: usize, is_m
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+pub fn render_window_border(_buffer: &mut [u32], _buf_w: usize, _buf_h: usize, _is_maximized: bool) {
+    // On Linux, the WM draws its own border/shadow.
+}
+
+#[cfg(target_os = "windows")]
 fn render_window_controls(
     buffer: &mut [u32],
     buf_w: usize,
@@ -336,7 +402,6 @@ fn render_window_controls(
             fill_rect(buffer, buf_w, btn_x, 0, CONTROL_BUTTON_WIDTH, TAB_BAR_HEIGHT, CONTROL_HOVER_BG);
         }
         let fg = CONTROL_FG;
-        // Horizontal line: 10px wide, 1px tall, centered
         let cx = btn_x + (CONTROL_BUTTON_WIDTH - ICON_SIZE) / 2;
         let cy = TAB_BAR_HEIGHT / 2;
         draw_hline(buffer, buf_w, cx, cy, ICON_SIZE, fg);
@@ -354,17 +419,12 @@ fn render_window_controls(
         let cy = (TAB_BAR_HEIGHT - ICON_SIZE) / 2;
 
         if is_maximized {
-            // Restore icon: two overlapping rectangles
-            // Back rect (offset +2, -2 from front)
             let back_size = ICON_SIZE - 2;
             draw_rect(buffer, buf_w, cx + 2, cy, back_size, back_size, fg);
-            // Front rect (offset 0, +2 from back)
             draw_rect(buffer, buf_w, cx, cy + 2, back_size, back_size, fg);
-            // Fill the front rect interior with the button bg to cover the back rect lines
             let inner_bg = if hovered { CONTROL_HOVER_BG } else { TAB_BAR_BG };
             fill_rect(buffer, buf_w, cx + 1, cy + 3, back_size - 2, back_size - 2, inner_bg);
         } else {
-            // Maximize icon: single 10x10 rectangle outline
             draw_rect(buffer, buf_w, cx, cy, ICON_SIZE, ICON_SIZE, fg);
         }
     }
@@ -379,12 +439,95 @@ fn render_window_controls(
         let fg = if hovered { CONTROL_CLOSE_HOVER_FG } else { CONTROL_FG };
         let cx = btn_x + (CONTROL_BUTTON_WIDTH - ICON_SIZE) / 2;
         let cy = (TAB_BAR_HEIGHT - ICON_SIZE) / 2;
-        // X shape: two diagonal lines
         draw_x(buffer, buf_w, cx, cy, ICON_SIZE, fg);
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn render_window_controls(
+    buffer: &mut [u32],
+    buf_w: usize,
+    controls_start: usize,
+    hover_hit: TabBarHit,
+    is_maximized: bool,
+) {
+    let cy = TAB_BAR_HEIGHT / 2;
+    let r = CONTROL_BUTTON_DIAMETER / 2;
+
+    // Button center X positions (minimize, maximize, close — left to right)
+    let btn_centers = [
+        controls_start + CONTROL_BUTTON_MARGIN + r,
+        controls_start + CONTROL_BUTTON_MARGIN + CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING + r,
+        controls_start + CONTROL_BUTTON_MARGIN + 2 * (CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING) + r,
+    ];
+    let hits = [TabBarHit::Minimize, TabBarHit::Maximize, TabBarHit::CloseWindow];
+
+    for (i, &bcx) in btn_centers.iter().enumerate() {
+        let hovered = hover_hit == hits[i];
+        let is_close = i == 2;
+
+        // Circle background
+        let circle_bg = if hovered && is_close {
+            CONTROL_CLOSE_HOVER_BG
+        } else if hovered {
+            CONTROL_HOVER_BG
+        } else {
+            CONTROL_CIRCLE_BG
+        };
+        blend_circle(buffer, buf_w, bcx, cy, r, circle_bg, CONTROL_CIRCLE_ALPHA);
+
+        // Icon
+        let fg = if hovered && is_close { CONTROL_CLOSE_HOVER_FG } else { CONTROL_FG };
+        let icon_s = ICON_SIZE;
+        let ix = bcx - icon_s / 2;
+        let iy = cy - icon_s / 2;
+
+        match i {
+            0 => {
+                // Minimize: horizontal line centered in circle
+                draw_hline(buffer, buf_w, ix, cy, icon_s, fg);
+            }
+            1 => {
+                // Maximize/Restore
+                if is_maximized {
+                    let s = icon_s - 2;
+                    draw_rect(buffer, buf_w, ix + 2, iy, s, s, fg);
+                    draw_rect(buffer, buf_w, ix, iy + 2, s, s, fg);
+                    let inner_bg = circle_bg;
+                    fill_rect(buffer, buf_w, ix + 1, iy + 3, s - 2, s - 2, inner_bg);
+                } else {
+                    draw_rect(buffer, buf_w, ix, iy, icon_s, icon_s, fg);
+                }
+            }
+            _ => {
+                // Close: X shape
+                draw_x(buffer, buf_w, ix, iy, icon_s, fg);
+            }
+        }
+    }
+}
+
 // --- Pixel drawing helpers ---
+
+/// Fill a circle (center cx, cy; radius r) with a semi-transparent color.
+#[cfg(not(target_os = "windows"))]
+fn blend_circle(buffer: &mut [u32], buf_w: usize, cx: usize, cy: usize, r: usize, color: u32, alpha: u32) {
+    let r2 = (r * r) as isize;
+    for dy in 0..=(r * 2) {
+        let py = cy + dy - r;
+        let ry = dy as isize - r as isize;
+        for dx in 0..=(r * 2) {
+            let px = cx + dx - r;
+            let rx = dx as isize - r as isize;
+            if rx * rx + ry * ry <= r2 {
+                if px < buf_w && py * buf_w + px < buffer.len() {
+                    let idx = py * buf_w + px;
+                    buffer[idx] = blend(buffer[idx], color, alpha);
+                }
+            }
+        }
+    }
+}
 
 /// Alpha-blend `fg` over `bg` with 0–255 alpha (0=fully bg, 255=fully fg).
 fn blend(bg: u32, fg: u32, alpha: u32) -> u32 {

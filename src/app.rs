@@ -187,33 +187,43 @@ impl App {
         id
     }
 
-    /// Begin a manual window drag (non-blocking).
+    /// Begin a window drag.
     ///
-    /// Avoids `Window::drag_window()` because winit's `WM_DPICHANGED` handler
-    /// calls `SetWindowPos` inside the Win32 modal move loop, which can
-    /// reposition the window across a DPI boundary and cause infinite
-    /// oscillation.  Instead we track the drag ourselves and move the window
-    /// with `set_outer_position` in `CursorMoved`.
+    /// On Windows we use a manual drag (track cursor + `set_outer_position`) to avoid
+    /// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
+    /// On Linux/macOS we use the native `drag_window()` which lets the compositor
+    /// handle the move (required on Wayland where clients can't set their own position).
     fn start_window_drag(&mut self, window_id: WindowId, cursor: PhysicalPosition<f64>) {
         let tw = match self.windows.get(&window_id) {
             Some(tw) => tw,
             None => return,
         };
-        let win_pos = match tw.window.outer_position() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let inner_pos = match tw.window.inner_position() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let screen_x = inner_pos.x as f64 + cursor.x;
-        let screen_y = inner_pos.y as f64 + cursor.y;
-        self.window_drag = Some(WindowDrag {
-            window_id,
-            start_screen: (screen_x, screen_y),
-            start_window: (win_pos.x, win_pos.y),
-        });
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = cursor;
+            let _ = tw.window.drag_window();
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let win_pos = match tw.window.outer_position() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let inner_pos = match tw.window.inner_position() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let screen_x = inner_pos.x as f64 + cursor.x;
+            let screen_y = inner_pos.y as f64 + cursor.y;
+            self.window_drag = Some(WindowDrag {
+                window_id,
+                start_screen: (screen_x, screen_y),
+                start_window: (win_pos.x, win_pos.y),
+            });
+        }
     }
 
     fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {

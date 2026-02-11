@@ -15,9 +15,10 @@ use crate::tab::TabId;
 use crate::palette::BUILTIN_SCHEMES;
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, GRID_PADDING_LEFT, TAB_BAR_HEIGHT,
-    WINDOW_BORDER_COLOR, WINDOW_BORDER_WIDTH, DROPDOWN_BUTTON_WIDTH,
-    TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
+    DROPDOWN_BUTTON_WIDTH, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
 };
+#[cfg(target_os = "windows")]
+use crate::tab_bar::{WINDOW_BORDER_COLOR, WINDOW_BORDER_WIDTH};
 use crate::term_mode::TermMode;
 
 use super::atlas::GlyphAtlas;
@@ -100,9 +101,28 @@ const TAB_TOP_MARGIN: usize = 8;
 const TAB_PADDING: usize = 8;
 const CLOSE_BUTTON_WIDTH: usize = 24;
 const CLOSE_BUTTON_RIGHT_PAD: usize = 8;
+// Windows 10/11 style: wide rectangular buttons
+#[cfg(target_os = "windows")]
 const CONTROL_BUTTON_WIDTH: usize = 58;
+#[cfg(target_os = "windows")]
 const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3;
+#[cfg(target_os = "windows")]
 const ICON_SIZE: usize = 10;
+
+// Linux (GNOME-style): circular buttons, semi-transparent
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_DIAMETER: usize = 24;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_SPACING: usize = 8;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_BUTTON_MARGIN: usize = 12;
+#[cfg(not(target_os = "windows"))]
+const CONTROLS_ZONE_WIDTH: usize =
+    CONTROL_BUTTON_MARGIN + 3 * CONTROL_BUTTON_DIAMETER + 2 * CONTROL_BUTTON_SPACING + CONTROL_BUTTON_MARGIN;
+#[cfg(not(target_os = "windows"))]
+const ICON_SIZE: usize = 8;
+#[cfg(not(target_os = "windows"))]
+const CONTROL_CIRCLE_ALPHA: f32 = 0.3;
 
 /// Convert an sRGB u8 triplet to linear RGBA at compile time (approximate).
 /// Uses a simple gamma-2.2 power curve (close enough for UI constants).
@@ -663,8 +683,9 @@ impl GpuRenderer {
         // 3. Search bar overlay (at bottom of grid, UI font)
         self.build_search_bar_overlay(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
 
-        // 4. Window border (opaque)
+        // 4. Window border (opaque, Windows only — Linux WM draws its own)
         bg.opacity = 1.0;
+        #[cfg(target_os = "windows")]
         if !params.is_maximized {
             let border_color = u32_to_rgba(WINDOW_BORDER_COLOR);
             let bw = WINDOW_BORDER_WIDTH as f32;
@@ -959,6 +980,7 @@ impl GpuRenderer {
         self.build_window_controls(bg, controls_start, params, &tc);
     }
 
+    #[cfg(target_os = "windows")]
     fn build_window_controls(
         &self,
         bg: &mut InstanceWriter,
@@ -995,27 +1017,18 @@ impl GpuRenderer {
             let icon_y = (bar_h - ICON_SIZE as f32) / 2.0;
             let icon_s = ICON_SIZE as f32;
             if params.is_maximized {
-                // Restore: two overlapping squares drawn as rectangles
                 let s = icon_s - 2.0;
-                // Back square (offset +2, 0)
                 bg.push_rect(icon_x + 2.0, icon_y, s, 1.0, fg_color);
                 bg.push_rect(icon_x + 2.0, icon_y + s - 1.0, s, 1.0, fg_color);
                 bg.push_rect(icon_x + 2.0, icon_y, 1.0, s, fg_color);
                 bg.push_rect(icon_x + s + 1.0, icon_y, 1.0, s, fg_color);
-                // Front square (offset 0, +2)
                 bg.push_rect(icon_x, icon_y + 2.0, s, 1.0, fg_color);
                 bg.push_rect(icon_x, icon_y + s + 1.0, s, 1.0, fg_color);
                 bg.push_rect(icon_x, icon_y + 2.0, 1.0, s, fg_color);
                 bg.push_rect(icon_x + s - 1.0, icon_y + 2.0, 1.0, s, fg_color);
-                // Fill front interior to cover back square lines
-                let inner_bg = if hovered {
-                    tc.control_hover_bg
-                } else {
-                    tc.bar_bg
-                };
+                let inner_bg = if hovered { tc.control_hover_bg } else { tc.bar_bg };
                 bg.push_rect(icon_x + 1.0, icon_y + 3.0, s - 2.0, s - 2.0, inner_bg);
             } else {
-                // Maximize: single square outline
                 bg.push_rect(icon_x, icon_y, icon_s, 1.0, fg_color);
                 bg.push_rect(icon_x, icon_y + icon_s - 1.0, icon_s, 1.0, fg_color);
                 bg.push_rect(icon_x, icon_y, 1.0, icon_s, fg_color);
@@ -1035,16 +1048,108 @@ impl GpuRenderer {
             } else {
                 tc.control_fg_dim
             };
-            // Draw × as two diagonal lines using 1px squares
             let x_size: f32 = 10.0;
             let cx = btn_x + (btn_w - x_size) / 2.0;
             let cy = (bar_h - x_size) / 2.0;
             for i in 0..10 {
                 let fi = i as f32;
-                // Top-left to bottom-right diagonal
                 bg.push_rect(cx + fi, cy + fi, 1.0, 1.0, close_fg);
-                // Top-right to bottom-left diagonal
                 bg.push_rect(cx + x_size - 1.0 - fi, cy + fi, 1.0, 1.0, close_fg);
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn build_window_controls(
+        &self,
+        bg: &mut InstanceWriter,
+        controls_start: f32,
+        params: &FrameParams<'_>,
+        tc: &TabBarColors,
+    ) {
+        let bar_h = TAB_BAR_HEIGHT as f32;
+        let r = CONTROL_BUTTON_DIAMETER as f32 / 2.0;
+        let cy = bar_h / 2.0;
+        let icon_s = ICON_SIZE as f32;
+
+        // Button center X positions: minimize, maximize, close (left to right)
+        let btn_cx = [
+            controls_start + CONTROL_BUTTON_MARGIN as f32 + r,
+            controls_start + CONTROL_BUTTON_MARGIN as f32 + CONTROL_BUTTON_DIAMETER as f32
+                + CONTROL_BUTTON_SPACING as f32 + r,
+            controls_start + CONTROL_BUTTON_MARGIN as f32
+                + 2.0 * (CONTROL_BUTTON_DIAMETER as f32 + CONTROL_BUTTON_SPACING as f32) + r,
+        ];
+        let hits = [TabBarHit::Minimize, TabBarHit::Maximize, TabBarHit::CloseWindow];
+
+        for (i, &bcx) in btn_cx.iter().enumerate() {
+            let hovered = params.hover_hit == hits[i];
+            let is_close = i == 2;
+
+            // Circle background (blended with bar bg for semi-transparency)
+            let circle_fg = if hovered && is_close {
+                CONTROL_CLOSE_HOVER_BG
+            } else if hovered {
+                tc.control_hover_bg
+            } else {
+                tc.control_fg_dim
+            };
+            let circle_bg = blend(circle_fg, tc.bar_bg, CONTROL_CIRCLE_ALPHA);
+            // Draw filled circle as horizontal slices
+            let d = CONTROL_BUTTON_DIAMETER as i32;
+            for row in 0..d {
+                let dy = row as f32 - r + 0.5;
+                let half_w = (r * r - dy * dy).sqrt();
+                let x0 = bcx - half_w;
+                let w = half_w * 2.0;
+                bg.push_rect(x0, cy - r + row as f32, w, 1.0, circle_bg);
+            }
+
+            // Icon foreground
+            let fg_color = if hovered && is_close {
+                CONTROL_CLOSE_HOVER_FG
+            } else {
+                tc.control_fg
+            };
+            let ix = bcx - icon_s / 2.0;
+            let iy = cy - icon_s / 2.0;
+
+            match i {
+                0 => {
+                    // Minimize: horizontal line
+                    bg.push_rect(ix, cy, icon_s, 1.0, fg_color);
+                }
+                1 => {
+                    // Maximize/Restore
+                    if params.is_maximized {
+                        let s = icon_s - 2.0;
+                        // Back square
+                        bg.push_rect(ix + 2.0, iy, s, 1.0, fg_color);
+                        bg.push_rect(ix + 2.0, iy + s - 1.0, s, 1.0, fg_color);
+                        bg.push_rect(ix + 2.0, iy, 1.0, s, fg_color);
+                        bg.push_rect(ix + s + 1.0, iy, 1.0, s, fg_color);
+                        // Front square
+                        bg.push_rect(ix, iy + 2.0, s, 1.0, fg_color);
+                        bg.push_rect(ix, iy + s + 1.0, s, 1.0, fg_color);
+                        bg.push_rect(ix, iy + 2.0, 1.0, s, fg_color);
+                        bg.push_rect(ix + s - 1.0, iy + 2.0, 1.0, s, fg_color);
+                        bg.push_rect(ix + 1.0, iy + 3.0, s - 2.0, s - 2.0, circle_bg);
+                    } else {
+                        // Single square outline
+                        bg.push_rect(ix, iy, icon_s, 1.0, fg_color);
+                        bg.push_rect(ix, iy + icon_s - 1.0, icon_s, 1.0, fg_color);
+                        bg.push_rect(ix, iy, 1.0, icon_s, fg_color);
+                        bg.push_rect(ix + icon_s - 1.0, iy, 1.0, icon_s, fg_color);
+                    }
+                }
+                _ => {
+                    // Close: × drawn as 1px diagonal squares
+                    for j in 0..ICON_SIZE {
+                        let fj = j as f32;
+                        bg.push_rect(ix + fj, iy + fj, 1.0, 1.0, fg_color);
+                        bg.push_rect(ix + icon_s - 1.0 - fj, iy + fj, 1.0, 1.0, fg_color);
+                    }
+                }
             }
         }
     }
@@ -2034,6 +2139,7 @@ fn palette_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
 }
 
 /// Convert a u32 color (0x00RRGGBB) to [f32; 4] RGBA in **linear** space.
+#[cfg(target_os = "windows")]
 fn u32_to_rgba(c: u32) -> [f32; 4] {
     [
         srgb_to_linear(((c >> 16) & 0xFF) as f32 / 255.0),
