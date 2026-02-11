@@ -44,16 +44,6 @@ const SCROLL_LINES: usize = 3;
 // UI font scale relative to grid font (tab bar, search bar, menus)
 const UI_FONT_SCALE: f32 = 0.75;
 
-/// Manual window drag state — replaces OS native `drag_window()` to avoid
-/// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
-struct WindowDrag {
-    window_id: WindowId,
-    /// Screen-space cursor position at drag start.
-    start_screen: (f64, f64),
-    /// Window outer position at drag start.
-    start_window: (i32, i32),
-}
-
 pub struct App {
     config: Config,
     windows: HashMap<WindowId, TermWindow>,
@@ -63,7 +53,6 @@ pub struct App {
     gpu: Option<GpuState>,
     renderer: Option<GpuRenderer>,
     drag: Option<DragState>,
-    window_drag: Option<WindowDrag>,
     next_tab_id: u64,
     proxy: EventLoopProxy<TermEvent>,
     cursor_pos: HashMap<WindowId, PhysicalPosition<f64>>,
@@ -161,7 +150,6 @@ impl App {
             gpu: None,
             renderer: None,
             drag: None,
-            window_drag: None,
             next_tab_id: 1,
             proxy,
             cursor_pos: HashMap::new(),
@@ -202,40 +190,12 @@ impl App {
 
     /// Begin a window drag.
     ///
-    /// On Windows we use a manual drag (track cursor + `set_outer_position`) to avoid
-    /// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
-    /// On Linux/macOS we use the native `drag_window()` which lets the compositor
-    /// handle the move (required on Wayland where clients can't set their own position).
-    #[allow(clippy::needless_pass_by_ref_mut)] // Windows path mutates self.window_drag
-    fn start_window_drag(&mut self, window_id: WindowId, cursor: PhysicalPosition<f64>) {
-        let tw = match self.windows.get(&window_id) {
-            Some(tw) => tw,
-            None => return,
-        };
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = cursor;
+    /// Start an OS-native window drag. On Windows with snap support, the OS
+    /// handles dragging via `HTCAPTION` so this is only a fallback. On
+    /// Linux/macOS the compositor handles the move (required on Wayland).
+    fn start_window_drag(&self, window_id: WindowId, _cursor: PhysicalPosition<f64>) {
+        if let Some(tw) = self.windows.get(&window_id) {
             let _ = tw.window.drag_window();
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let win_pos = match tw.window.outer_position() {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let inner_pos = match tw.window.inner_position() {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let screen_x = inner_pos.x as f64 + cursor.x;
-            let screen_y = inner_pos.y as f64 + cursor.y;
-            self.window_drag = Some(WindowDrag {
-                window_id,
-                start_screen: (screen_x, screen_y),
-                start_window: (win_pos.x, win_pos.y),
-            });
         }
     }
 
@@ -546,6 +506,14 @@ impl App {
         // Apply compositor blur/vibrancy + layered window transparency
         apply_window_effects(&window, &self.config.window);
 
+        // Enable Aero Snap for borderless window (WndProc subclass)
+        #[cfg(target_os = "windows")]
+        crate::platform_windows::enable_snap(
+            &window,
+            RESIZE_BORDER as i32,
+            TAB_BAR_HEIGHT as i32,
+        );
+
         // Restore saved position before showing — avoids gray flash from
         // moving a visible window which triggers a WM repaint.
         if let Some(state) = saved_pos {
@@ -734,6 +702,38 @@ impl App {
 
         if phys.width == 0 || phys.height == 0 {
             return;
+        }
+
+        // Update snap hit-test rects so WM_NCHITTEST knows where interactive
+        // elements are (HTCLIENT). Everything else in the caption zone becomes
+        // HTCAPTION so the OS handles drag natively (avoids DPI oscillation).
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(tw) = self.windows.get(&window_id) {
+                let bar_w = phys.width as usize;
+                let layout = TabBarLayout::compute(tab_info.len(), bar_w);
+                let h = TAB_BAR_HEIGHT as i32;
+                let mut rects = Vec::new();
+                // Individual tab rects
+                for i in 0..layout.tab_count {
+                    let left = (TAB_LEFT_MARGIN + i * layout.tab_width) as i32;
+                    let right = left + layout.tab_width as i32;
+                    rects.push([left, 0, right, h]);
+                }
+                // New tab button
+                let tabs_end = TAB_LEFT_MARGIN + layout.tab_count * layout.tab_width;
+                rects.push([tabs_end as i32, 0,
+                    (tabs_end + NEW_TAB_BUTTON_WIDTH) as i32, h]);
+                // Dropdown button
+                let dd_start = tabs_end + NEW_TAB_BUTTON_WIDTH;
+                rects.push([dd_start as i32, 0,
+                    (dd_start + crate::tab_bar::DROPDOWN_BUTTON_WIDTH) as i32, h]);
+                // Window controls
+                let controls_start = bar_w
+                    .saturating_sub(crate::tab_bar::CONTROLS_ZONE_WIDTH) as i32;
+                rects.push([controls_start, 0, bar_w as i32, h]);
+                crate::platform_windows::set_client_rects(&tw.window, rects);
+            }
         }
 
         let hover = self.hover_hit.get(&window_id).copied().unwrap_or(TabBarHit::None);
@@ -1306,9 +1306,6 @@ impl App {
                 }
             }
             ElementState::Released => {
-                // End manual window drag
-                self.window_drag = None;
-
                 // Finalize selection and auto-copy
                 if self.left_mouse_down {
                     self.left_mouse_down = false;
@@ -1335,6 +1332,13 @@ impl App {
                     // drag.source_window was updated to the torn-off window
                     // during tear_off_tab — use it, not window_id
                     let torn_wid = drag.source_window;
+                    // Re-enable DPI handling now that the drag is over
+                    #[cfg(target_os = "windows")]
+                    if drag.phase == DragPhase::TornOff {
+                        if let Some(tw) = self.windows.get(&torn_wid) {
+                            crate::platform_windows::set_dragging(&tw.window, false);
+                        }
+                    }
                     match drag.phase {
                         DragPhase::TornOff => {
                             // Clear drag visuals for any target window
@@ -1593,26 +1597,6 @@ impl App {
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
 
-        // Manual window drag — move window to follow cursor
-        if let Some(ref wd) = self.window_drag {
-            if wd.window_id == window_id {
-                if let Some(tw) = self.windows.get(&window_id) {
-                    if let Ok(ip) = tw.window.inner_position() {
-                        let sx = ip.x as f64 + position.x;
-                        let sy = ip.y as f64 + position.y;
-                        let dx = sx - wd.start_screen.0;
-                        let dy = sy - wd.start_screen.1;
-                        let new_x = wd.start_window.0 + dx as i32;
-                        let new_y = wd.start_window.1 + dy as i32;
-                        tw.window.set_outer_position(
-                            PhysicalPosition::new(new_x, new_y),
-                        );
-                    }
-                }
-                return; // Don't process hover/selection during window drag
-            }
-        }
-
         // Update cursor icon for resize borders and hyperlink hover
         let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
             dir.into()
@@ -1832,6 +1816,11 @@ impl App {
                                 drag.phase = DragPhase::TornOff;
                                 drag.grab_offset = position;
                             }
+                            // Suppress WM_DPICHANGED during manual positioning
+                            #[cfg(target_os = "windows")]
+                            if let Some(tw) = self.windows.get(&source_wid) {
+                                crate::platform_windows::set_dragging(&tw.window, true);
+                            }
                             log("drag: pending -> torn off (single tab)");
                         } else {
                             if let Some(ref mut drag) = self.drag {
@@ -1847,6 +1836,13 @@ impl App {
                         self.tear_off_tab(tab_id, source_wid, position, event_loop);
                         if let Some(ref mut drag) = self.drag {
                             drag.phase = DragPhase::TornOff;
+                        }
+                        // Suppress WM_DPICHANGED on the torn-off window
+                        #[cfg(target_os = "windows")]
+                        if let Some(drag) = &self.drag {
+                            if let Some(tw) = self.windows.get(&drag.source_window) {
+                                crate::platform_windows::set_dragging(&tw.window, true);
+                            }
                         }
                         // Clear drag visuals for the source window
                         self.drag_visual_x = None;
@@ -2780,6 +2776,13 @@ impl ApplicationHandler<TermEvent> for App {
                         // Clear drag visuals and animation state
                         if let Some(drag) = &self.drag {
                             self.tab_anim_offsets.remove(&drag.source_window);
+                            // Re-enable DPI handling
+                            #[cfg(target_os = "windows")]
+                            if drag.phase == DragPhase::TornOff {
+                                if let Some(tw) = self.windows.get(&drag.source_window) {
+                                    crate::platform_windows::set_dragging(&tw.window, false);
+                                }
+                            }
                         }
                         self.drag_visual_x = None;
                         // Cancel drag — revert to original state

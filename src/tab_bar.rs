@@ -20,7 +20,7 @@ pub const DROPDOWN_BUTTON_WIDTH: usize = 30;
 #[cfg(target_os = "windows")]
 const CONTROL_BUTTON_WIDTH: usize = 58;
 #[cfg(target_os = "windows")]
-const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3; // 174px for 3 buttons
+pub const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3; // 174px for 3 buttons
 #[cfg(target_os = "windows")]
 const ICON_SIZE: usize = 10;
 
@@ -32,7 +32,7 @@ const CONTROL_BUTTON_SPACING: usize = 8;
 #[cfg(not(target_os = "windows"))]
 const CONTROL_BUTTON_MARGIN: usize = 12;
 #[cfg(not(target_os = "windows"))]
-const CONTROLS_ZONE_WIDTH: usize =
+pub const CONTROLS_ZONE_WIDTH: usize =
     CONTROL_BUTTON_MARGIN + 3 * CONTROL_BUTTON_DIAMETER + 2 * CONTROL_BUTTON_SPACING + CONTROL_BUTTON_MARGIN;
 // = 12 + 60 + 16 + 12 = 100px
 #[cfg(not(target_os = "windows"))]

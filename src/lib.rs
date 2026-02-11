@@ -29,6 +29,9 @@ pub mod drag;
 pub mod window;
 pub mod app;
 
+#[cfg(target_os = "windows")]
+pub mod platform_windows;
+
 use std::io::Write;
 
 pub fn log_path() -> std::path::PathBuf {
