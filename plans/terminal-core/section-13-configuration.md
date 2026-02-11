@@ -1,7 +1,7 @@
 ---
 section: "13"
 title: Configuration
-status: in-progress
+status: complete
 goal: User-configurable terminal settings with config file, hot reload, and sensible defaults
 sections:
   - id: "13.1"
@@ -9,7 +9,7 @@ sections:
     status: complete
   - id: "13.2"
     title: Settings
-    status: in-progress
+    status: complete
   - id: "13.3"
     title: Hot Reload
     status: complete
@@ -18,12 +18,12 @@ sections:
     status: complete
   - id: "13.5"
     title: Completion Checklist
-    status: in-progress
+    status: complete
 ---
 
 # Section 13: Configuration
 
-**Status:** In Progress (13.1 complete, 13.2 mostly complete, 13.3 complete, 13.4 complete)
+**Status:** Complete (13.1-13.4 all complete)
 **Goal:** Comprehensive configuration system with a config file, hot reload,
 and all commonly-configured terminal settings.
 
@@ -37,7 +37,8 @@ shell command, scrollback size, color scheme, initial window dimensions, opacity
 (grid + tab bar independently), blur, and key bindings are all configurable.
 Settings window provides runtime theme switching with persistence. Hot reload
 watches config file via `notify` crate and applies changes live. Key bindings
-configurable via `[[keybind]]` TOML sections with hot reload.
+configurable via `[[keybind]]` TOML sections with hot reload. Per-color overrides
+(foreground, background, cursor, selection, ANSI 0-15) apply on top of any scheme.
 
 **Implementation:** `src/config.rs` (`Config` struct with serde Serialize/Deserialize),
 `src/config_monitor.rs` (`ConfigMonitor` file watcher with debounce).
@@ -89,10 +90,10 @@ Configurable settings.
 - [x] Color settings:
   - [x] `colors.scheme` — named color scheme (default: "Catppuccin Mocha")
   - [x] Runtime theme switching via settings dropdown (persists to config)
-  - [ ] `colors.foreground` / `colors.background` — override default colors — not implemented
-  - [ ] `colors.cursor` — cursor color — not implemented
-  - [ ] `colors.selection` — selection highlight color — not implemented
-  - [ ] `colors.ansi` / `colors.bright` — override 16 ANSI colors — not implemented
+  - [x] `colors.foreground` / `colors.background` — override default fg/bg colors
+  - [x] `colors.cursor` — cursor color override
+  - [x] `colors.selection_foreground` / `colors.selection_background` — selection highlight colors (default: fg/bg swap)
+  - [x] `[colors.ansi]` / `[colors.bright]` — sparse override of 16 ANSI colors by index
 - [x] Window settings:
   - [x] `window.columns` — initial columns (default: 120)
   - [x] `window.rows` — initial rows (default: 30)
@@ -126,7 +127,7 @@ Reload configuration without restarting. **Complete.**
 - [x] On change: re-parse config, apply delta (200ms debounce)
 - [x] `Config::try_load()` returns `Result` so reload preserves previous config on errors
 - [x] Hot-reloadable settings (apply immediately):
-  - [x] Colors / color scheme — uses existing `apply_scheme_to_all_tabs()` path
+  - [x] Colors / color scheme / color overrides — scheme via `apply_scheme_to_all_tabs()`, overrides via `apply_overrides()`
   - [x] Font family and size — full `FontSet::load()` + atlas rebuild + tab resize
   - [x] Cursor style — updates `tab.cursor_shape` on all tabs
   - [x] `behavior.bold_is_bright` — updates all tab palettes
@@ -205,7 +206,8 @@ User-configurable keyboard shortcuts. **Complete.**
 - [x] Copy-on-select configurable (default: true)
 - [x] Bold-is-bright configurable (default: true)
 - [x] Key bindings configurable (keybindings.rs, TOML `[[keybind]]`, hot reload)
-- [x] Hot reload works for colors, font, cursor style, bold_is_bright
+- [x] Color overrides (fg/bg/cursor/selection/ANSI) apply on top of scheme
+- [x] Hot reload works for colors, color overrides, font, cursor style, bold_is_bright
 - [x] Invalid config shows error (logs), falls back to defaults
 - [x] `--print-config` generates default config (also `--help`, `--version`)
 

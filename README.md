@@ -44,7 +44,7 @@ Built by studying 18 terminal projects from the inside out — Alacritty, Ghostt
 
 ### Color
 - **Truecolor** — 24-bit RGB, 256-color, and 16-color ANSI support.
-- **Color schemes** — 7 built-in themes with Catppuccin Mocha as default.
+- **Color schemes** — 7 built-in themes with Catppuccin Mocha as default. Per-color overrides (foreground, background, cursor, selection, ANSI 0-15) on top of any scheme.
 - **Color profile detection** *(pending)* — respects NO_COLOR, CLICOLOR, COLORTERM environment variables.
 
 ### Search
@@ -57,7 +57,7 @@ Built by studying 18 terminal projects from the inside out — Alacritty, Ghostt
 - **IME support** *(pending)* — input method editor for CJK text entry.
 
 ### Configuration
-- **TOML config file** — font, colors, opacity, scrollback size, shell, cursor style, key bindings.
+- **TOML config file** — font, colors (scheme + per-color overrides), opacity, scrollback size, shell, cursor style, key bindings.
 - **Hot reload** — visual settings update without restarting (file watcher + Ctrl+Shift+R).
 - **CLI flags** — `--print-config`, `--version`, `--help`.
 
@@ -123,6 +123,20 @@ cursor_style = "block"   # "block", "bar"/"beam", or "underline"
 
 [colors]
 scheme = "Catppuccin Mocha"  # Color scheme name (see below)
+# foreground = "#FFFFFF"     # Override foreground color
+# background = "#000000"     # Override background color
+# cursor = "#FF0000"         # Override cursor color
+# selection_foreground = "#FFFFFF"   # Selection text color (default: swap with bg)
+# selection_background = "#3A3D5C"   # Selection highlight color (default: swap with fg)
+
+# Override specific ANSI colors by index (0-7)
+# [colors.ansi]
+# 0 = "#111111"              # Black
+# 7 = "#EEEEEE"              # White
+
+# Override specific bright colors by index (0-7 maps to colors 8-15)
+# [colors.bright]
+# 1 = "#FF0000"              # Bright red
 
 [window]
 columns = 120            # Initial columns

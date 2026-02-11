@@ -1,6 +1,7 @@
 use vte::ansi::{Color, NamedColor, Rgb};
 
 use crate::cell::CellFlags;
+use crate::config::ColorConfig;
 
 pub const NUM_COLORS: usize = 270;
 
@@ -239,6 +240,10 @@ pub struct Palette {
     colors: [Rgb; NUM_COLORS],
     defaults: [Rgb; NUM_COLORS],
     pub bold_is_bright: bool,
+    /// Custom selection foreground color. None = use BG (swap behavior).
+    pub selection_fg: Option<Rgb>,
+    /// Custom selection background color. None = use FG (swap behavior).
+    pub selection_bg: Option<Rgb>,
 }
 
 impl Palette {
@@ -290,7 +295,7 @@ impl Palette {
         colors[NamedColor::DimForeground as usize] = dim_color(scheme.fg);
 
         let defaults = colors;
-        Self { colors, defaults, bold_is_bright: true }
+        Self { colors, defaults, bold_is_bright: true, selection_fg: None, selection_bg: None }
     }
 
     /// Replace the palette with a new color scheme. Resets all colors.
@@ -299,6 +304,68 @@ impl Palette {
         let fresh = Self::from_scheme(scheme);
         self.colors = fresh.colors;
         self.defaults = fresh.defaults;
+        self.selection_fg = None;
+        self.selection_bg = None;
+    }
+
+    /// Apply config color overrides on top of the current scheme.
+    /// Call this after `set_scheme()`.
+    pub fn apply_overrides(&mut self, colors: &ColorConfig) {
+        if let Some(rgb) = colors.foreground.as_deref().and_then(parse_hex_color) {
+            self.colors[NamedColor::Foreground as usize] = rgb;
+            self.defaults[NamedColor::Foreground as usize] = rgb;
+        }
+        if let Some(rgb) = colors.background.as_deref().and_then(parse_hex_color) {
+            self.colors[NamedColor::Background as usize] = rgb;
+            self.defaults[NamedColor::Background as usize] = rgb;
+        }
+        if let Some(rgb) = colors.cursor.as_deref().and_then(parse_hex_color) {
+            self.colors[NamedColor::Cursor as usize] = rgb;
+            self.defaults[NamedColor::Cursor as usize] = rgb;
+        }
+        // ANSI 0-7
+        for (key, hex) in &colors.ansi {
+            if let Ok(i) = key.parse::<usize>() {
+                if i < 8 {
+                    if let Some(rgb) = parse_hex_color(hex) {
+                        self.colors[i] = rgb;
+                        self.defaults[i] = rgb;
+                    }
+                }
+            }
+        }
+        // Bright 8-15
+        for (key, hex) in &colors.bright {
+            if let Ok(i) = key.parse::<usize>() {
+                if i < 8 {
+                    if let Some(rgb) = parse_hex_color(hex) {
+                        self.colors[8 + i] = rgb;
+                        self.defaults[8 + i] = rgb;
+                    }
+                }
+            }
+        }
+        // Selection colors
+        self.selection_fg = colors.selection_foreground.as_deref().and_then(parse_hex_color);
+        self.selection_bg = colors.selection_background.as_deref().and_then(parse_hex_color);
+        // Recalculate dim variants for overridden ANSI 0-7
+        for i in 0..8 {
+            let base = self.colors[i];
+            self.colors[NamedColor::DimBlack as usize + i] = dim_color(base);
+        }
+        self.colors[NamedColor::DimForeground as usize] =
+            dim_color(self.colors[NamedColor::Foreground as usize]);
+        // Update bright foreground if fg was overridden
+        self.colors[NamedColor::BrightForeground as usize] =
+            self.colors[NamedColor::Foreground as usize];
+    }
+
+    /// Return selection colors. Falls back to FG/BG swap when not configured.
+    pub fn selection_colors(&self, fg: Rgb, bg: Rgb) -> (Rgb, Rgb) {
+        (
+            self.selection_fg.unwrap_or(bg),
+            self.selection_bg.unwrap_or(fg),
+        )
     }
 
     pub fn resolve(&self, color: Color, flags: CellFlags) -> Rgb {
@@ -375,6 +442,27 @@ impl Palette {
 impl Default for Palette {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Parse "#RRGGBB" or "#RGB" to Rgb. Returns None on invalid input.
+pub fn parse_hex_color(s: &str) -> Option<Rgb> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    let bytes = hex.as_bytes();
+    match bytes.len() {
+        6 => {
+            let r = u8::from_str_radix(std::str::from_utf8(&bytes[0..2]).ok()?, 16).ok()?;
+            let g = u8::from_str_radix(std::str::from_utf8(&bytes[2..4]).ok()?, 16).ok()?;
+            let b = u8::from_str_radix(std::str::from_utf8(&bytes[4..6]).ok()?, 16).ok()?;
+            Some(Rgb { r, g, b })
+        }
+        3 => {
+            let r = u8::from_str_radix(std::str::from_utf8(&bytes[0..1]).ok()?, 16).ok()?;
+            let g = u8::from_str_radix(std::str::from_utf8(&bytes[1..2]).ok()?, 16).ok()?;
+            let b = u8::from_str_radix(std::str::from_utf8(&bytes[2..3]).ok()?, 16).ok()?;
+            Some(Rgb { r: r * 17, g: g * 17, b: b * 17 })
+        }
+        _ => None,
     }
 }
 
@@ -481,5 +569,139 @@ mod tests {
     fn rgb_to_u32_conversion() {
         assert_eq!(rgb_to_u32(Rgb { r: 0xFF, g: 0x00, b: 0x80 }), 0x00FF0080);
         assert_eq!(rgb_to_u32(Rgb { r: 0xCD, g: 0xD6, b: 0xF4 }), 0x00CDD6F4);
+    }
+
+    #[test]
+    fn parse_hex_color_6char() {
+        assert_eq!(parse_hex_color("#FF0080"), Some(Rgb { r: 255, g: 0, b: 128 }));
+        assert_eq!(parse_hex_color("#000000"), Some(Rgb { r: 0, g: 0, b: 0 }));
+        assert_eq!(parse_hex_color("#ffffff"), Some(Rgb { r: 255, g: 255, b: 255 }));
+    }
+
+    #[test]
+    fn parse_hex_color_3char() {
+        assert_eq!(parse_hex_color("#F80"), Some(Rgb { r: 255, g: 136, b: 0 }));
+        assert_eq!(parse_hex_color("#000"), Some(Rgb { r: 0, g: 0, b: 0 }));
+        assert_eq!(parse_hex_color("#fff"), Some(Rgb { r: 255, g: 255, b: 255 }));
+    }
+
+    #[test]
+    fn parse_hex_color_no_hash() {
+        assert_eq!(parse_hex_color("FF0080"), Some(Rgb { r: 255, g: 0, b: 128 }));
+        assert_eq!(parse_hex_color("abc"), Some(Rgb { r: 170, g: 187, b: 204 }));
+    }
+
+    #[test]
+    fn parse_hex_color_invalid() {
+        assert_eq!(parse_hex_color(""), None);
+        assert_eq!(parse_hex_color("#"), None);
+        assert_eq!(parse_hex_color("#GG0000"), None);
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#1234567"), None);
+    }
+
+    #[test]
+    fn apply_overrides_fg_bg_cursor() {
+        let mut p = Palette::new();
+        let colors = ColorConfig {
+            foreground: Some("#FFFFFF".to_owned()),
+            background: Some("#000000".to_owned()),
+            cursor: Some("#FF0000".to_owned()),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        assert_eq!(p.default_fg(), Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(p.default_bg(), Rgb { r: 0, g: 0, b: 0 });
+        assert_eq!(p.cursor_color(), Rgb { r: 255, g: 0, b: 0 });
+    }
+
+    #[test]
+    fn apply_overrides_ansi() {
+        use std::collections::HashMap;
+        let mut p = Palette::new();
+        let colors = ColorConfig {
+            ansi: HashMap::from([
+                ("0".to_owned(), "#111111".to_owned()),
+                ("7".to_owned(), "#EEEEEE".to_owned()),
+            ]),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        assert_eq!(p.colors[0], Rgb { r: 0x11, g: 0x11, b: 0x11 });
+        // Index 1 should still be the scheme default
+        assert_eq!(p.colors[1], CATPPUCCIN_MOCHA.ansi[1]);
+        assert_eq!(p.colors[7], Rgb { r: 0xEE, g: 0xEE, b: 0xEE });
+    }
+
+    #[test]
+    fn apply_overrides_bright() {
+        use std::collections::HashMap;
+        let mut p = Palette::new();
+        let colors = ColorConfig {
+            bright: HashMap::from([
+                ("1".to_owned(), "#FF0000".to_owned()),
+            ]),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        assert_eq!(p.colors[9], Rgb { r: 255, g: 0, b: 0 }); // bright red
+        assert_eq!(p.colors[8], CATPPUCCIN_MOCHA.ansi[8]); // bright black unchanged
+    }
+
+    #[test]
+    fn apply_overrides_selection_colors() {
+        let mut p = Palette::new();
+        let colors = ColorConfig {
+            selection_foreground: Some("#FFFFFF".to_owned()),
+            selection_background: Some("#3A3D5C".to_owned()),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        let fg = Rgb { r: 100, g: 100, b: 100 };
+        let bg = Rgb { r: 50, g: 50, b: 50 };
+        let (sel_fg, sel_bg) = p.selection_colors(fg, bg);
+        assert_eq!(sel_fg, Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(sel_bg, Rgb { r: 0x3A, g: 0x3D, b: 0x5C });
+    }
+
+    #[test]
+    fn selection_colors_default_swap() {
+        let p = Palette::new();
+        let fg = Rgb { r: 200, g: 200, b: 200 };
+        let bg = Rgb { r: 30, g: 30, b: 30 };
+        let (sel_fg, sel_bg) = p.selection_colors(fg, bg);
+        // Default: swap fg and bg
+        assert_eq!(sel_fg, bg);
+        assert_eq!(sel_bg, fg);
+    }
+
+    #[test]
+    fn apply_overrides_partial() {
+        let mut p = Palette::new();
+        let original_bg = p.default_bg();
+        let colors = ColorConfig {
+            foreground: Some("#AABBCC".to_owned()),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        assert_eq!(p.default_fg(), Rgb { r: 0xAA, g: 0xBB, b: 0xCC });
+        // BG should remain from the scheme
+        assert_eq!(p.default_bg(), original_bg);
+    }
+
+    #[test]
+    fn apply_overrides_recalculates_dim() {
+        use std::collections::HashMap;
+        let mut p = Palette::new();
+        let colors = ColorConfig {
+            ansi: HashMap::from([
+                ("0".to_owned(), "#FFFFFF".to_owned()),
+            ]),
+            ..ColorConfig::default()
+        };
+        p.apply_overrides(&colors);
+        // Dim black should be 2/3 of overridden black (#FFFFFF)
+        let expected_dim = dim_color(Rgb { r: 255, g: 255, b: 255 });
+        assert_eq!(p.colors[NamedColor::DimBlack as usize], expected_dim);
     }
 }

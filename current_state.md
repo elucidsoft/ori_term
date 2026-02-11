@@ -369,15 +369,19 @@ Terminal style):
 
 - **Configuration (TOML)**: Config loaded from `%APPDATA%\ori_term\config.toml`
   (Windows) or `$XDG_CONFIG_HOME/ori_term/config.toml` (Linux). Sections: font
-  (size, family), terminal (shell, scrollback, cursor_style), colors (scheme),
-  window (columns, rows, opacity, tab_bar_opacity, blur), behavior (copy_on_select,
-  bold_is_bright). All fields optional with sensible defaults via `#[serde(default)]`.
-  Load/save with error fallback to defaults.
+  (size, family), terminal (shell, scrollback, cursor_style), colors (scheme,
+  foreground, background, cursor, selection_foreground, selection_background,
+  ansi, bright), window (columns, rows, opacity, tab_bar_opacity, blur),
+  behavior (copy_on_select, bold_is_bright). All fields optional with sensible
+  defaults via `#[serde(default)]`. Color overrides apply on top of the active
+  scheme via `Palette::apply_overrides()`. Load/save with error fallback to defaults.
 
 - **Color scheme switching**: 7 built-in color schemes (Catppuccin Mocha/Latte,
   One Dark, Solarized Dark/Light, Gruvbox Dark, Tokyo Night). Runtime switching via
   settings dropdown menu. Selected scheme persisted to config file. Tab bar colors
-  derived dynamically from palette background.
+  derived dynamically from palette background. Per-color overrides (foreground,
+  background, cursor, selection fg/bg, ANSI 0-15) apply on top of any scheme and
+  hot-reload with the config file. Selection uses configurable colors (default: fg/bg swap).
 
 - **Tab title truncation (Unicode-aware)**: Uses `UnicodeWidthChar::width()` for
   proper display width calculation. Handles CJK (width 2) and uses Unicode ellipsis

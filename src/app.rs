@@ -7,7 +7,7 @@ use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
+use winit::window::{CursorIcon, Icon, ResizeDirection, Window, WindowId};
 
 use crate::clipboard;
 use crate::search::SearchState;
@@ -41,6 +41,9 @@ const DOUBLE_CLICK_MS: u128 = 400;
 // Scroll lines per mouse wheel tick
 const SCROLL_LINES: usize = 3;
 
+// UI font scale relative to grid font (tab bar, search bar, menus)
+const UI_FONT_SCALE: f32 = 0.85;
+
 /// Manual window drag state — replaces OS native `drag_window()` to avoid
 /// winit's `WM_DPICHANGED` oscillation at per-monitor DPI boundaries.
 struct WindowDrag {
@@ -56,6 +59,7 @@ pub struct App {
     windows: HashMap<WindowId, TermWindow>,
     tabs: HashMap<TabId, Tab>,
     glyphs: FontSet,
+    ui_glyphs: FontSet,
     gpu: Option<GpuState>,
     renderer: Option<GpuRenderer>,
     drag: Option<DragState>,
@@ -112,9 +116,10 @@ impl App {
         ));
 
         let glyphs = FontSet::load(config.font.size, config.font.family.as_deref());
+        let ui_glyphs = glyphs.resize(glyphs.size * UI_FONT_SCALE);
         log(&format!(
-            "font loaded: cell={}x{}, baseline={}, size={}",
-            glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size
+            "font loaded: cell={}x{}, baseline={}, size={} (ui: {})",
+            glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size, ui_glyphs.size
         ));
 
         let bindings = keybindings::merge_bindings(&config.keybind);
@@ -134,6 +139,7 @@ impl App {
             windows: HashMap::new(),
             tabs: HashMap::new(),
             glyphs,
+            ui_glyphs,
             gpu: None,
             renderer: None,
             drag: None,
@@ -214,13 +220,14 @@ impl App {
     fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
         let new_size = self.glyphs.size + delta * self.scale_factor as f32;
         self.glyphs = self.glyphs.resize(new_size);
+        self.ui_glyphs = self.glyphs.resize(new_size * UI_FONT_SCALE);
         log(&format!(
             "font resize: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
         ));
         // Rebuild atlas for new font size
         if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs);
+            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
         }
         self.resize_all_tabs_in_window(window_id);
     }
@@ -228,13 +235,14 @@ impl App {
     fn reset_font_size(&mut self, window_id: WindowId) {
         let scaled_size = self.config.font.size * self.scale_factor as f32;
         self.glyphs = self.glyphs.resize(scaled_size);
+        self.ui_glyphs = self.glyphs.resize(scaled_size * UI_FONT_SCALE);
         log(&format!(
             "font reset: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
         ));
         // Rebuild atlas for new font size
         if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs);
+            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
         }
         self.resize_all_tabs_in_window(window_id);
     }
@@ -422,6 +430,13 @@ impl App {
         true
     }
 
+    fn load_window_icon() -> Option<Icon> {
+        let data = include_bytes!(concat!(env!("OUT_DIR"), "/icon_rgba.bin"));
+        let w = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let h = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        Icon::from_rgba(data[8..].to_vec(), w, h).ok()
+    }
+
     fn create_window(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -437,7 +452,8 @@ impl App {
             .with_inner_size(winit::dpi::PhysicalSize::new(win_w, win_h))
             .with_decorations(false)
             .with_visible(false)
-            .with_transparent(use_transparent);
+            .with_transparent(use_transparent)
+            .with_window_icon(Self::load_window_icon());
 
         // On Windows, DX12 + DirectComposition needs WS_EX_NOREDIRECTIONBITMAP
         // so the compositor reads alpha from our swapchain.
@@ -458,7 +474,7 @@ impl App {
         // Initialize GPU on first window creation
         if self.gpu.is_none() {
             let gpu = GpuState::new(&window, use_transparent);
-            let renderer = GpuRenderer::new(&gpu, &mut self.glyphs);
+            let renderer = GpuRenderer::new(&gpu, &mut self.glyphs, &mut self.ui_glyphs);
             self.gpu = Some(gpu);
             self.renderer = Some(renderer);
         }
@@ -519,11 +535,12 @@ impl App {
 
         self.tabs.insert(tab_id, tab);
 
-        // Apply the active color scheme and behavior settings to the new tab
+        // Apply the active color scheme, color overrides, and behavior settings to the new tab
         if let Some(t) = self.tabs.get_mut(&tab_id) {
             if let Some(scheme) = palette::find_scheme(self.active_scheme) {
                 t.palette.set_scheme(scheme);
             }
+            t.palette.apply_overrides(&self.config.colors);
             t.palette.bold_is_bright = self.config.behavior.bold_is_bright;
         }
 
@@ -601,6 +618,20 @@ impl App {
     /// PTY reader thread still holds a pipe handle, so we kill children and
     /// force-exit before any `Tab` drop runs. Same approach as Alacritty.
     fn exit_app(&mut self) {
+        // Save window position and size before exiting.
+        if let Some(tw) = self.windows.values().next() {
+            if let Ok(pos) = tw.window.outer_position() {
+                let size = tw.window.inner_size();
+                let state = config::WindowState {
+                    x: pos.x,
+                    y: pos.y,
+                    width: size.width,
+                    height: size.height,
+                };
+                state.save();
+            }
+        }
+
         for tab in self.tabs.values_mut() {
             tab.shutdown();
         }
@@ -668,6 +699,8 @@ impl App {
                     .filter(|(wid, _)| *wid == window_id)
                     .map(|(_, uri)| uri.as_str()),
                 hover_url_range: self.hover_url_range.as_deref(),
+                minimum_contrast: self.config.colors.effective_minimum_contrast(),
+                alpha_blending: self.config.colors.alpha_blending,
             });
 
         let Some(frame_params) = frame_params else {
@@ -694,6 +727,7 @@ impl App {
             &tw.surface_config,
             &frame_params,
             &mut self.glyphs,
+            &mut self.ui_glyphs,
         );
     }
 
@@ -752,8 +786,9 @@ impl App {
         let expected_size = self.config.font.size * self.scale_factor as f32;
         if (self.glyphs.size - expected_size).abs() > 0.1 {
             self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
+            self.ui_glyphs = self.glyphs.resize(expected_size * UI_FONT_SCALE);
             if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-                renderer.rebuild_atlas(gpu, &mut self.glyphs);
+                renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
             }
         }
 
@@ -1728,7 +1763,11 @@ impl App {
                     tw.window
                         .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
-                tw.window.request_redraw();
+            }
+            // Render before showing to avoid flash
+            self.render_window(new_wid);
+            if let Some(tw) = self.windows.get(&new_wid) {
+                tw.window.set_visible(true);
             }
 
             // The drag continues via CursorMoved (DragPhase::TornOff)
@@ -2092,7 +2131,7 @@ impl App {
             phys.height,
             self.active_scheme,
             palette,
-            &mut self.glyphs,
+            &mut self.ui_glyphs,
         );
     }
 
@@ -2123,6 +2162,7 @@ impl App {
         self.active_scheme = scheme.name;
         for tab in self.tabs.values_mut() {
             tab.palette.set_scheme(scheme);
+            tab.palette.apply_overrides(&self.config.colors);
         }
         // Persist the scheme change
         scheme.name.clone_into(&mut self.config.colors.scheme);
@@ -2143,13 +2183,18 @@ impl App {
         };
 
         // Color scheme
-        if new_config.colors.scheme != self.config.colors.scheme {
+        let scheme_changed = new_config.colors.scheme != self.config.colors.scheme;
+        if scheme_changed {
             if let Some(scheme) = palette::find_scheme(&new_config.colors.scheme) {
                 self.active_scheme = scheme.name;
                 for tab in self.tabs.values_mut() {
                     tab.palette.set_scheme(scheme);
                 }
             }
+        }
+        // Re-apply color overrides (always — they may have changed independently)
+        for tab in self.tabs.values_mut() {
+            tab.palette.apply_overrides(&new_config.colors);
         }
 
         // Font size or family change
@@ -2158,12 +2203,13 @@ impl App {
         if font_changed {
             let scaled_size = new_config.font.size * self.scale_factor as f32;
             self.glyphs = FontSet::load(scaled_size, new_config.font.family.as_deref());
+            self.ui_glyphs = self.glyphs.resize(scaled_size * UI_FONT_SCALE);
             log(&format!(
                 "config reload: font size={}, cell={}x{}",
                 self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
             ));
             if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-                renderer.rebuild_atlas(gpu, &mut self.glyphs);
+                renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
             }
             let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
             for wid in window_ids {
@@ -2209,6 +2255,13 @@ impl ApplicationHandler<TermEvent> for App {
         self.first_window_created = true;
 
         if let Some(wid) = self.create_window(event_loop) {
+            // Restore saved window position (window is already visible from create_window).
+            if let Some(state) = config::WindowState::load() {
+                if let Some(tw) = self.windows.get(&wid) {
+                    tw.window.set_outer_position(PhysicalPosition::new(state.x, state.y));
+                }
+            }
+
             // Query actual DPI scale factor and reload fonts if needed
             if let Some(tw) = self.windows.get(&wid) {
                 let sf = tw.window.scale_factor();

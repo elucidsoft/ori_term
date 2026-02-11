@@ -2,7 +2,13 @@ use std::collections::HashMap;
 
 use crate::render::{FontSet, FontStyle};
 
-type GlyphKey = (char, FontStyle);
+/// Cache key includes font size (tenths of a point) so the same atlas
+/// can hold glyphs rasterized at different sizes (grid vs UI font).
+type GlyphKey = (char, FontStyle, u16);
+
+fn size_key(size: f32) -> u16 {
+    (size * 10.0).round() as u16
+}
 
 /// UV coordinates and metrics for a glyph stored in the atlas texture.
 pub struct AtlasEntry {
@@ -81,7 +87,7 @@ impl GlyphAtlas {
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) -> &AtlasEntry {
-        let key = (ch, style);
+        let key = (ch, style, size_key(glyphs.size));
         if !self.entries.contains_key(&key) {
             glyphs.ensure(ch, style);
             if let Some((metrics, bitmap)) = glyphs.get(ch, style) {
@@ -113,8 +119,8 @@ impl GlyphAtlas {
     }
 
     /// Get a glyph entry if it already exists in the atlas.
-    pub fn get(&self, ch: char, style: FontStyle) -> Option<&AtlasEntry> {
-        self.entries.get(&(ch, style))
+    pub fn get(&self, ch: char, style: FontStyle, font_size: f32) -> Option<&AtlasEntry> {
+        self.entries.get(&(ch, style, size_key(font_size)))
     }
 
     pub fn view(&self) -> &wgpu::TextureView {

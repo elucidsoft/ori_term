@@ -1,29 +1,29 @@
 ---
 section: "14"
 title: Cross-Platform
-status: not-started
+status: in-progress
 goal: Run on Windows, Linux, and macOS with platform-native PTY, fonts, clipboard, and GPU backends
 sections:
   - id: "14.1"
     title: PTY Abstraction
-    status: not-started
+    status: complete
   - id: "14.2"
     title: Platform Fonts
-    status: not-started
+    status: in-progress
   - id: "14.3"
     title: Platform Clipboard
-    status: not-started
+    status: in-progress
   - id: "14.4"
     title: Platform Integration
-    status: not-started
+    status: in-progress
   - id: "14.5"
     title: Completion Checklist
-    status: not-started
+    status: in-progress
 ---
 
 # Section 14: Cross-Platform
 
-**Status:** Not Started
+**Status:** In Progress (14.1 complete, 14.2–14.4 partially done)
 **Goal:** ori_term runs natively on Windows, Linux, and macOS with each platform
 using its native PTY, font discovery, clipboard, and GPU backend.
 
@@ -32,61 +32,68 @@ using its native PTY, font discovery, clipboard, and GPU backend.
 - Alacritty's cross-platform support via crossfont and winit
 - WezTerm's extensive cross-platform support including Wayland
 
-**Current state:** Windows-only. ConPTY for PTY, winit for windowing, softbuffer
-for rendering. Font paths hardcoded to Windows locations. No Linux/macOS support.
+**Current state:** Windows is the primary platform with full functionality.
+`portable-pty` already provides cross-platform PTY (ConPTY on Windows,
+`openpty`/`forkpty` on Unix). Font paths are defined for both Windows and Linux
+(`src/render.rs`). Clipboard works on Windows via `clipboard-win` but is
+stubbed out on other platforms. GPU rendering uses wgpu which auto-selects
+DX12/Vulkan/Metal. Windowing is via winit which is cross-platform. The main
+gaps are: clipboard on non-Windows, untested macOS/Linux builds, and some
+Windows-specific code paths (DirectComposition transparency, Win32 API calls).
 
 ---
 
 ## 14.1 PTY Abstraction
 
-Abstract PTY creation across platforms.
+**Status: Complete** — `portable-pty` handles this cross-platform.
 
-- [ ] Define `Pty` trait:
-  ```rust
-  trait Pty {
-      fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-      fn write(&mut self, data: &[u8]) -> io::Result<usize>;
-      fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()>;
-  }
-  ```
-- [ ] Windows: ConPTY (current implementation in `tab.rs`)
-  - [ ] Already working via `windows` crate
-  - [ ] `CreatePseudoConsole`, `ResizePseudoConsole`
-- [ ] Linux: `openpty` / `forkpty`
-  - [ ] Use `libc` crate for `openpty()` and `forkpty()`
-  - [ ] Resize via `TIOCSWINSZ` ioctl
-  - [ ] Handle `SIGCHLD` for child process exit
-- [ ] macOS: same as Linux (POSIX PTY)
-  - [ ] Uses same `openpty` / `forkpty` API
-  - [ ] May need `posix_openpt` on some versions
-- [ ] Shell detection:
-  - [ ] Windows: `cmd.exe` or `powershell.exe` or `pwsh.exe`
-  - [ ] Linux/macOS: read `$SHELL` env var, default to `/bin/sh`
-  - [ ] WSL detection: if running in WSL, use `bash` or configured shell
+- [x] Cross-platform PTY via `portable-pty` crate (`src/tab.rs:181`)
+  - [x] Windows: ConPTY (`portable_pty::native_pty_system()`)
+  - [x] Linux: `openpty` / `forkpty` (same crate, automatic)
+  - [x] macOS: POSIX PTY (same crate, automatic)
+- [x] PTY resize via `pty_master.resize()` (works on all platforms)
+- [x] Background reader thread per tab (sends `TermEvent::PtyOutput`)
+- [x] Shell detection (`src/tab.rs:258-267`):
+  - [x] Windows: `cmd.exe` default (configurable via `terminal.shell`)
+  - [x] Linux/macOS: reads `$SHELL` env var, defaults to `/bin/sh`
+- [ ] Handle `SIGCHLD` on Unix for child process exit notification
+  - [ ] Currently the PTY reader thread detects EOF when child exits
+  - [ ] No explicit signal handling — may want to add for robustness
 
-**Ref:** Alacritty `tty/` module (windows.rs, unix.rs), Ghostty PTY abstraction
+**Ref:** portable-pty crate handles the platform abstraction layer
 
 ---
 
 ## 14.2 Platform Fonts
 
-Platform-specific font discovery and loading.
+**Status: In Progress** — paths defined for Windows and Linux, macOS untested.
 
-- [ ] Windows font discovery:
-  - [ ] Scan `C:\Windows\Fonts\` (current approach)
-  - [ ] Or use DirectWrite `IDWriteFontCollection` for proper enumeration
-  - [ ] Default: Cascadia Mono, Consolas
-- [ ] Linux font discovery:
-  - [ ] Use fontconfig (`fc-match`, `fc-list`)
-  - [ ] Parse fontconfig output or use `fontconfig` crate
-  - [ ] Default: system monospace, DejaVu Sans Mono, Liberation Mono
+- [x] Windows font discovery (`src/render.rs:42-80`):
+  - [x] Scans `C:\Windows\Fonts\` for font families in priority order
+  - [x] Priority: JetBrainsMono > JetBrainsMonoNerdFont > CascadiaMonoNF >
+    CascadiaMono > Consolas > Courier
+  - [x] Fallback fonts: Segoe UI Symbol, MS Gothic (CJK), Segoe UI
+- [x] Linux font discovery (`src/render.rs:82-100+`):
+  - [x] Searches `~/.local/share/fonts`, `/usr/share/fonts`, `/usr/local/share/fonts`
+  - [x] Priority: JetBrainsMono > UbuntuMono > DejaVuSansMono > LiberationMono
+  - [x] Fallback fonts: NotoSansMono, NotoSansSymbols2, NotoSansCJK, DejaVuSans
 - [ ] macOS font discovery:
-  - [ ] Use CoreText `CTFontCreateWithName`
+  - [ ] Currently uses Linux paths (will fail on macOS)
+  - [ ] Need CoreText `CTFontCreateWithName` or scan `/Library/Fonts/`,
+    `/System/Library/Fonts/`
   - [ ] Default: SF Mono, Menlo, Monaco
+- [ ] Proper font discovery via platform APIs:
+  - [ ] Windows: DirectWrite `IDWriteFontCollection` (more robust than path scan)
+  - [ ] Linux: fontconfig (`fc-match`) or `fontconfig` crate
+  - [ ] macOS: CoreText
+  - [ ] Current approach works but is fragile (exact filenames required)
 - [ ] Embedded fallback font:
-  - [ ] Bundle a basic monospace font (e.g., JetBrains Mono) as last resort
-  - [ ] Include at compile time via `include_bytes!`
+  - [ ] Bundle a basic monospace font (e.g., JetBrains Mono) via `include_bytes!`
   - [ ] Prevents panic if no system fonts found
+  - [ ] Low priority — current path-based approach works for common setups
+- [ ] Config `font.family` override:
+  - [x] Field exists in config (`src/config.rs:27`)
+  - [ ] Need to map family name to file path on each platform
 
 **Ref:** Alacritty `crossfont` crate, Ghostty `font/discovery.zig`
 
@@ -94,45 +101,78 @@ Platform-specific font discovery and loading.
 
 ## 14.3 Platform Clipboard
 
-Platform-native clipboard access.
+**Status: In Progress** — Windows working, other platforms stubbed.
 
-- [ ] Windows: Win32 clipboard API
-  - [ ] `OpenClipboard`, `GetClipboardData(CF_UNICODETEXT)`, `SetClipboardData`
-  - [ ] Or use `clipboard-win` crate
-- [ ] Linux: X11 / Wayland clipboard
-  - [ ] X11: `XSetSelectionOwner` / `XGetSelectionOwner` (PRIMARY + CLIPBOARD)
-  - [ ] Wayland: `wl_data_device` protocol
-  - [ ] Or use `arboard` crate for cross-platform abstraction
-- [ ] macOS: NSPasteboard
-  - [ ] `pbcopy` / `pbpaste` for simple approach
-  - [ ] Or use `arboard` crate
-- [ ] Consider using `arboard` crate for all platforms (simpler, well-maintained)
+- [x] Windows: `clipboard-win` crate (`src/clipboard.rs:8-11, 20-23`)
+  - [x] `get_text()` via `clipboard_win::get_clipboard_string()`
+  - [x] `set_text()` via `clipboard_win::set_clipboard_string()`
+- [ ] Linux / macOS: currently no-op stubs (`src/clipboard.rs:14-17, 26-30`)
+  - [ ] `get_text()` returns `None`
+  - [ ] `set_text()` returns `false`
+- [ ] Replace stubs with `arboard` crate:
+  - [ ] `arboard` provides cross-platform clipboard (X11, Wayland, macOS, Windows)
+  - [ ] Single dependency replaces both `clipboard-win` and the stubs
+  - [ ] API: `Clipboard::new()?.get_text()`, `Clipboard::new()?.set_text()`
+  - [ ] Handles X11 PRIMARY vs CLIPBOARD selections
+  - [ ] Handles Wayland clipboard protocol
+  - [ ] Handles macOS NSPasteboard
+- [ ] Alternative: keep `clipboard-win` for Windows (lighter), `arboard` for others
+- [ ] OSC 52 clipboard already works on all platforms (base64 encode/decode is pure Rust)
 
-**Ref:** Alacritty clipboard handling, `arboard` crate
+**Ref:** `arboard` crate (well-maintained, used by Alacritty)
 
 ---
 
 ## 14.4 Platform Integration
 
-Platform-specific window and system integration.
+**Status: In Progress** — wgpu and winit handle most of it automatically.
 
-- [ ] Window management:
-  - [ ] Windows: frameless window with custom title bar (current implementation)
-  - [ ] Linux: respect window manager decorations, or offer frameless option
-  - [ ] macOS: native title bar with tab bar integration, or frameless
-- [ ] Notifications:
-  - [ ] OSC 9 (iTerm2) / OSC 777 (urxvt) notification sequences
-  - [ ] Windows: `ToastNotification` or system tray balloon
-  - [ ] Linux: `notify-send` / D-Bus notifications
-  - [ ] macOS: `NSUserNotification` / `UNUserNotificationCenter`
-- [ ] GPU backend selection:
-  - [ ] Windows: DirectX 12 primary, Vulkan fallback
-  - [ ] Linux: Vulkan primary, OpenGL fallback
-  - [ ] macOS: Metal
-  - [ ] wgpu handles this automatically, but allow user override
-- [ ] System theme detection:
-  - [ ] Detect dark/light mode preference
-  - [ ] Adapt default colors or offer "auto" color scheme
+### Window Management
+
+- [x] Frameless window with custom title bar (Windows — working)
+- [x] winit cross-platform window creation
+- [ ] Linux window manager integration:
+  - [ ] Test with X11 and Wayland compositors
+  - [ ] Some WMs may not support `drag_window()` / `drag_resize_window()`
+  - [ ] May need `_NET_WM_MOVERESIZE` for X11 drag
+  - [ ] Decide: frameless by default or respect WM decorations?
+- [ ] macOS integration:
+  - [ ] Native title bar with tab bar integration, or frameless
+  - [ ] Handle `NSWindow` full screen properly
+  - [ ] Menu bar integration
+
+### GPU Backend Selection
+
+- [x] wgpu auto-selects backend: DX12 on Windows, Vulkan on Linux, Metal on macOS
+- [x] DirectComposition (DxgiFromVisual) for Windows transparency
+- [ ] Linux transparency:
+  - [ ] X11 composited transparency (ARGB visual)
+  - [ ] Wayland compositor transparency
+  - [ ] Test with Picom, KWin, Mutter
+- [ ] macOS transparency:
+  - [ ] NSVisualEffectView for vibrancy
+  - [ ] `window-vibrancy` crate has macOS support (untested)
+
+### Platform-Specific Code Paths
+
+Current platform-specific code (`#[cfg(target_os = "windows")]`):
+- `src/app.rs`: Window transparency setup (DComp, blur), `ShellExecuteW` for URL open
+- `src/render.rs`: Font family definitions and fallback font paths
+- `src/clipboard.rs`: Clipboard access
+- `src/config.rs`: Config directory paths (`%APPDATA%` vs `$XDG_CONFIG_HOME`)
+
+Each needs a working non-Windows implementation:
+- [ ] URL opening: `xdg-open` on Linux, `open` on macOS (partially done in `app.rs`)
+- [ ] Config paths: Linux path works, macOS needs `~/Library/Application Support/`
+- [ ] Transparency: need to test/fix Linux and macOS compositor paths
+
+### System Theme Detection
+
+- [ ] Detect dark/light mode preference:
+  - [ ] Windows: `AppsUseLightTheme` registry key
+  - [ ] macOS: `NSAppearance` observation
+  - [ ] Linux: `org.freedesktop.appearance.color-scheme` D-Bus
+- [ ] Adapt default color scheme based on system theme
 
 **Ref:** Ghostty platform layers, WezTerm cross-platform support
 
@@ -140,13 +180,19 @@ Platform-specific window and system integration.
 
 ## 14.5 Completion Checklist
 
-- [ ] Terminal runs on Windows with ConPTY
-- [ ] Terminal runs on Linux with openpty
-- [ ] Terminal runs on macOS with openpty
-- [ ] Font discovery works on all platforms
-- [ ] Clipboard copy/paste works on all platforms
-- [ ] GPU rendering works on all platforms (via wgpu)
-- [ ] Default shell detected correctly per platform
+- [x] Terminal runs on Windows with ConPTY
+- [ ] Terminal runs on Linux with openpty — builds but untested
+- [ ] Terminal runs on macOS with openpty — builds but untested
+- [x] Font discovery works on Windows
+- [ ] Font discovery works on Linux — paths defined, untested
+- [ ] Font discovery works on macOS — not yet defined
+- [x] Clipboard copy/paste works on Windows
+- [ ] Clipboard copy/paste works on Linux (arboard)
+- [ ] Clipboard copy/paste works on macOS (arboard)
+- [x] GPU rendering works on Windows (DX12 via wgpu)
+- [ ] GPU rendering works on Linux (Vulkan via wgpu) — should work, untested
+- [ ] GPU rendering works on macOS (Metal via wgpu) — should work, untested
+- [x] Default shell detected correctly per platform
 - [ ] Window decorations appropriate per platform
 - [ ] No platform-specific panics or crashes
 - [ ] CI builds for all three platforms

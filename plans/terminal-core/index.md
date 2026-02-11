@@ -219,28 +219,29 @@ config monitor, debounce, Ctrl+Shift+R, reload
 ---
 
 ### Section 14: Cross-Platform
-**File:** `section-14-cross-platform.md` | **Status:** Not Started
+**File:** `section-14-cross-platform.md` | **Status:** In Progress (PTY done, clipboard/fonts partial)
 
 ```
 cross-platform, Windows, Linux, macOS
-ConPTY, PTY, openpty, forkpty
+ConPTY, PTY, openpty, forkpty, portable-pty
 font path, system fonts, font directory
-clipboard, Wayland, X11, Win32
-GPU backend, Vulkan, Metal, DirectX, OpenGL
+clipboard, Wayland, X11, Win32, arboard
+GPU backend, Vulkan, Metal, DirectX, OpenGL, wgpu
 ```
 
 ---
 
 ### Section 15: Performance
-**File:** `section-15-performance.md` | **Status:** Not Started
+**File:** `section-15-performance.md` | **Status:** In Progress (GPU pipeline done, no damage tracking)
 
 ```
 performance, benchmark, profile, optimize
 damage tracking, dirty region, minimal redraw
 differential rendering, double buffer, diff
 batch, batching, draw call reduction
-memory, allocation, arena, pool
+memory, allocation, ring buffer, scrollback
 throughput, latency, frame rate, FPS
+instance buffer, glyph atlas, GPU rendering
 ```
 
 ---
@@ -254,12 +255,13 @@ binary tree, layout tree, PaneNode, SplitDirection
 split resize, drag divider, equalize, zoom pane
 focus pane, navigate pane, Alt+Arrow, cycle pane
 close pane, collapse split, nested split
+PaneId, Pane struct, Tab refactor
 ```
 
 ---
 
 ### Section 17: Shell Integration
-**File:** `section-17-shell-integration.md` | **Status:** Not Started
+**File:** `section-17-shell-integration.md` | **Status:** In Progress (OSC 133/7 parsing done)
 
 ```
 shell integration, prompt, OSC 133, semantic prompt
@@ -269,12 +271,13 @@ CWD inheritance, working directory, OSC 7
 smart close, idle prompt, running command
 SSH integration, terminfo, ssh-terminfo
 preexec, precmd, PROMPT_COMMAND, fish_prompt
+PromptState, RawInterceptor, Tab.cwd
 ```
 
 ---
 
 ### Section 18: Visual Polish
-**File:** `section-18-visual-polish.md` | **Status:** Not Started
+**File:** `section-18-visual-polish.md` | **Status:** In Progress (HiDPI + Min Contrast done)
 
 ```
 cursor blink, blinking, blink timer, DECSCUSR
@@ -283,6 +286,7 @@ minimum contrast, WCAG, readability, luminance
 HiDPI, DPI, scale factor, display scaling, retina
 smooth scroll, pixel scroll, animation, deceleration
 background image, wallpaper, opacity, background
+sRGB, alpha blending, luminance correction
 ```
 
 ---
@@ -291,17 +295,18 @@ background image, wallpaper, opacity, background
 **File:** `section-19-font-ligatures.md` | **Status:** Not Started
 
 ```
-ligature, font ligature, text shaping, HarfBuzz
-rustybuzz, OpenType, calt, liga, dlig
+ligature, font ligature, text shaping, rustybuzz
+HarfBuzz, OpenType, calt, liga, dlig
 Fira Code, JetBrains Mono, Cascadia Code
 shaped glyph, glyph cluster, multi-cell glyph
 programming font, arrow ligature, equals ligature
+glyph ID, cluster mapping, shaping run
 ```
 
 ---
 
 ### Section 20: Theme System
-**File:** `section-20-themes.md` | **Status:** Not Started
+**File:** `section-20-themes.md` | **Status:** In Progress (8 built-in + dropdown done)
 
 ```
 theme, color scheme, palette, built-in themes
@@ -310,6 +315,7 @@ Tokyo Night, One Dark, Rose Pine, Kanagawa
 light theme, dark theme, auto-switch, system appearance
 base16, iTerm2 colors, theme file, TOML theme
 theme library, 100 themes, theme preview
+settings dropdown, runtime switching, persist
 ```
 
 ---
@@ -332,7 +338,7 @@ terminal inspector, debug, escape sequence log, dev tools
 **File:** `section-22-extensibility.md` | **Status:** Not Started
 
 ```
-scripting, Lua, WASM, Rhai, plugin, extension
+scripting, Lua, mlua, WASM, Rhai, plugin, extension
 custom shader, WGSL, post-processing, CRT, bloom
 smart paste, multi-line paste, paste warning, strip prompt
 undo close tab, reopen tab, Ctrl+Shift+T
@@ -349,21 +355,21 @@ session, workspace, layout save, layout restore
 | 02 | VTE Escape Sequences | `section-02-vte-sequences.md` | 1 | **Complete** (OSC 52, OSC 7, OSC 133, XTVERSION, REP all done) |
 | 03 | Scrollback Buffer | `section-03-scrollback.md` | 1 | **Complete** (functional; ring buffer optimization deferred to Sec 15) |
 | 04 | Resize Handling | `section-04-resize.md` | 1 | **Complete** (resize + text reflow with wide char handling) |
-| 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 7 built-in color schemes + runtime switching) |
+| 05 | Color System | `section-05-color.md` | 1 | **Complete** (palette + render + 8 built-in color schemes + runtime switching) |
 | 06 | Font System | `section-06-font-system.md` | 2 | **Complete** (06.9 Color Emoji deferred) |
 | 07 | GPU Rendering | `section-07-gpu-rendering.md` | 2 | **Complete** (wgpu, glyph atlas, instanced rendering, full UI; 07.4 Damage Tracking deferred to Sec 15) |
 | 08 | Unicode & Graphemes | `section-08-unicode-graphemes.md` | 2 | **Complete** (combining marks, ZWJ, variation selectors, selection) |
 | 09 | Selection & Clipboard | `section-09-selection-clipboard.md` | 2 | **Complete** (mouse selection, copy/paste, Windows Terminal style) |
 | 10 | Keyboard Protocol | `section-10-keyboard.md` | 2 | **Complete** (key_encoding.rs, Kitty protocol, legacy xterm, APP_KEYPAD; 10.4 IME deferred) |
-| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | **Complete** (11.1–11.4 done; 11.5 Hyperlinks, 11.6 Images deferred) |
+| 11 | Terminal Modes & Features | `section-11-modes-features.md` | 3 | **Complete** (11.1-11.4 done; 11.5 Hyperlinks done, 11.6 Images deferred) |
 | 12 | Search | `section-12-search.md` | 3 | **Complete** (scrollback search with match highlighting; wrapped line search deferred) |
 | 13 | Configuration | `section-13-configuration.md` | 3 | **Complete** (TOML config + load/save + all settings + hot reload + key bindings + opacity/blur) |
-| 14 | Cross-Platform | `section-14-cross-platform.md` | 3 | Not Started |
-| 15 | Performance | `section-15-performance.md` | 3 | Not Started |
+| 14 | Cross-Platform | `section-14-cross-platform.md` | 3 | **In Progress** (PTY via portable-pty, fonts Win/Linux, clipboard Windows-only) |
+| 15 | Performance | `section-15-performance.md` | 3 | **In Progress** (GPU pipeline optimized, no damage tracking or ring buffer) |
 | 16 | Split Panes | `section-16-split-panes.md` | 4 | Not Started |
-| 17 | Shell Integration | `section-17-shell-integration.md` | 4 | Not Started |
-| 18 | Visual Polish | `section-18-visual-polish.md` | 4 | Not Started |
+| 17 | Shell Integration | `section-17-shell-integration.md` | 4 | **In Progress** (OSC 133 + OSC 7 parsing done, no scripts or UI) |
+| 18 | Visual Polish | `section-18-visual-polish.md` | 4 | **In Progress** (HiDPI done, Min Contrast done; cursor blink, smooth scroll pending) |
 | 19 | Font Ligatures | `section-19-font-ligatures.md` | 4 | Not Started |
-| 20 | Theme System | `section-20-themes.md` | 4 | Not Started |
+| 20 | Theme System | `section-20-themes.md` | 4 | **In Progress** (8 built-in schemes + dropdown; file-based themes pending) |
 | 21 | Command Palette & Quick Terminal | `section-21-command-palette.md` | 4 | Not Started |
 | 22 | Extensibility & Advanced Features | `section-22-extensibility.md` | 4 | Not Started |

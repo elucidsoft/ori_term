@@ -234,7 +234,7 @@ impl FontSet {
 
         let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], new_size);
 
-        let mut fs = Self {
+        Self {
             fonts,
             has_variant,
             fallback_fonts,
@@ -243,9 +243,7 @@ impl FontSet {
             cell_height,
             baseline,
             cache: HashMap::new(),
-        };
-        fs.precache_ascii();
-        fs
+        }
     }
 
     fn try_load_family(family: &FontFamily, size: f32) -> Option<Self> {
@@ -284,7 +282,7 @@ impl FontSet {
 
         let fallback_fonts = Self::load_fallback_fonts();
 
-        let mut fs = Self {
+        Some(Self {
             fonts,
             has_variant,
             fallback_fonts,
@@ -293,9 +291,7 @@ impl FontSet {
             cell_height,
             baseline,
             cache: HashMap::new(),
-        };
-        fs.precache_ascii();
-        Some(fs)
+        })
     }
 
     /// Try to load a font by a user-specified name or path.
@@ -327,7 +323,7 @@ impl FontSet {
         let (cell_width, cell_height, baseline) = Self::compute_metrics(&fonts[0], size);
         let fallback_fonts = Self::load_fallback_fonts();
 
-        let mut fs = Self {
+        Some(Self {
             fonts,
             has_variant,
             fallback_fonts,
@@ -336,9 +332,7 @@ impl FontSet {
             cell_height,
             baseline,
             cache: HashMap::new(),
-        };
-        fs.precache_ascii();
-        Some(fs)
+        })
     }
 
     fn compute_metrics(font: &fontdue::Font, size: f32) -> (usize, usize, usize) {
@@ -376,12 +370,6 @@ impl FontSet {
         }
 
         fallbacks
-    }
-
-    fn precache_ascii(&mut self) {
-        for ch in ' '..='~' {
-            self.ensure(ch, FontStyle::Regular);
-        }
     }
 
     /// Rasterize a glyph with the fallback chain.

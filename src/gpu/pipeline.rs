@@ -63,6 +63,9 @@ pub fn instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
 const BG_SHADER_SRC: &str = "
 struct Uniforms {
     projection: mat4x4<f32>,
+    flags: u32,
+    min_contrast: f32,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -103,6 +106,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 const FG_SHADER_SRC: &str = "
 struct Uniforms {
     projection: mat4x4<f32>,
+    flags: u32,
+    min_contrast: f32,
+    _pad: vec2<u32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -123,6 +129,109 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) fg_color: vec4<f32>,
+    @location(2) @interpolate(flat) bg_color: vec4<f32>,
+}
+
+// --- Color helper functions (ported from Ghostty's GLSL) ---
+
+// sRGB → linear (exact IEC 61966-2-1 transfer)
+fn linearize_scalar(v: f32) -> f32 {
+    if (v <= 0.04045) {
+        return v / 12.92;
+    }
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+// linear → sRGB (inverse transfer)
+fn unlinearize_scalar(v: f32) -> f32 {
+    if (v <= 0.0031308) {
+        return v * 12.92;
+    }
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+// ITU-R BT.709 relative luminance (input must be linear)
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// WCAG 2.0 contrast ratio between two linear-space colors
+fn contrast_ratio(c1: vec3<f32>, c2: vec3<f32>) -> f32 {
+    let l1 = luminance(c1);
+    let l2 = luminance(c2);
+    let lighter = max(l1, l2);
+    let darker = min(l1, l2);
+    return (lighter + 0.05) / (darker + 0.05);
+}
+
+// Adjust fg to meet minimum contrast against bg.
+// If the current contrast is too low, try moving fg toward white or black,
+// whichever yields better contrast.
+fn contrasted_color(min_ratio: f32, fg: vec4<f32>, bg: vec4<f32>) -> vec4<f32> {
+    let ratio = contrast_ratio(fg.rgb, bg.rgb);
+    if (ratio >= min_ratio) {
+        return fg;
+    }
+
+    let bg_l = luminance(bg.rgb);
+
+    // Try both directions: toward white and toward black
+    var best = fg;
+    var best_ratio = ratio;
+
+    // Binary search toward white
+    var lo_w = 0.0;
+    var hi_w = 1.0;
+    var candidate_w = fg.rgb;
+    for (var i = 0; i < 8; i++) {
+        let mid = (lo_w + hi_w) / 2.0;
+        candidate_w = mix(fg.rgb, vec3<f32>(1.0, 1.0, 1.0), mid);
+        let r = contrast_ratio(candidate_w, bg.rgb);
+        if (r >= min_ratio) {
+            hi_w = mid;
+        } else {
+            lo_w = mid;
+        }
+    }
+    let white_mix = mix(fg.rgb, vec3<f32>(1.0, 1.0, 1.0), hi_w);
+    let white_ratio = contrast_ratio(white_mix, bg.rgb);
+
+    // Binary search toward black
+    var lo_b = 0.0;
+    var hi_b = 1.0;
+    var candidate_b = fg.rgb;
+    for (var i = 0; i < 8; i++) {
+        let mid = (lo_b + hi_b) / 2.0;
+        candidate_b = mix(fg.rgb, vec3<f32>(0.0, 0.0, 0.0), mid);
+        let r = contrast_ratio(candidate_b, bg.rgb);
+        if (r >= min_ratio) {
+            hi_b = mid;
+        } else {
+            lo_b = mid;
+        }
+    }
+    let black_mix = mix(fg.rgb, vec3<f32>(0.0, 0.0, 0.0), hi_b);
+    let black_ratio = contrast_ratio(black_mix, bg.rgb);
+
+    // Pick the direction that achieves the ratio with less color shift
+    if (white_ratio >= min_ratio && black_ratio >= min_ratio) {
+        // Both work — pick the one with less mix factor (closer to original)
+        if (hi_w <= hi_b) {
+            return vec4<f32>(white_mix, fg.a);
+        } else {
+            return vec4<f32>(black_mix, fg.a);
+        }
+    } else if (white_ratio >= min_ratio) {
+        return vec4<f32>(white_mix, fg.a);
+    } else if (black_ratio >= min_ratio) {
+        return vec4<f32>(black_mix, fg.a);
+    }
+
+    // Neither direction fully achieves the target; pick the better one
+    if (white_ratio > black_ratio) {
+        return vec4<f32>(vec3<f32>(1.0, 1.0, 1.0), fg.a);
+    }
+    return vec4<f32>(vec3<f32>(0.0, 0.0, 0.0), fg.a);
 }
 
 @vertex
@@ -133,7 +242,15 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = uniforms.projection * vec4<f32>(pixel_pos, 0.0, 1.0);
     out.uv = input.uv_pos + input.uv_size * corner;
-    out.fg_color = input.fg_color;
+    out.bg_color = input.bg_color;
+
+    // Minimum contrast enforcement (per-vertex — cheap)
+    if (uniforms.min_contrast > 1.0) {
+        out.fg_color = contrasted_color(uniforms.min_contrast, input.fg_color, input.bg_color);
+    } else {
+        out.fg_color = input.fg_color;
+    }
+
     return out;
 }
 
@@ -141,28 +258,55 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
 // the GPU reads the framebuffer in linear, blends in linear, and writes
 // back sRGB.  fontdue's area-coverage is already linear, so raw coverage
 // is the correct alpha — no manual gamma correction needed.
+//
+// When linear correction is enabled (flags bit 0), we adjust the alpha
+// value to compensate for perceptual luminance differences, producing
+// even text weight regardless of fg/bg contrast (Ghostty's approach).
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let coverage = textureSample(glyph_texture, glyph_sampler, input.uv).r;
+    var a = textureSample(glyph_texture, glyph_sampler, input.uv).r;
+    let color = input.fg_color;
+
+    if ((uniforms.flags & 1u) != 0u) {
+        let bg = input.bg_color;
+        let fg_l = luminance(color.rgb);
+        let bg_l = luminance(bg.rgb);
+        if (abs(fg_l - bg_l) > 0.001) {
+            // Compute what luminance the naive blend would produce,
+            // then solve for alpha that achieves that luminance in
+            // sRGB-space blending.
+            let blend_l = linearize_scalar(
+                unlinearize_scalar(fg_l) * a + unlinearize_scalar(bg_l) * (1.0 - a)
+            );
+            a = clamp((blend_l - bg_l) / (fg_l - bg_l), 0.0, 1.0);
+        }
+    }
+
     // Premultiplied alpha output
-    return vec4<f32>(input.fg_color.rgb * coverage, coverage) * input.fg_color.a;
+    return vec4<f32>(color.rgb * a, a) * color.a;
 }
 ";
 
 // --- Pipeline creation ---
 
-/// Uniform bind group layout: group(0) binding(0) = projection matrix.
+/// Uniform bind group layout: group(0) binding(0) = projection + rendering params.
+///
+/// Layout (80 bytes):
+///   [0..64]  projection: mat4x4<f32>
+///   [64..68] flags: u32       (bit 0 = linear alpha correction)
+///   [68..72] `min_contrast`: f32 (1.0 = off)
+///   [72..80] _padding
 pub fn create_uniform_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("uniform_bind_group_layout"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(64), // mat4x4<f32> = 64 bytes
+                min_binding_size: wgpu::BufferSize::new(80),
             },
             count: None,
         }],

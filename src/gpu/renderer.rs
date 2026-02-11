@@ -5,6 +5,7 @@ use winit::window::Window;
 use vte::ansi::CursorShape;
 
 use crate::cell::CellFlags;
+use crate::config::AlphaBlending;
 use crate::grid::Grid;
 use crate::palette::Palette;
 use crate::render::{FontSet, FontStyle};
@@ -138,6 +139,8 @@ pub struct FrameParams<'a> {
     pub tab_bar_opacity: f32,
     pub hover_hyperlink: Option<&'a str>,
     pub hover_url_range: Option<&'a [(usize, usize, usize)]>,
+    pub minimum_contrast: f32,
+    pub alpha_blending: AlphaBlending,
 }
 
 /// GPU state shared across all windows.
@@ -335,7 +338,7 @@ pub struct GpuRenderer {
 }
 
 impl GpuRenderer {
-    pub fn new(gpu: &GpuState, glyphs: &mut FontSet) -> Self {
+    pub fn new(gpu: &GpuState, glyphs: &mut FontSet, ui_glyphs: &mut FontSet) -> Self {
         let device = &gpu.device;
         let format = gpu.render_format;
 
@@ -348,10 +351,10 @@ impl GpuRenderer {
         let fg_pipeline =
             pipeline::create_fg_pipeline(device, format, &uniform_layout, &atlas_layout);
 
-        // Uniform buffer (64 bytes for mat4x4)
+        // Uniform buffer (80 bytes: mat4x4 + flags + min_contrast + padding)
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_buffer"),
-            size: 64,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -365,9 +368,10 @@ impl GpuRenderer {
             }],
         });
 
-        // Glyph atlas
+        // Glyph atlas (holds both grid and UI font glyphs, keyed by size)
         let mut atlas = GlyphAtlas::new(device);
         atlas.precache_ascii(glyphs, &gpu.queue);
+        atlas.precache_ascii(ui_glyphs, &gpu.queue);
 
         // Sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -410,9 +414,10 @@ impl GpuRenderer {
     }
 
     /// Rebuild the atlas after font size change.
-    pub fn rebuild_atlas(&mut self, gpu: &GpuState, glyphs: &mut FontSet) {
+    pub fn rebuild_atlas(&mut self, gpu: &GpuState, glyphs: &mut FontSet, ui_glyphs: &mut FontSet) {
         self.atlas = GlyphAtlas::new(&gpu.device);
         self.atlas.precache_ascii(glyphs, &gpu.queue);
+        self.atlas.precache_ascii(ui_glyphs, &gpu.queue);
 
         // Recreate atlas bind group with new texture view
         self.atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -487,8 +492,9 @@ impl GpuRenderer {
         config: &wgpu::SurfaceConfiguration,
         params: &FrameParams<'_>,
         glyphs: &mut FontSet,
+        ui_glyphs: &mut FontSet,
     ) {
-        let prepared = self.prepare_frame(gpu, params, glyphs);
+        let prepared = self.prepare_frame(gpu, params, glyphs, ui_glyphs);
         let Some(prepared) = prepared else { return };
 
         // Get surface texture
@@ -527,6 +533,7 @@ impl GpuRenderer {
         gpu: &GpuState,
         params: &FrameParams<'_>,
         glyphs: &mut FontSet,
+        ui_glyphs: &mut FontSet,
     ) -> Option<PreparedFrame> {
         let w = params.width as f32;
         let h = params.height as f32;
@@ -535,6 +542,11 @@ impl GpuRenderer {
         let projection = ortho_projection(w, h);
         gpu.queue
             .write_buffer(&self.uniform_buffer, 0, &projection);
+
+        // Write rendering flags and minimum contrast ratio
+        let flags: u32 = u32::from(params.alpha_blending == AlphaBlending::LinearCorrected);
+        gpu.queue.write_buffer(&self.uniform_buffer, 64, &flags.to_ne_bytes());
+        gpu.queue.write_buffer(&self.uniform_buffer, 68, &params.minimum_contrast.to_ne_bytes());
 
         // Build instance data.
         // Tab bar and window border are fully opaque (opacity=1.0).
@@ -545,18 +557,18 @@ impl GpuRenderer {
         // Default background color
         let default_bg = palette_to_rgba(params.palette.default_bg());
 
-        // 1. Tab bar (uses configured tab_bar_opacity)
+        // 1. Tab bar (uses configured tab_bar_opacity, UI font)
         bg.opacity = params.tab_bar_opacity;
-        self.build_tab_bar_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue);
+        self.build_tab_bar_instances(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
 
         // Switch to transparent for grid content
         bg.opacity = params.opacity;
 
-        // 2. Grid cells (semi-transparent — glass shows through)
+        // 2. Grid cells (semi-transparent — glass shows through, grid font)
         self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg);
 
-        // 3. Search bar overlay (at bottom of grid, same opacity as grid)
-        self.build_search_bar_overlay(&mut bg, &mut fg, params, glyphs, &gpu.queue);
+        // 3. Search bar overlay (at bottom of grid, UI font)
+        self.build_search_bar_overlay(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
 
         // 4. Window border (opaque)
         bg.opacity = 1.0;
@@ -573,7 +585,7 @@ impl GpuRenderer {
         let mut overlay_bg = InstanceWriter::new();
         let mut overlay_fg = InstanceWriter::new();
         self.build_dropdown_overlay(
-            &mut overlay_bg, &mut overlay_fg, params, glyphs, &gpu.queue,
+            &mut overlay_bg, &mut overlay_fg, params, ui_glyphs, &gpu.queue,
         );
 
         // Upload instance buffers
@@ -1122,7 +1134,9 @@ impl GpuRenderer {
                     sel.contains(abs_row, col)
                 });
                 if is_selected {
-                    std::mem::swap(&mut fg_rgb, &mut bg_rgb);
+                    let (sel_fg, sel_bg) = palette.selection_colors(fg_rgb, bg_rgb);
+                    fg_rgb = sel_fg;
+                    bg_rgb = sel_bg;
                 }
 
                 let bg_u32 = crate::palette::rgb_to_u32(bg_rgb);
@@ -1284,10 +1298,20 @@ impl GpuRenderer {
                     - entry.metrics.ymin as f32;
 
                 // Only invert text color for block cursor (beam/underline don't cover the glyph)
-                let glyph_fg = if is_cursor && matches!(params.cursor_shape, CursorShape::Block) {
+                let is_block_cursor = is_cursor && matches!(params.cursor_shape, CursorShape::Block);
+                let glyph_fg = if is_block_cursor {
                     *default_bg
                 } else {
                     fg_rgba
+                };
+
+                // Effective background behind this glyph (for contrast/correction)
+                let glyph_bg = if is_block_cursor {
+                    vte_rgb_to_rgba(palette.cursor_color())
+                } else if bg_u32 != default_bg_u32 || is_selected {
+                    bg_rgba
+                } else {
+                    *default_bg
                 };
 
                 fg.push_glyph(
@@ -1298,6 +1322,7 @@ impl GpuRenderer {
                     entry.uv_pos,
                     entry.uv_size,
                     glyph_fg,
+                    glyph_bg,
                 );
 
                 // Synthetic bold: render glyph again 1px to the right
@@ -1312,6 +1337,7 @@ impl GpuRenderer {
                         entry.uv_pos,
                         entry.uv_size,
                         glyph_fg,
+                        glyph_bg,
                     );
                 }
 
@@ -1334,6 +1360,7 @@ impl GpuRenderer {
                         zw_entry.uv_pos,
                         zw_entry.uv_size,
                         glyph_fg,
+                        glyph_bg,
                     );
                 }
             }
@@ -1353,7 +1380,7 @@ impl GpuRenderer {
         height: u32,
         active_scheme: &str,
         palette: Option<&Palette>,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontSet, // UI font
     ) {
         let w = width as f32;
         let h = height as f32;
@@ -1580,6 +1607,7 @@ impl GpuRenderer {
                     entry.uv_pos,
                     entry.uv_size,
                     color,
+                    [0.0, 0.0, 0.0, 0.0],
                 );
             }
 
@@ -1819,6 +1847,7 @@ impl InstanceWriter {
     }
 
     /// Push a textured glyph quad (alpha-blended).
+    /// `bg_color` is passed through to the shader for contrast/correction.
     fn push_glyph(
         &mut self,
         x: f32,
@@ -1828,6 +1857,7 @@ impl InstanceWriter {
         uv_pos: [f32; 2],
         uv_size: [f32; 2],
         fg_color: [f32; 4],
+        bg_color: [f32; 4],
     ) {
         self.push_raw(
             [x, y],
@@ -1835,7 +1865,7 @@ impl InstanceWriter {
             uv_pos,
             uv_size,
             fg_color,
-            [0.0, 0.0, 0.0, 0.0],
+            bg_color,
             1,
         );
     }
