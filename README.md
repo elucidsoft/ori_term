@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" width="128" height="128" alt="ori-term">
+
 # ori-term
 
 A cross-platform terminal emulator written from scratch in Rust.
