@@ -245,6 +245,102 @@ throughput, latency, frame rate, FPS
 
 ---
 
+### Section 16: Split Panes
+**File:** `section-16-split-panes.md` | **Status:** Not Started
+
+```
+split, pane, horizontal split, vertical split, divide
+binary tree, layout tree, PaneNode, SplitDirection
+split resize, drag divider, equalize, zoom pane
+focus pane, navigate pane, Alt+Arrow, cycle pane
+close pane, collapse split, nested split
+```
+
+---
+
+### Section 17: Shell Integration
+**File:** `section-17-shell-integration.md` | **Status:** Not Started
+
+```
+shell integration, prompt, OSC 133, semantic prompt
+inject, auto-source, bash, zsh, fish, PowerShell
+prompt navigation, jump to prompt, Ctrl+Shift+Up
+CWD inheritance, working directory, OSC 7
+smart close, idle prompt, running command
+SSH integration, terminfo, ssh-terminfo
+preexec, precmd, PROMPT_COMMAND, fish_prompt
+```
+
+---
+
+### Section 18: Visual Polish
+**File:** `section-18-visual-polish.md` | **Status:** Not Started
+
+```
+cursor blink, blinking, blink timer, DECSCUSR
+hide cursor, hide mouse, typing, mouse move
+minimum contrast, WCAG, readability, luminance
+HiDPI, DPI, scale factor, display scaling, retina
+smooth scroll, pixel scroll, animation, deceleration
+background image, wallpaper, opacity, background
+```
+
+---
+
+### Section 19: Font Ligatures
+**File:** `section-19-font-ligatures.md` | **Status:** Not Started
+
+```
+ligature, font ligature, text shaping, HarfBuzz
+rustybuzz, OpenType, calt, liga, dlig
+Fira Code, JetBrains Mono, Cascadia Code
+shaped glyph, glyph cluster, multi-cell glyph
+programming font, arrow ligature, equals ligature
+```
+
+---
+
+### Section 20: Theme System
+**File:** `section-20-themes.md` | **Status:** Not Started
+
+```
+theme, color scheme, palette, built-in themes
+Catppuccin, Dracula, Nord, Solarized, Gruvbox
+Tokyo Night, One Dark, Rose Pine, Kanagawa
+light theme, dark theme, auto-switch, system appearance
+base16, iTerm2 colors, theme file, TOML theme
+theme library, 100 themes, theme preview
+```
+
+---
+
+### Section 21: Command Palette & Quick Terminal
+**File:** `section-21-command-palette.md` | **Status:** Not Started
+
+```
+command palette, Ctrl+Shift+P, fuzzy search, action list
+quick terminal, drop-down terminal, global hotkey, F12
+Quake terminal, slide in, toggle terminal
+desktop notification, OSC 9, OSC 777, toast
+progress bar, OSC 9;4, ConEmu progress, taskbar progress
+terminal inspector, debug, escape sequence log, dev tools
+```
+
+---
+
+### Section 22: Extensibility & Advanced Features
+**File:** `section-22-extensibility.md` | **Status:** Not Started
+
+```
+scripting, Lua, WASM, Rhai, plugin, extension
+custom shader, WGSL, post-processing, CRT, bloom
+smart paste, multi-line paste, paste warning, strip prompt
+undo close tab, reopen tab, Ctrl+Shift+T
+session, workspace, layout save, layout restore
+```
+
+---
+
 ## Quick Reference
 
 | ID | Title | File | Tier | Status |
@@ -264,3 +360,10 @@ throughput, latency, frame rate, FPS
 | 13 | Configuration | `section-13-configuration.md` | 3 | **Complete** (TOML config + load/save + all settings + hot reload + key bindings + opacity/blur) |
 | 14 | Cross-Platform | `section-14-cross-platform.md` | 3 | Not Started |
 | 15 | Performance | `section-15-performance.md` | 3 | Not Started |
+| 16 | Split Panes | `section-16-split-panes.md` | 4 | Not Started |
+| 17 | Shell Integration | `section-17-shell-integration.md` | 4 | Not Started |
+| 18 | Visual Polish | `section-18-visual-polish.md` | 4 | Not Started |
+| 19 | Font Ligatures | `section-19-font-ligatures.md` | 4 | Not Started |
+| 20 | Theme System | `section-20-themes.md` | 4 | Not Started |
+| 21 | Command Palette & Quick Terminal | `section-21-command-palette.md` | 4 | Not Started |
+| 22 | Extensibility & Advanced Features | `section-22-extensibility.md` | 4 | Not Started |
