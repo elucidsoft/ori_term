@@ -399,13 +399,6 @@ Terminal style):
 
 ## What's Not Working Yet / Known Issues
 
-- **Torn-off window drag tracking has positioning bugs**: The `TornOff` phase
-  adjusts window position via `set_outer_position` based on the difference between
-  cursor position and grab offset. This can cause jitter or drift because
-  `CursorMoved` events report positions relative to the window's own client area,
-  which shifts as the window moves. A more robust approach would use absolute screen
-  coordinates or platform-specific drag APIs.
-
 - **Clipboard stubs on non-Windows**: The `clipboard.rs` module uses `clipboard-win`
   on Windows but provides no-op stubs on other platforms. Needs arboard or similar
   for cross-platform clipboard support.
