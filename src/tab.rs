@@ -200,6 +200,8 @@ pub struct Tab {
     pub has_bell_badge: bool,
     /// Notifications received via OSC 9/99/777.
     pub pending_notifications: Vec<Notification>,
+    /// True when the grid content has changed and needs a GPU rebuild.
+    pub grid_dirty: bool,
 }
 
 #[derive(Debug)]
@@ -287,6 +289,7 @@ impl Tab {
             bell_start: None,
             has_bell_badge: false,
             pending_notifications: Vec::new(),
+            grid_dirty: true,
         })
     }
 
@@ -320,6 +323,8 @@ impl Tab {
     }
 
     pub fn process_output(&mut self, data: &[u8]) {
+        self.grid_dirty = true;
+
         // Run the raw interceptor first to capture OSC 7/133/9/99/777/XTVERSION
         // (sequences that vte::ansi::Processor silently drops).
         let mut interceptor = RawInterceptor {

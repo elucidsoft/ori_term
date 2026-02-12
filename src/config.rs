@@ -35,6 +35,8 @@ pub struct TerminalConfig {
     pub shell: Option<String>,
     pub scrollback: usize,
     pub cursor_style: String,
+    pub cursor_blink: bool,
+    pub cursor_blink_interval_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +120,8 @@ impl Default for TerminalConfig {
             shell: None,
             scrollback: 10_000,
             cursor_style: "block".to_owned(),
+            cursor_blink: true,
+            cursor_blink_interval_ms: 530,
         }
     }
 }
@@ -364,6 +368,8 @@ mod tests {
         assert!(parsed.window.blur);
         assert!(parsed.behavior.copy_on_select);
         assert!(parsed.behavior.bold_is_bright);
+        assert!(parsed.terminal.cursor_blink);
+        assert_eq!(parsed.terminal.cursor_blink_interval_ms, 530);
     }
 
     #[test]
@@ -409,6 +415,25 @@ cursor_style = "bar"
         let parsed: Config = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(parsed.terminal.cursor_style, "bar");
         assert_eq!(parse_cursor_style(&parsed.terminal.cursor_style), CursorShape::Beam);
+    }
+
+    #[test]
+    fn cursor_blink_defaults() {
+        let parsed: Config = toml::from_str("").expect("deserialize");
+        assert!(parsed.terminal.cursor_blink);
+        assert_eq!(parsed.terminal.cursor_blink_interval_ms, 530);
+    }
+
+    #[test]
+    fn cursor_blink_from_toml() {
+        let toml_str = r#"
+[terminal]
+cursor_blink = false
+cursor_blink_interval_ms = 250
+"#;
+        let parsed: Config = toml::from_str(toml_str).expect("deserialize");
+        assert!(!parsed.terminal.cursor_blink);
+        assert_eq!(parsed.terminal.cursor_blink_interval_ms, 250);
     }
 
     #[test]

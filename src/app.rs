@@ -27,7 +27,7 @@ use crate::selection::{
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
-    GRID_PADDING_LEFT, GRID_PADDING_BOTTOM,
+    GRID_PADDING_LEFT, GRID_PADDING_TOP, GRID_PADDING_BOTTOM,
 };
 use crate::term_mode::TermMode;
 use crate::window::TermWindow;
@@ -44,6 +44,7 @@ const SCROLL_LINES: usize = 3;
 // UI font scale relative to grid font (tab bar, search bar, menus)
 const UI_FONT_SCALE: f32 = 0.75;
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct App {
     config: Config,
     windows: HashMap<WindowId, TermWindow>,
@@ -90,6 +91,12 @@ pub struct App {
     last_anim_time: Instant,
     /// Pixel X position of the dragged tab within its window, for rendering.
     drag_visual_x: Option<(WindowId, f32)>,
+    /// When the cursor blink timer was last reset (keystroke, PTY output, focus).
+    cursor_blink_reset: Instant,
+    /// True when the tab bar needs to be rebuilt (hover, tab add/remove, etc.).
+    tab_bar_dirty: bool,
+    /// Previous cursor visibility state for dirty tracking.
+    prev_cursor_visible: bool,
 }
 
 impl App {
@@ -106,14 +113,16 @@ impl App {
         let config = Config::load();
         log(&format!(
             "config: font_size={}, scheme={}, shell={:?}, scrollback={}, cols={}, rows={}, \
-             opacity={}, tab_bar_opacity={}, blur={}, cursor={}, copy_on_select={}, bold_is_bright={} \
+             opacity={}, tab_bar_opacity={}, blur={}, cursor={}, cursor_blink={}, \
+             cursor_blink_interval_ms={}, copy_on_select={}, bold_is_bright={} \
              ({:.1}ms)",
             config.font.size, config.colors.scheme, config.terminal.shell,
             config.terminal.scrollback, config.window.columns, config.window.rows,
             config.window.effective_opacity(), config.window.effective_tab_bar_opacity(),
             config.window.blur,
-            config.terminal.cursor_style, config.behavior.copy_on_select,
-            config.behavior.bold_is_bright,
+            config.terminal.cursor_style, config.terminal.cursor_blink,
+            config.terminal.cursor_blink_interval_ms,
+            config.behavior.copy_on_select, config.behavior.bold_is_bright,
             t0.elapsed().as_secs_f64() * 1000.0,
         ));
 
@@ -176,6 +185,9 @@ impl App {
             tab_anim_offsets: HashMap::new(),
             last_anim_time: Instant::now(),
             drag_visual_x: None,
+            cursor_blink_reset: Instant::now(),
+            tab_bar_dirty: true,
+            prev_cursor_visible: true,
         };
 
         event_loop.run_app(&mut app)?;
@@ -200,10 +212,12 @@ impl App {
     }
 
     fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
+        let sf = self.scale_factor;
+        let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
         let cw = self.glyphs.cell_width;
         let ch = self.glyphs.cell_height;
-        let grid_w = (width as usize).saturating_sub(GRID_PADDING_LEFT);
-        let grid_h = (height as usize).saturating_sub(TAB_BAR_HEIGHT + 10 + GRID_PADDING_BOTTOM);
+        let grid_w = (width as usize).saturating_sub(s(GRID_PADDING_LEFT));
+        let grid_h = (height as usize).saturating_sub(s(TAB_BAR_HEIGHT) + s(GRID_PADDING_TOP) + s(GRID_PADDING_BOTTOM));
         let cols = if cw > 0 { grid_w / cw } else { self.config.window.columns };
         let rows = if ch > 0 { grid_h / ch } else { self.config.window.rows };
         (cols.max(2), rows.max(1))
@@ -253,8 +267,10 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.selection = None;
                 tab.resize(cols, rows, pixel_w, pixel_h);
+                tab.grid_dirty = true;
             }
         }
+        self.tab_bar_dirty = true;
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.request_redraw();
         }
@@ -295,6 +311,7 @@ impl App {
                     let n = tw.tabs.len();
                     if n > 1 {
                         tw.active_tab = (tw.active_tab + 1) % n;
+                        self.tab_bar_dirty = true;
                         tw.window.request_redraw();
                     }
                 }
@@ -304,6 +321,7 @@ impl App {
                     let n = tw.tabs.len();
                     if n > 1 {
                         tw.active_tab = (tw.active_tab + n - 1) % n;
+                        self.tab_bar_dirty = true;
                         tw.window.request_redraw();
                     }
                 }
@@ -316,6 +334,7 @@ impl App {
                         let page = grid.lines;
                         let max = grid.scrollback.len();
                         grid.display_offset = (grid.display_offset + page).min(max);
+                        tab.grid_dirty = true;
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -329,6 +348,7 @@ impl App {
                         let grid = tab.grid_mut();
                         let page = grid.lines;
                         grid.display_offset = grid.display_offset.saturating_sub(page);
+                        tab.grid_dirty = true;
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -341,6 +361,7 @@ impl App {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
                         let grid = tab.grid_mut();
                         grid.display_offset = grid.scrollback.len();
+                        tab.grid_dirty = true;
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -352,6 +373,7 @@ impl App {
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
                         tab.grid_mut().display_offset = 0;
+                        tab.grid_dirty = true;
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -390,6 +412,7 @@ impl App {
                         }
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             tab.selection = None;
+                            tab.grid_dirty = true;
                         }
                         if let Some(tw) = self.windows.get(&window_id) {
                             tw.window.request_redraw();
@@ -434,8 +457,10 @@ impl App {
         event_loop: &ActiveEventLoop,
         saved_pos: Option<&config::WindowState>,
     ) -> Option<WindowId> {
-        let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32 + GRID_PADDING_LEFT as u32;
-        let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32 + TAB_BAR_HEIGHT as u32 + 10 + GRID_PADDING_BOTTOM as u32;
+        let sf = self.scale_factor;
+        let s = |v: usize| -> u32 { (v as f64 * sf).round() as u32 };
+        let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32 + s(GRID_PADDING_LEFT);
+        let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32 + s(TAB_BAR_HEIGHT) + s(GRID_PADDING_TOP) + s(GRID_PADDING_BOTTOM);
 
         let use_transparent = self.config.window.effective_opacity() < 1.0;
 
@@ -466,6 +491,20 @@ impl App {
         };
         log(&format!("window created: {:.1}ms", create_start.elapsed().as_secs_f64() * 1000.0));
 
+        // Capture initial scale factor from the window
+        let initial_scale = window.scale_factor();
+        if (initial_scale - self.scale_factor).abs() > 0.01 {
+            self.scale_factor = initial_scale;
+            let expected_size = self.config.font.size * initial_scale as f32;
+            if (self.glyphs.size - expected_size).abs() > 0.1 {
+                self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
+                self.ui_glyphs = self.glyphs.resize(expected_size * UI_FONT_SCALE);
+                log(&format!(
+                    "HiDPI: scale={initial_scale:.2}, font reloaded at size={expected_size}"
+                ));
+            }
+        }
+
         // Initialize GPU on first window creation
         if self.gpu.is_none() {
             let t0 = Instant::now();
@@ -475,6 +514,11 @@ impl App {
             let t0 = Instant::now();
             let renderer = GpuRenderer::new(&gpu, &mut self.glyphs, &mut self.ui_glyphs);
             log(&format!("renderer init: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0));
+
+            // Warn if user requested transparency but GPU doesn't support it.
+            if use_transparent && !gpu.supports_transparency() {
+                log("WARNING: transparency requested (opacity < 1.0) but GPU surface alpha mode is Opaque — window will be opaque");
+            }
 
             self.gpu = Some(gpu);
             self.renderer = Some(renderer);
@@ -510,8 +554,8 @@ impl App {
         #[cfg(target_os = "windows")]
         crate::platform_windows::enable_snap(
             &window,
-            RESIZE_BORDER as i32,
-            TAB_BAR_HEIGHT as i32,
+            (RESIZE_BORDER * self.scale_factor) as i32,
+            (TAB_BAR_HEIGHT as f64 * self.scale_factor) as i32,
         );
 
         // Restore saved position before showing — avoids gray flash from
@@ -570,6 +614,7 @@ impl App {
             t.palette.bold_is_bright = self.config.behavior.bold_is_bright;
         }
 
+        self.tab_bar_dirty = true;
         if let Some(tw) = self.windows.get_mut(&window_id) {
             tw.add_tab(tab_id);
             tw.window.request_redraw();
@@ -581,6 +626,7 @@ impl App {
 
     fn close_tab(&mut self, tab_id: TabId, _event_loop: &ActiveEventLoop) {
         // Remove the tab from its window first
+        self.tab_bar_dirty = true;
         let mut empty_windows = Vec::new();
         for (wid, tw) in &mut self.windows {
             if tw.remove_tab(tab_id) {
@@ -710,27 +756,32 @@ impl App {
         #[cfg(target_os = "windows")]
         {
             if let Some(tw) = self.windows.get(&window_id) {
+                let sf = self.scale_factor;
+                let si = |v: usize| -> usize { (v as f64 * sf).round() as usize };
                 let bar_w = phys.width as usize;
-                let layout = TabBarLayout::compute(tab_info.len(), bar_w);
-                let h = TAB_BAR_HEIGHT as i32;
+                let layout = TabBarLayout::compute(tab_info.len(), bar_w, sf);
+                let h = si(TAB_BAR_HEIGHT) as i32;
+                let left_margin = si(TAB_LEFT_MARGIN);
                 let mut rects = Vec::new();
                 // Individual tab rects
                 for i in 0..layout.tab_count {
-                    let left = (TAB_LEFT_MARGIN + i * layout.tab_width) as i32;
+                    let left = (left_margin + i * layout.tab_width) as i32;
                     let right = left + layout.tab_width as i32;
                     rects.push([left, 0, right, h]);
                 }
                 // New tab button
-                let tabs_end = TAB_LEFT_MARGIN + layout.tab_count * layout.tab_width;
+                let new_tab_w = si(NEW_TAB_BUTTON_WIDTH);
+                let tabs_end = left_margin + layout.tab_count * layout.tab_width;
                 rects.push([tabs_end as i32, 0,
-                    (tabs_end + NEW_TAB_BUTTON_WIDTH) as i32, h]);
+                    (tabs_end + new_tab_w) as i32, h]);
                 // Dropdown button
-                let dd_start = tabs_end + NEW_TAB_BUTTON_WIDTH;
+                let dropdown_w = si(crate::tab_bar::DROPDOWN_BUTTON_WIDTH);
+                let dd_start = tabs_end + new_tab_w;
                 rects.push([dd_start as i32, 0,
-                    (dd_start + crate::tab_bar::DROPDOWN_BUTTON_WIDTH) as i32, h]);
+                    (dd_start + dropdown_w) as i32, h]);
                 // Window controls
-                let controls_start = bar_w
-                    .saturating_sub(crate::tab_bar::CONTROLS_ZONE_WIDTH) as i32;
+                let controls_w = si(crate::tab_bar::CONTROLS_ZONE_WIDTH);
+                let controls_start = bar_w.saturating_sub(controls_w) as i32;
                 rects.push([controls_start, 0, bar_w as i32, h]);
                 crate::platform_windows::set_client_rects(&tw.window, rects);
             }
@@ -779,6 +830,25 @@ impl App {
             0.0
         };
 
+        // Cursor blink: compute visibility based on elapsed time since last reset.
+        let cursor_visible = if self.config.terminal.cursor_blink {
+            let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
+            let interval = self.config.terminal.cursor_blink_interval_ms.max(1);
+            (elapsed_ms / interval).is_multiple_of(2)
+        } else {
+            true
+        };
+
+        // Damage tracking: compute dirty flags.
+        let cursor_visible_changed = cursor_visible != self.prev_cursor_visible;
+        self.prev_cursor_visible = cursor_visible;
+
+        let grid_dirty = active_tab_id
+            .and_then(|id| self.tabs.get(&id))
+            .is_some_and(|tab| tab.grid_dirty)
+            || cursor_visible_changed;
+        let tab_bar_dirty = self.tab_bar_dirty;
+
         // Build FrameParams — need the active tab's grid
         let frame_params = active_tab_id
             .and_then(|tab_id| self.tabs.get(&tab_id))
@@ -808,6 +878,10 @@ impl App {
                 tab_offsets,
                 bell_badges: &bell_badges,
                 bell_phase,
+                scale: self.scale_factor as f32,
+                cursor_visible,
+                grid_dirty,
+                tab_bar_dirty,
             });
 
         let Some(frame_params) = frame_params else {
@@ -837,8 +911,23 @@ impl App {
             &mut self.ui_glyphs,
         );
 
+        // Clear dirty flags after rendering.
+        if let Some(tab_id) = active_tab_id {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.grid_dirty = false;
+            }
+        }
+        self.tab_bar_dirty = false;
+
         // Keep redrawing while bell badge pulse is animating.
         if any_bell_badge {
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.request_redraw();
+            }
+        }
+
+        // Keep redrawing while cursor blink is enabled (toggles ~2/sec).
+        if self.config.terminal.cursor_blink {
             if let Some(tw) = self.windows.get(&window_id) {
                 tw.window.request_redraw();
             }
@@ -863,10 +952,11 @@ impl App {
         let x = pos.x;
         let y = pos.y;
 
-        let left = x < RESIZE_BORDER;
-        let right = x >= w - RESIZE_BORDER;
-        let top = y < RESIZE_BORDER;
-        let bottom = y >= h - RESIZE_BORDER;
+        let border = RESIZE_BORDER * self.scale_factor;
+        let left = x < border;
+        let right = x >= w - border;
+        let top = y < border;
+        let bottom = y >= h - border;
 
         match (left, right, top, bottom) {
             (true, _, true, _) => Some(ResizeDirection::NorthWest),
@@ -888,6 +978,19 @@ impl App {
                 tw.resize_surface(&gpu.device, width, height);
             }
             return;
+        }
+
+        // On Windows, our WndProc subclass eats WM_DPICHANGED (to prevent
+        // oscillation), so winit never fires ScaleFactorChanged.  Query the
+        // actual DPI stored by the subclass and update self.scale_factor so
+        // that font reload and layout calculations use the correct value.
+        #[cfg(target_os = "windows")]
+        if let Some(tw) = self.windows.get(&window_id) {
+            if let Some(sf) = crate::platform_windows::get_current_dpi(&tw.window) {
+                if (sf - self.scale_factor).abs() > 0.01 {
+                    self.scale_factor = sf;
+                }
+            }
         }
 
         // Resize the wgpu surface
@@ -920,6 +1023,7 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.selection = None;
                 tab.resize(cols, rows, pixel_w, pixel_h);
+                tab.grid_dirty = true;
             }
         }
     }
@@ -929,15 +1033,22 @@ impl App {
             return;
         }
         self.scale_factor = scale_factor;
+        // Request redraw on all windows so UI chrome rescales
+        for tw in self.windows.values() {
+            tw.window.request_redraw();
+        }
     }
 
     /// Convert pixel coordinates to grid cell (col, `viewport_line`).
     /// Returns None if outside the grid area.
     fn pixel_to_cell(&self, pos: PhysicalPosition<f64>) -> Option<(usize, usize)> {
+        let sf = self.scale_factor;
+        let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
         let x = pos.x as usize;
         let y = pos.y as usize;
-        let grid_top = TAB_BAR_HEIGHT + 10;
-        if y < grid_top || x < GRID_PADDING_LEFT {
+        let grid_top = s(TAB_BAR_HEIGHT) + s(GRID_PADDING_TOP);
+        let padding_left = s(GRID_PADDING_LEFT);
+        if y < grid_top || x < padding_left {
             return None;
         }
         let cw = self.glyphs.cell_width;
@@ -945,7 +1056,7 @@ impl App {
         if cw == 0 || ch == 0 {
             return None;
         }
-        let col = (x - GRID_PADDING_LEFT) / cw;
+        let col = (x - padding_left) / cw;
         let line = (y - grid_top) / ch;
         Some((col, line))
     }
@@ -957,7 +1068,8 @@ impl App {
         if cw == 0 {
             return Side::Left;
         }
-        let cell_x = (x.saturating_sub(GRID_PADDING_LEFT)) % cw;
+        let padding_left = (GRID_PADDING_LEFT as f64 * self.scale_factor).round() as usize;
+        let cell_x = (x.saturating_sub(padding_left)) % cw;
         if cell_x < cw / 2 { Side::Left } else { Side::Right }
     }
 
@@ -1167,6 +1279,7 @@ impl App {
                         }
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             tab.selection = None;
+                            tab.grid_dirty = true;
                         }
                         if let Some(tw) = self.windows.get(&window_id) {
                             tw.window.request_redraw();
@@ -1205,13 +1318,14 @@ impl App {
                     return;
                 }
 
-                if y < TAB_BAR_HEIGHT {
+                let tab_bar_h = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
+                if y < tab_bar_h {
                     let tw = match self.windows.get(&window_id) {
                         Some(tw) => tw,
                         None => return,
                     };
-                    let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
-                    let hit = layout.hit_test(x, y);
+                    let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+                    let hit = layout.hit_test(x, y, self.scale_factor);
 
                     match hit {
                         TabBarHit::NewTab => {
@@ -1223,6 +1337,7 @@ impl App {
                             } else {
                                 self.dropdown_open = Some(window_id);
                             }
+                            self.tab_bar_dirty = true;
                             if let Some(tw) = self.windows.get(&window_id) {
                                 tw.window.request_redraw();
                             }
@@ -1285,12 +1400,15 @@ impl App {
                                 let layout = TabBarLayout::compute(
                                     tw.tabs.len(),
                                     tw.window.inner_size().width as usize,
+                                    self.scale_factor,
                                 );
-                                let tab_left = TAB_LEFT_MARGIN as f64
+                                let left_margin = (TAB_LEFT_MARGIN as f64 * self.scale_factor).round();
+                                let tab_left = left_margin
                                     + idx as f64 * layout.tab_width as f64;
                                 let offset_in_tab = pos.x - tab_left;
                                 if let Some(tw) = self.windows.get_mut(&window_id) {
                                     tw.active_tab = idx;
+                                    self.tab_bar_dirty = true;
                                     tw.window.request_redraw();
                                 }
                                 let mut drag = DragState::new(tab_id, window_id, pos, idx);
@@ -1314,6 +1432,7 @@ impl App {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             if tab.selection.as_ref().is_some_and(Selection::is_empty) {
                                 tab.selection = None;
+                                tab.grid_dirty = true;
                             } else if self.config.behavior.copy_on_select {
                                 if let Some(ref sel) = tab.selection {
                                     let text = selection::extract_text(tab.grid(), sel);
@@ -1484,6 +1603,7 @@ impl App {
 
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             tab.selection = new_selection;
+            tab.grid_dirty = true;
         }
         self.left_mouse_down = true;
 
@@ -1588,6 +1708,7 @@ impl App {
                 // Scroll down (toward live)
                 grid.display_offset = grid.display_offset.saturating_sub((-lines) as usize);
             }
+            tab.grid_dirty = true;
         }
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.request_redraw();
@@ -1652,6 +1773,14 @@ impl App {
             || self.hover_url_range != new_url_range;
         self.hover_hyperlink = new_hover;
         self.hover_url_range = new_url_range;
+
+        if hover_changed {
+            if let Some(tid) = self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
+                if let Some(tab) = self.tabs.get_mut(&tid) {
+                    tab.grid_dirty = true;
+                }
+            }
+        }
 
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.set_cursor(cursor_icon);
@@ -1735,6 +1864,7 @@ impl App {
 
                         if let (Some(new_end), Some(sel)) = (new_end, &mut tab.selection) {
                             sel.end = new_end;
+                            tab.grid_dirty = true;
                         }
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
@@ -1744,7 +1874,8 @@ impl App {
             } else {
                 // Mouse outside grid — auto-scroll
                 let y = position.y as usize;
-                let grid_top = TAB_BAR_HEIGHT + 10;
+                let grid_top = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize
+                    + (GRID_PADDING_TOP as f64 * self.scale_factor).round() as usize;
                 let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if y < grid_top {
@@ -1753,6 +1884,7 @@ impl App {
                             let grid = tab.grid_mut();
                             let max = grid.scrollback.len();
                             grid.display_offset = (grid.display_offset + 1).min(max);
+                            tab.grid_dirty = true;
                         }
                     }
                     // Below grid: scroll down toward live
@@ -1762,6 +1894,7 @@ impl App {
                         let grid_bottom = grid_top + tab.grid().lines * ch;
                         if y >= grid_bottom && tab.grid().display_offset > 0 {
                             tab.grid_mut().display_offset = tab.grid().display_offset.saturating_sub(1);
+                            tab.grid_dirty = true;
                         }
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
@@ -1775,18 +1908,21 @@ impl App {
         let y = position.y as usize;
         let x = position.x as usize;
 
-        if y < TAB_BAR_HEIGHT {
+        let tab_bar_h_hover = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
+        if y < tab_bar_h_hover {
             if let Some(tw) = self.windows.get(&window_id) {
-                let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
-                let hit = layout.hit_test(x, y);
+                let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+                let hit = layout.hit_test(x, y, self.scale_factor);
                 let prev = self.hover_hit.insert(window_id, hit);
                 if prev != Some(hit) {
+                    self.tab_bar_dirty = true;
                     tw.window.request_redraw();
                 }
             }
         } else {
             let prev = self.hover_hit.insert(window_id, TabBarHit::None);
             if prev != Some(TabBarHit::None) {
+                self.tab_bar_dirty = true;
                 if let Some(tw) = self.windows.get(&window_id) {
                     tw.window.request_redraw();
                 }
@@ -1987,7 +2123,7 @@ impl App {
         // exact spot the user grabbed the tab.
         let grab_x = self.drag.as_ref()
             .map_or(75.0, |d| d.mouse_offset_in_tab);
-        let grab_y = (TAB_BAR_HEIGHT / 2) as f64;
+        let grab_y = TAB_BAR_HEIGHT as f64 * self.scale_factor / 2.0;
 
         // Create new frameless window at cursor position
         if let Some(new_wid) = self.create_window(event_loop, None) {
@@ -2036,11 +2172,14 @@ impl App {
         tab_id: TabId,
         mouse_offset_in_tab: f64,
     ) {
+        let sf = self.scale_factor;
+        let left_margin = (TAB_LEFT_MARGIN as f64 * sf).round();
         let (tab_count, tab_w) = match self.windows.get(&window_id) {
             Some(tw) => {
                 let layout = TabBarLayout::compute(
                     tw.tabs.len(),
                     tw.window.inner_size().width as usize,
+                    sf,
                 );
                 (tw.tabs.len(), layout.tab_width)
             }
@@ -2051,13 +2190,13 @@ impl App {
 
         // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
         // Clamp to tab zone: can't go past the last tab slot (don't overlap + button)
-        let max_x = (TAB_LEFT_MARGIN as f64 + (tab_count - 1) as f64 * tab_wf) as f32;
+        let max_x = (left_margin + (tab_count - 1) as f64 * tab_wf) as f32;
         let dragged_x = ((position.x - mouse_offset_in_tab) as f32)
-            .clamp(TAB_LEFT_MARGIN as f32, max_x);
+            .clamp(left_margin as f32, max_x);
 
         // 2. Compute insertion index from cursor center
         let cursor_center = dragged_x as f64 + tab_wf / 2.0;
-        let new_idx = ((cursor_center - TAB_LEFT_MARGIN as f64) / tab_wf)
+        let new_idx = ((cursor_center - left_margin) / tab_wf)
             .clamp(0.0, (tab_count - 1) as f64) as usize;
 
         // 3. If index changed, swap tab and set animation offsets
@@ -2065,8 +2204,9 @@ impl App {
             if let Some(current_idx) = tw.tab_index(tab_id) {
                 if current_idx != new_idx {
                     // Compute old positions
+                    let lm = left_margin as usize;
                     let old_positions: Vec<f32> = (0..tab_count)
-                        .map(|i| (TAB_LEFT_MARGIN + i * tab_w) as f32)
+                        .map(|i| (lm + i * tab_w) as f32)
                         .collect();
 
                     // Swap
@@ -2089,7 +2229,7 @@ impl App {
                         if i == new_idx {
                             continue; // dragged tab — rendered at cursor, not at index
                         }
-                        let new_pos = (TAB_LEFT_MARGIN + i * tab_w) as f32;
+                        let new_pos = (lm + i * tab_w) as f32;
                         // Find where this tab was before the swap
                         let old_i = if current_idx < new_idx {
                             // Tab moved right → tabs in [current+1..=new] shifted left by 1
@@ -2162,10 +2302,11 @@ impl App {
             let size = tw.window.inner_size();
             let wx = pos.x as f64;
             let wy = pos.y as f64;
+            let tab_bar_h = TAB_BAR_HEIGHT as f64 * self.scale_factor;
             if screen_x >= wx
                 && screen_x < wx + size.width as f64
                 && screen_y >= wy
-                && screen_y < wy + TAB_BAR_HEIGHT as f64
+                && screen_y < wy + tab_bar_h
             {
                 return Some((wid, screen_x));
             }
@@ -2185,8 +2326,9 @@ impl App {
             .unwrap_or(0.0);
         let local_x = (screen_x - target_x) as usize;
         let layout =
-            TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize);
-        let tab_x = local_x.saturating_sub(TAB_LEFT_MARGIN);
+            TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+        let left_margin = (TAB_LEFT_MARGIN as f64 * self.scale_factor).round() as usize;
+        let tab_x = local_x.saturating_sub(left_margin);
         let raw = (tab_x + layout.tab_width / 2) / layout.tab_width.max(1);
         raw.min(tw.tabs.len())
     }
@@ -2198,7 +2340,8 @@ impl App {
             .map_or(0.0, |p| p.x as f64);
         let local_x = screen_x - target_x;
         let dragged_x = (local_x - mouse_off) as f32;
-        self.drag_visual_x = Some((target_wid, dragged_x.max(TAB_LEFT_MARGIN as f32)));
+        let left_margin = TAB_LEFT_MARGIN as f32 * self.scale_factor as f32;
+        self.drag_visual_x = Some((target_wid, dragged_x.max(left_margin)));
     }
 
     // --- Search helpers ---
@@ -2210,6 +2353,7 @@ impl App {
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             tab.search = Some(SearchState::new());
+            tab.grid_dirty = true;
         }
         self.search_active = Some(window_id);
         if let Some(tw) = self.windows.get(&window_id) {
@@ -2222,6 +2366,7 @@ impl App {
         if let Some(tid) = tab_id {
             if let Some(tab) = self.tabs.get_mut(&tid) {
                 tab.search = None;
+                tab.grid_dirty = true;
             }
         }
         self.search_active = None;
@@ -2292,6 +2437,7 @@ impl App {
             if let Some(mut search) = tab.search.take() {
                 search.update_query(tab.grid());
                 tab.search = Some(search);
+                tab.grid_dirty = true;
             }
         }
         self.scroll_to_search_match(tab_id);
@@ -2317,6 +2463,7 @@ impl App {
                     // Scroll so the match is roughly centered in the viewport
                     let center_offset = sb_len.saturating_sub(target_row).saturating_sub(lines / 2);
                     grid.display_offset = center_offset.min(sb_len);
+                    tab.grid_dirty = true;
                 }
             }
         }
@@ -2326,16 +2473,18 @@ impl App {
 
     /// Compute the dropdown menu rectangle (x, y, w, h) in the given window.
     fn dropdown_menu_rect(&self, window_id: WindowId) -> Option<(usize, usize, usize, usize)> {
+        let sf = self.scale_factor;
+        let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
         let tw = self.windows.get(&window_id)?;
         let tab_count = tw.tabs.len();
         let bar_w = tw.window.inner_size().width as usize;
-        let layout = TabBarLayout::compute(tab_count, bar_w);
-        let tabs_end = TAB_LEFT_MARGIN + tab_count * layout.tab_width;
-        let dropdown_x = tabs_end + NEW_TAB_BUTTON_WIDTH;
-        let menu_w: usize = 140;
-        let menu_h: usize = 32;
+        let layout = TabBarLayout::compute(tab_count, bar_w, sf);
+        let tabs_end = s(TAB_LEFT_MARGIN) + tab_count * layout.tab_width;
+        let dropdown_x = tabs_end + s(NEW_TAB_BUTTON_WIDTH);
+        let menu_w: usize = (140.0 * sf).round() as usize;
+        let menu_h: usize = (32.0 * sf).round() as usize;
         let menu_x = dropdown_x;
-        let menu_y = TAB_BAR_HEIGHT;
+        let menu_y = s(TAB_BAR_HEIGHT);
         Some((menu_x, menu_y, menu_w, menu_h))
     }
 
@@ -2380,7 +2529,8 @@ impl App {
             tw.window.request_redraw();
         }
         // Don't consume if the click is on tab bar buttons — let it propagate
-        y >= TAB_BAR_HEIGHT
+        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
+        y >= tab_bar_h
     }
 
     // --- Settings window ---
@@ -2588,6 +2738,12 @@ impl App {
 
         self.config = new_config;
 
+        // Mark everything dirty — config may affect both grid and tab bar.
+        self.tab_bar_dirty = true;
+        for tab in self.tabs.values_mut() {
+            tab.grid_dirty = true;
+        }
+
         // Redraw all windows
         for tw in self.windows.values() {
             tw.window.request_redraw();
@@ -2625,6 +2781,8 @@ impl ApplicationHandler<TermEvent> for App {
             TermEvent::PtyOutput(tab_id, data) => {
                 log(&format!("pty_output: tab={tab_id:?} len={}", data.len()));
 
+                self.cursor_blink_reset = Instant::now();
+
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
                 }
@@ -2637,6 +2795,7 @@ impl ApplicationHandler<TermEvent> for App {
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     if tab.bell_start.is_some() && !is_active {
                         tab.has_bell_badge = true;
+                        self.tab_bar_dirty = true;
                     }
                     // Drain pending notifications and log them.
                     for notif in tab.pending_notifications.drain(..) {
@@ -2812,6 +2971,9 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 // Any keyboard input to PTY — scroll to live and clear selection
+                if is_pressed {
+                    self.cursor_blink_reset = Instant::now();
+                }
                 let tab_id = self
                     .windows
                     .get(&window_id)
@@ -2820,6 +2982,9 @@ impl ApplicationHandler<TermEvent> for App {
                     // Scroll to live on press (not release).
                     if is_pressed {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
+                            if tab.grid().display_offset != 0 || tab.selection.is_some() {
+                                tab.grid_dirty = true;
+                            }
                             tab.grid_mut().display_offset = 0;
                             if tab.selection.is_some() {
                                 tab.selection = None;
@@ -2855,6 +3020,9 @@ impl ApplicationHandler<TermEvent> for App {
                 // Skip settings window — no PTY to send to
                 if self.is_settings_window(window_id) {
                     return;
+                }
+                if focused {
+                    self.cursor_blink_reset = Instant::now();
                 }
                 if let Some(tid) = self.windows.get(&window_id).and_then(TermWindow::active_tab_id) {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
@@ -2896,19 +3064,26 @@ fn apply_window_effects(window: &Window, wc: &config::WindowConfig) {
 
     #[cfg(target_os = "macos")]
     {
-        if let Err(e) = window_vibrancy::apply_vibrancy(
-            window,
-            window_vibrancy::NSVisualEffectMaterial::HudWindow,
-            None,
-            None,
-        ) {
-            log(&format!("vibrancy: macOS vibrancy failed: {e}"));
+        if wc.blur {
+            if let Err(e) = window_vibrancy::apply_vibrancy(
+                window,
+                window_vibrancy::NSVisualEffectMaterial::UnderWindowBackground,
+                None,
+                None,
+            ) {
+                log(&format!("vibrancy: macOS vibrancy failed: {e}"));
+            } else {
+                log("vibrancy: macOS UnderWindowBackground applied");
+            }
         }
     }
 
     #[cfg(target_os = "linux")]
     {
-        window.set_blur(true);
+        if wc.blur {
+            window.set_blur(true);
+            log("transparency: blur enabled on Linux");
+        }
     }
 }
 
