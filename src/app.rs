@@ -1661,10 +1661,10 @@ impl App {
                             if let Some((target_wid, _)) = self.drop_preview.take() {
                                 self.tab_anim_offsets.remove(&target_wid);
                                 // Preview active — tab is already in the
-                                // target window. Just finalize: close the
-                                // (hidden, empty) torn-off window.
-                                if let Some(tw) = self.windows.get(&target_wid) {
-                                    tw.window.request_redraw();
+                                // target window. Finalize: hide and close the
+                                // (empty) torn-off window, render target inline.
+                                if let Some(tw) = self.windows.get(&torn_wid) {
+                                    tw.window.set_visible(false);
                                 }
                                 let source_empty = self
                                     .windows
@@ -1673,6 +1673,8 @@ impl App {
                                 if source_empty {
                                     self.windows.remove(&torn_wid);
                                 }
+                                self.tab_bar_dirty = true;
+                                self.render_window(target_wid);
                             }
                             // No preview — torn-off window stays as-is.
                         }
@@ -2591,13 +2593,26 @@ impl App {
 
     /// Set pixel-tracking visual for a preview tab being dragged into a target window.
     fn set_preview_visual(&mut self, target_wid: WindowId, screen_x: f64, mouse_off: f64) {
+        let sf = self.scale_factor as f32;
         let target_x = self.windows.get(&target_wid)
             .and_then(|tw| tw.window.outer_position().ok())
             .map_or(0.0, |p| p.x as f64);
         let local_x = screen_x - target_x;
         let dragged_x = (local_x - mouse_off) as f32;
-        let left_margin = TAB_LEFT_MARGIN as f32 * self.scale_factor as f32;
-        self.drag_visual_x = Some((target_wid, dragged_x.max(left_margin)));
+        let left_margin = TAB_LEFT_MARGIN as f32 * sf;
+        // Clamp to same bounds as update_drag_in_bar
+        let (window_w, tab_wf) = self.windows.get(&target_wid).map_or((0.0, 0.0), |tw| {
+            let layout = TabBarLayout::compute(
+                tw.tabs.len(), tw.window.inner_size().width as usize,
+                sf as f64, None,
+            );
+            (tw.window.inner_size().width as f32, layout.tab_width as f32)
+        });
+        let controls_w = CONTROLS_ZONE_WIDTH as f32 * sf;
+        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * sf;
+        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * sf;
+        let max_x = window_w - controls_w - new_tab_w - dropdown_w - tab_wf;
+        self.drag_visual_x = Some((target_wid, dragged_x.clamp(left_margin, max_x)));
     }
 
     // --- Search helpers ---
