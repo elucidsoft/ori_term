@@ -24,6 +24,8 @@ pub struct Grid {
     pub scrollback: VecDeque<Row>,
     pub max_scrollback: usize,
     pub display_offset: usize,
+    /// Total number of rows evicted from scrollback (for absolute row tracking).
+    pub total_evicted: usize,
 }
 
 impl Grid {
@@ -47,6 +49,7 @@ impl Grid {
             scrollback: VecDeque::new(),
             max_scrollback,
             display_offset: 0,
+            total_evicted: 0,
         }
     }
 
@@ -267,6 +270,7 @@ impl Grid {
             if top == 0 {
                 if self.scrollback.len() >= self.max_scrollback {
                     self.scrollback.pop_front();
+                    self.total_evicted += 1;
                     // If we evicted from scrollback while user is scrolled up,
                     // reduce offset so they don't drift past the top
                     if self.display_offset > 0 {
@@ -680,6 +684,11 @@ impl Grid {
         let mut out_col = 0usize;
 
         for (src_idx, src_row) in all_rows.iter().enumerate() {
+            // Transfer prompt_start flag to the current output row.
+            if src_row.prompt_start {
+                out_row.prompt_start = true;
+            }
+
             // A row is wrapped if WRAPLINE is set at the old column boundary
             let wrapped = old_cols > 0
                 && src_row.len() >= old_cols

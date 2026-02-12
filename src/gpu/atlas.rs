@@ -24,6 +24,7 @@ pub struct GlyphMetrics {
     pub height: usize,
     pub xmin: i32,
     pub ymin: i32,
+    pub advance_width: f32,
 }
 
 /// Row-packed glyph texture atlas.
@@ -96,6 +97,7 @@ impl GlyphAtlas {
                     height: metrics.height,
                     xmin: metrics.xmin,
                     ymin: metrics.ymin,
+                    advance_width: metrics.advance_width,
                 };
                 self.insert(key, &glyph_metrics, bitmap, queue);
             } else {
@@ -110,6 +112,7 @@ impl GlyphAtlas {
                             height: 0,
                             xmin: 0,
                             ymin: 0,
+                            advance_width: 0.0,
                         },
                     },
                 );

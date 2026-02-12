@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,8 @@ pub struct App {
     /// Deferred redraw requests: coalesces multiple PTY events into one
     /// `request_redraw()` per window, drained in `about_to_wait`.
     pending_redraw: HashSet<WindowId>,
+    /// Path to written shell integration scripts (None when disabled).
+    shell_integration_dir: Option<PathBuf>,
 }
 
 impl App {
@@ -131,7 +134,9 @@ impl App {
 
         let t0 = Instant::now();
         let glyphs = FontSet::load(config.font.size, config.font.family.as_deref());
-        let ui_glyphs = glyphs.resize(glyphs.size * UI_FONT_SCALE);
+        let ui_size = glyphs.size * UI_FONT_SCALE;
+        let ui_glyphs = FontSet::load_ui(ui_size)
+            .unwrap_or_else(|| glyphs.resize(ui_size));
         log(&format!(
             "font loaded: cell={}x{}, baseline={}, size={} (ui: {}) ({:.1}ms)",
             glyphs.cell_width, glyphs.cell_height, glyphs.baseline, glyphs.size, ui_glyphs.size,
@@ -151,6 +156,22 @@ impl App {
         log(&format!("event loop created: {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0));
 
         let config_monitor = ConfigMonitor::new(proxy.clone());
+
+        let shell_integration_dir = if config.behavior.shell_integration {
+            match crate::shell_integration::ensure_scripts_on_disk(&config::config_dir()) {
+                Ok(dir) => {
+                    log(&format!("shell_integration: scripts written to {}", dir.display()));
+                    Some(dir)
+                }
+                Err(e) => {
+                    log(&format!("shell_integration: failed to write scripts: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         log(&format!("pre-event-loop total: {:.1}ms", startup.elapsed().as_secs_f64() * 1000.0));
 
         let mut app = Self {
@@ -192,6 +213,7 @@ impl App {
             tab_bar_dirty: true,
             prev_cursor_visible: true,
             pending_redraw: HashSet::new(),
+            shell_integration_dir,
         };
 
         event_loop.run_app(&mut app)?;
@@ -230,7 +252,7 @@ impl App {
     fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
         let new_size = self.glyphs.size + delta * self.scale_factor as f32;
         self.glyphs = self.glyphs.resize(new_size);
-        self.ui_glyphs = self.glyphs.resize(new_size * UI_FONT_SCALE);
+        self.ui_glyphs = self.ui_glyphs.resize(new_size * UI_FONT_SCALE);
         log(&format!(
             "font resize: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -245,7 +267,7 @@ impl App {
     fn reset_font_size(&mut self, window_id: WindowId) {
         let scaled_size = self.config.font.size * self.scale_factor as f32;
         self.glyphs = self.glyphs.resize(scaled_size);
-        self.ui_glyphs = self.glyphs.resize(scaled_size * UI_FONT_SCALE);
+        self.ui_glyphs = self.ui_glyphs.resize(scaled_size * UI_FONT_SCALE);
         log(&format!(
             "font reset: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -433,6 +455,73 @@ impl App {
             Action::OpenSearch => {
                 self.open_search(window_id);
             }
+            Action::PreviousPrompt => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid = tab.grid_mut();
+                        let sb_len = grid.scrollback.len();
+                        // Current top of viewport as scrollback index.
+                        let viewport_top_sb = sb_len.saturating_sub(grid.display_offset);
+                        // Scan scrollback rows backwards from just above viewport top.
+                        let mut target_sb = None;
+                        for i in (0..viewport_top_sb).rev() {
+                            if grid.scrollback[i].prompt_start {
+                                target_sb = Some(i);
+                                break;
+                            }
+                        }
+                        if let Some(sb_idx) = target_sb {
+                            grid.display_offset = sb_len.saturating_sub(sb_idx);
+                            tab.grid_dirty = true;
+                        }
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
+            Action::NextPrompt => {
+                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                if let Some(tid) = tab_id {
+                    if let Some(tab) = self.tabs.get_mut(&tid) {
+                        let grid = tab.grid_mut();
+                        let sb_len = grid.scrollback.len();
+                        // Current bottom of viewport as scrollback index.
+                        let viewport_bottom_sb = sb_len
+                            .saturating_sub(grid.display_offset)
+                            + grid.lines;
+                        // Scan scrollback + visible rows forward from below viewport.
+                        let total_rows = sb_len + grid.lines;
+                        let mut target_sb = None;
+                        for i in viewport_bottom_sb..total_rows {
+                            let has_prompt = if i < sb_len {
+                                grid.scrollback[i].prompt_start
+                            } else {
+                                grid.row(i - sb_len).prompt_start
+                            };
+                            if has_prompt {
+                                target_sb = Some(i);
+                                break;
+                            }
+                        }
+                        if let Some(idx) = target_sb {
+                            if idx < sb_len {
+                                grid.display_offset = sb_len.saturating_sub(idx);
+                            } else {
+                                grid.display_offset = 0;
+                            }
+                        } else {
+                            // No prompt below — scroll to live.
+                            grid.display_offset = 0;
+                        }
+                        tab.grid_dirty = true;
+                    }
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
+            }
             Action::SendText(text) => {
                 let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
@@ -502,7 +591,7 @@ impl App {
             let expected_size = self.config.font.size * initial_scale as f32;
             if (self.glyphs.size - expected_size).abs() > 0.1 {
                 self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
-                self.ui_glyphs = self.glyphs.resize(expected_size * UI_FONT_SCALE);
+                self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
                 log(&format!(
                     "HiDPI: scale={initial_scale:.2}, font reloaded at size={expected_size}"
                 ));
@@ -589,6 +678,12 @@ impl App {
                 self.grid_dims_for_size(size.width, size.height)
             });
 
+        // Inherit CWD from the active tab in this window.
+        let inherit_cwd: Option<String> = self.windows.get(&window_id)
+            .and_then(TermWindow::active_tab_id)
+            .and_then(|tid| self.tabs.get(&tid))
+            .and_then(|t| t.cwd.clone());
+
         let tab_id = self.alloc_tab_id();
         let cursor_shape = config::parse_cursor_style(&self.config.terminal.cursor_style);
         let tab = match Tab::spawn(
@@ -599,6 +694,8 @@ impl App {
             self.config.terminal.shell.as_deref(),
             self.config.terminal.scrollback,
             cursor_shape,
+            self.shell_integration_dir.as_deref(),
+            inherit_cwd.as_deref(),
         ) {
             Ok(t) => t,
             Err(e) => {
@@ -740,7 +837,7 @@ impl App {
                 .map(|id| {
                     let title = self
                         .tabs
-                        .get(id).map_or_else(|| "?".to_string(), |t| t.title.clone());
+                        .get(id).map_or_else(|| "?".to_string(), Tab::effective_title);
                     (*id, title)
                 })
                 .collect();
@@ -993,7 +1090,7 @@ impl App {
         let expected_size = self.config.font.size * self.scale_factor as f32;
         if (self.glyphs.size - expected_size).abs() > 0.1 {
             self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
-            self.ui_glyphs = self.glyphs.resize(expected_size * UI_FONT_SCALE);
+            self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
             if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
                 renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
             }
@@ -2692,7 +2789,7 @@ impl App {
         if font_changed {
             let scaled_size = new_config.font.size * self.scale_factor as f32;
             self.glyphs = FontSet::load(scaled_size, new_config.font.family.as_deref());
-            self.ui_glyphs = self.glyphs.resize(scaled_size * UI_FONT_SCALE);
+            self.ui_glyphs = self.ui_glyphs.resize(scaled_size * UI_FONT_SCALE);
             log(&format!(
                 "config reload: font size={}, cell={}x{}",
                 self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
@@ -2766,7 +2863,7 @@ impl ApplicationHandler<TermEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: TermEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TermEvent) {
         match event {
             TermEvent::PtyOutput(tab_id, data) => {
                 log(&format!("pty_output: tab={tab_id:?} len={}", data.len()));
@@ -2809,6 +2906,10 @@ impl ApplicationHandler<TermEvent> for App {
                         }
                     }
                 }
+            }
+            TermEvent::PtyExited(tab_id) => {
+                log(&format!("pty_exited: tab={tab_id:?}"));
+                self.close_tab(tab_id, event_loop);
             }
             TermEvent::ConfigReload => {
                 self.apply_config_reload();

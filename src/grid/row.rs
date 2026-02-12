@@ -6,6 +6,8 @@ use crate::cell::{Cell, CellFlags};
 pub struct Row {
     inner: Vec<Cell>,
     pub occ: usize,
+    /// True if this row is the start of a shell prompt (OSC 133;A).
+    pub prompt_start: bool,
 }
 
 impl Row {
@@ -13,6 +15,7 @@ impl Row {
         Self {
             inner: vec![Cell::default(); cols],
             occ: 0,
+            prompt_start: false,
         }
     }
 

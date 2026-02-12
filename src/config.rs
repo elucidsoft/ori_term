@@ -92,6 +92,7 @@ pub struct WindowConfig {
 pub struct BehaviorConfig {
     pub copy_on_select: bool,
     pub bold_is_bright: bool,
+    pub shell_integration: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,6 +183,7 @@ impl Default for BehaviorConfig {
         Self {
             copy_on_select: true,
             bold_is_bright: true,
+            shell_integration: true,
         }
     }
 }

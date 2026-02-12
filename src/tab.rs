@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::Path;
 use std::thread;
 use std::time::Instant;
 
@@ -11,6 +12,7 @@ use crate::log;
 use crate::palette::Palette;
 use crate::search::SearchState;
 use crate::selection::Selection;
+use crate::shell_integration;
 use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
 
@@ -76,6 +78,9 @@ struct RawInterceptor<'a> {
     cwd: &'a mut Option<String>,
     prompt_state: &'a mut PromptState,
     pending_notifications: &'a mut Vec<Notification>,
+    prompt_mark_pending: &'a mut bool,
+    has_explicit_title: &'a mut bool,
+    suppress_title: &'a mut bool,
 }
 
 impl Perform for RawInterceptor<'_> {
@@ -102,6 +107,10 @@ impl Perform for RawInterceptor<'_> {
                         });
                     if !path.is_empty() {
                         *self.cwd = Some(path.to_owned());
+                        // CWD-based title should override ConPTY's auto-generated
+                        // process title (e.g. C:\WINDOWS\system32\wsl.exe).
+                        *self.has_explicit_title = false;
+                        *self.suppress_title = false;
                     }
                 }
             }
@@ -110,7 +119,11 @@ impl Perform for RawInterceptor<'_> {
             b"133" => {
                 if params.len() >= 2 && !params[1].is_empty() {
                     match params[1][0] {
-                        b'A' => *self.prompt_state = PromptState::PromptStart,
+                        b'A' => {
+                            *self.prompt_state = PromptState::PromptStart;
+                            *self.prompt_mark_pending = true;
+                            *self.suppress_title = false;
+                        }
                         b'B' => *self.prompt_state = PromptState::CommandStart,
                         b'C' => *self.prompt_state = PromptState::OutputStart,
                         b'D' => *self.prompt_state = PromptState::None,
@@ -171,6 +184,7 @@ impl Perform for RawInterceptor<'_> {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct Tab {
     pub id: TabId,
     primary_grid: Grid,
@@ -202,11 +216,19 @@ pub struct Tab {
     pub pending_notifications: Vec<Notification>,
     /// True when the grid content has changed and needs a GPU rebuild.
     pub grid_dirty: bool,
+    /// True when OSC 0/2 explicitly set the title (suppresses CWD-based title).
+    pub has_explicit_title: bool,
+    /// Set by `RawInterceptor` when OSC 133;A is received; consumed after processing.
+    prompt_mark_pending: bool,
+    /// Suppress OSC 0/2 title changes until the shell sends CWD or prompt markers.
+    /// Prevents `ConPTY`'s auto-generated process-path title from flashing.
+    pub suppress_title: bool,
 }
 
 #[derive(Debug)]
 pub enum TermEvent {
     PtyOutput(TabId, Vec<u8>),
+    PtyExited(TabId),
     ConfigReload,
 }
 
@@ -219,6 +241,8 @@ impl Tab {
         shell: Option<&str>,
         max_scrollback: usize,
         initial_cursor_shape: CursorShape,
+        integration_dir: Option<&Path>,
+        cwd: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         log(&format!("Tab::spawn start for {:?}", id));
 
@@ -231,8 +255,38 @@ impl Tab {
         })?;
         log("  pty opened");
 
-        let shell_program = shell.map_or_else(Self::default_shell, String::from);
-        let cmd = portable_pty::CommandBuilder::new(&shell_program);
+        let shell_line = shell.map_or_else(Self::default_shell, String::from);
+        let mut parts = shell_line.split_whitespace();
+        let shell_program = parts.next().unwrap_or("sh").to_owned();
+        let shell_args: Vec<&str> = parts.collect();
+        let mut cmd = portable_pty::CommandBuilder::new(&shell_program);
+        for &arg in &shell_args {
+            cmd.arg(arg);
+        }
+
+        let detected_shell = integration_dir
+            .and_then(|_| shell_integration::detect_shell(&shell_program));
+
+        // For WSL, CWD is passed via --cd (Linux paths don't work as Windows CWD).
+        // For native shells, use cmd.cwd().
+        let is_wsl = detected_shell == Some(shell_integration::Shell::Wsl);
+        if let Some(dir) = cwd {
+            if !is_wsl {
+                cmd.cwd(dir);
+            }
+        }
+
+        if let Some(integ_dir) = integration_dir {
+            if let Some(shell_type) = detected_shell {
+                let extra_arg = shell_integration::setup_injection(
+                    &mut cmd, shell_type, integ_dir, cwd,
+                );
+                if let Some(arg) = extra_arg {
+                    cmd.arg(arg);
+                }
+            }
+        }
+
         let child = pair.slave.spawn_command(cmd)?;
         log(&format!("  {} spawned", shell_program));
         drop(pair.slave);
@@ -240,6 +294,10 @@ impl Tab {
         let mut reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         log("  reader/writer ready");
+
+        // On Windows, clone proxy for the child waiter thread (see below).
+        #[cfg(target_os = "windows")]
+        let wait_proxy = proxy.clone();
 
         let tab_id = id;
         thread::spawn(move || {
@@ -249,10 +307,12 @@ impl Tab {
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         log(&format!("reader: eof for tab {:?}", tab_id));
+                        let _ = proxy.send_event(TermEvent::PtyExited(tab_id));
                         break;
                     }
                     Err(e) => {
                         log(&format!("reader error for tab {:?}: {e}", tab_id));
+                        let _ = proxy.send_event(TermEvent::PtyExited(tab_id));
                         break;
                     }
                     Ok(n) => {
@@ -262,6 +322,45 @@ impl Tab {
             }
         });
 
+        // Windows/ConPTY doesn't reliably deliver EOF to the reader when
+        // the child exits, so we wait on the process handle directly
+        // (like Alacritty, WezTerm, and Ghostty all do).
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(pid) = child.process_id() {
+                let wait_id = id;
+                thread::spawn(move || {
+                    use windows_sys::Win32::System::Threading::{
+                        OpenProcess, WaitForSingleObject, INFINITE,
+                    };
+                    use windows_sys::Win32::Foundation::CloseHandle;
+                    const SYNCHRONIZE: u32 = 0x0010_0000;
+
+                    log(&format!("child waiter thread started for tab {:?} (pid {})", wait_id, pid));
+                    #[allow(unsafe_code)]
+                    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+                    if !handle.is_null() {
+                        #[allow(unsafe_code)]
+                        unsafe { WaitForSingleObject(handle, INFINITE) };
+                        #[allow(unsafe_code)]
+                        unsafe { CloseHandle(handle) };
+                        log(&format!("child exited (waiter) for tab {:?}", wait_id));
+                        let _ = wait_proxy.send_event(TermEvent::PtyExited(wait_id));
+                    }
+                });
+            }
+        }
+
+        // Derive a good initial title. For WSL, use the distro name.
+        let initial_title = if is_wsl {
+            shell_args.iter()
+                .zip(shell_args.iter().skip(1))
+                .find(|&(&flag, _)| flag == "-d" || flag == "--distribution")
+                .map_or_else(|| "WSL".to_owned(), |(_, &name)| name.to_owned())
+        } else {
+            format!("Tab {}", id.0)
+        };
+
         log(&format!("Tab::spawn done for {:?}", id));
         Ok(Self {
             id,
@@ -270,7 +369,7 @@ impl Tab {
             active_is_alt: false,
             pty_writer: Some(writer),
             processor: vte::ansi::Processor::new(),
-            title: format!("Tab {}", id.0),
+            title: initial_title,
             palette: Palette::new(),
             mode: TermMode::default(),
             cursor_shape: initial_cursor_shape,
@@ -290,6 +389,9 @@ impl Tab {
             has_bell_badge: false,
             pending_notifications: Vec::new(),
             grid_dirty: true,
+            has_explicit_title: false,
+            prompt_mark_pending: false,
+            suppress_title: is_wsl,
         })
     }
 
@@ -332,6 +434,9 @@ impl Tab {
             cwd: &mut self.cwd,
             prompt_state: &mut self.prompt_state,
             pending_notifications: &mut self.pending_notifications,
+            prompt_mark_pending: &mut self.prompt_mark_pending,
+            has_explicit_title: &mut self.has_explicit_title,
+            suppress_title: &mut self.suppress_title,
         };
         self.raw_parser.advance(&mut interceptor, data);
 
@@ -351,8 +456,17 @@ impl Tab {
             &mut self.keyboard_mode_stack,
             &mut self.inactive_keyboard_mode_stack,
             &mut self.bell_start,
+            &mut self.has_explicit_title,
+            &mut self.suppress_title,
         );
         self.processor.advance(&mut handler, data);
+
+        // Mark the cursor row as a prompt start after both parsers have updated.
+        if self.prompt_mark_pending {
+            self.prompt_mark_pending = false;
+            let row = self.grid().cursor.row;
+            self.grid_mut().row_mut(row).prompt_start = true;
+        }
     }
 
     pub fn send_pty(&mut self, data: &[u8]) {
@@ -378,4 +492,46 @@ impl Tab {
             pixel_height,
         });
     }
+
+    /// Return the display title for the tab bar. If the shell explicitly set a
+    /// title via OSC 0/2, use that. Otherwise derive a short path from CWD.
+    pub fn effective_title(&self) -> String {
+        if self.has_explicit_title {
+            return self.title.clone();
+        }
+        if let Some(ref cwd) = self.cwd {
+            return short_path(cwd);
+        }
+        self.title.clone()
+    }
+}
+
+/// Shorten a path for tab bar display: `~` for home, last component otherwise.
+fn short_path(path: &str) -> String {
+    // Try to replace home directory with ~.
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = path.strip_prefix(&home) {
+            let relative = if rest.is_empty() { "" } else { rest.trim_start_matches('/') };
+            if relative.is_empty() {
+                return "~".to_owned();
+            }
+            return format!("~/{relative}");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if let Some(rest) = path.strip_prefix(&profile) {
+            let relative = if rest.is_empty() { "" } else { rest.trim_start_matches('\\').trim_start_matches('/') };
+            if relative.is_empty() {
+                return "~".to_owned();
+            }
+            return format!("~\\{relative}");
+        }
+    }
+    // Fall back to last path component.
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_owned()
 }

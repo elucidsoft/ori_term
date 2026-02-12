@@ -1,0 +1,38 @@
+# oriterm shell integration for zsh.
+# Emits OSC 133 prompt markers and OSC 7 CWD reporting.
+
+# Guard: only run in interactive shells, only run once.
+[[ -o interactive ]] || return
+(( ${ORITERM_ZSH_INTEGRATION_LOADED:-0} )) && return
+ORITERM_ZSH_INTEGRATION_LOADED=1
+
+# --- OSC 7: Report CWD ---
+__oriterm_osc7() {
+    printf '\e]7;file://%s%s\a' "${HOST:-$(hostname)}" "$PWD"
+}
+
+# --- OSC 133: Prompt markers ---
+__oriterm_precmd() {
+    local exit_status="$?"
+    # D — end of previous command output (with exit code)
+    printf '\e]133;D;%s\a' "$exit_status"
+    # Report CWD
+    __oriterm_osc7
+    # A — prompt start
+    printf '\e]133;A\a'
+}
+
+__oriterm_preexec() {
+    # C — output start (command is about to run)
+    printf '\e]133;C\a'
+}
+
+# Register hooks using zsh hook arrays.
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd __oriterm_precmd
+add-zsh-hook preexec __oriterm_preexec
+
+# Emit B marker after prompt renders via PS1 suffix.
+if [[ -z "$ORITERM_NO_PS1_SUFFIX" ]]; then
+    PS1="${PS1:-%%  }%{$(printf '\e]133;B\a')%}"
+fi

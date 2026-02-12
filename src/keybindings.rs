@@ -33,6 +33,10 @@ pub enum Action {
     ScrollToBottom,
     OpenSearch,
     ReloadConfig,
+    /// Navigate to previous prompt mark (OSC 133;A).
+    PreviousPrompt,
+    /// Navigate to next prompt mark (OSC 133;A).
+    NextPrompt,
     /// Send literal bytes to the PTY.
     SendText(String),
     /// Explicitly unbinds a default binding.
@@ -90,6 +94,9 @@ pub fn default_bindings() -> Vec<KeyBinding> {
         KeyBinding { key: named(NamedKey::PageDown), mods: shift, action: Action::ScrollPageDown },
         KeyBinding { key: named(NamedKey::Home), mods: shift, action: Action::ScrollToTop },
         KeyBinding { key: named(NamedKey::End), mods: shift, action: Action::ScrollToBottom },
+        // Prompt navigation
+        KeyBinding { key: named(NamedKey::ArrowUp), mods: ctrl_shift, action: Action::PreviousPrompt },
+        KeyBinding { key: named(NamedKey::ArrowDown), mods: ctrl_shift, action: Action::NextPrompt },
         // Smart copy/paste (Ctrl+C/V without Shift) — must come AFTER
         // Ctrl+Shift variants so those match first.
         KeyBinding { key: ch("c"), mods: ctrl, action: Action::SmartCopy },
@@ -173,6 +180,10 @@ pub fn parse_key(s: &str) -> Option<BindingKey> {
         "Enter" => Some(NamedKey::Enter),
         "Backspace" => Some(NamedKey::Backspace),
         "Space" => Some(NamedKey::Space),
+        "ArrowUp" => Some(NamedKey::ArrowUp),
+        "ArrowDown" => Some(NamedKey::ArrowDown),
+        "ArrowLeft" => Some(NamedKey::ArrowLeft),
+        "ArrowRight" => Some(NamedKey::ArrowRight),
         "F1" => Some(NamedKey::F1),
         "F2" => Some(NamedKey::F2),
         "F3" => Some(NamedKey::F3),
@@ -260,6 +271,8 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "ScrollToBottom" => Action::ScrollToBottom,
         "OpenSearch" => Action::OpenSearch,
         "ReloadConfig" => Action::ReloadConfig,
+        "PreviousPrompt" => Action::PreviousPrompt,
+        "NextPrompt" => Action::NextPrompt,
         "None" => Action::None,
         _ => return None,
     })

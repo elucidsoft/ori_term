@@ -983,7 +983,6 @@ impl GpuRenderer {
         let layout = TabBarLayout::compute(tab_count, params.width as usize, s as f64);
         let tab_w = layout.tab_width;
 
-        let cell_w = glyphs.cell_width;
         let cell_h = glyphs.cell_height;
 
         let dragged_idx = params.dragged_tab.map(|(idx, _)| idx);
@@ -1026,7 +1025,7 @@ impl GpuRenderer {
             }
 
             self.render_tab_content(
-                bg, fg, x0, tab_w, cell_w, cell_h, title,
+                bg, fg, x0, tab_w, cell_h, title,
                 tc.inactive_text, &tc, i, params, glyphs, queue,
             );
         }
@@ -1041,7 +1040,7 @@ impl GpuRenderer {
                 bg.push_rounded_rect(x0, top, tab_wf, tab_h, tc.active_bg, 8.0 * s);
 
                 self.render_tab_content(
-                    bg, fg, x0, tab_w, cell_w, cell_h, title,
+                    bg, fg, x0, tab_w, cell_h, title,
                     tc.text_fg, &tc, params.active_tab, params, glyphs, queue,
                 );
             }
@@ -1056,7 +1055,8 @@ impl GpuRenderer {
         let plus_hovered = params.hover_hit == TabBarHit::NewTab;
         let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
         bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
-        let plus_text_x = plus_x + (new_tab_w - cell_w as f32) / 2.0;
+        let plus_glyph_w = glyphs.char_advance('+');
+        let plus_text_x = plus_x + (new_tab_w - plus_glyph_w) / 2.0;
         let plus_text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(fg, "+", plus_text_x, plus_text_y, tc.text_fg, glyphs, queue);
 
@@ -1070,7 +1070,8 @@ impl GpuRenderer {
             tc.bar_bg
         };
         bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
-        let dd_text_x = dropdown_x + (dropdown_w - cell_w as f32) / 2.0;
+        let dd_glyph_w = glyphs.char_advance('\u{25BE}');
+        let dd_text_x = dropdown_x + (dropdown_w - dd_glyph_w) / 2.0;
         let dd_text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(
             fg, "\u{25BE}", dd_text_x, dd_text_y, tc.text_fg, glyphs, queue,
@@ -1090,7 +1091,6 @@ impl GpuRenderer {
         fg: &mut InstanceWriter,
         x0: f32,
         tab_w: usize,
-        cell_w: usize,
         cell_h: usize,
         title: &str,
         text_fg: [f32; 4],
@@ -1106,15 +1106,9 @@ impl GpuRenderer {
         let tab_padding = (TAB_PADDING as f32 * s) as usize;
         let close_btn_w = (CLOSE_BUTTON_WIDTH as f32 * s) as usize;
 
-        // Title text
-        let max_text_chars = (tab_w - tab_padding * 2 - close_btn_w) / cell_w.max(1);
-        let display_title: String = if title.len() > max_text_chars {
-            let mut t: String = title.chars().take(max_text_chars.saturating_sub(1)).collect();
-            t.push('\u{2026}');
-            t
-        } else {
-            title.to_string()
-        };
+        // Title text — only truncated if it overflows the available space
+        let max_text_px = (tab_w - tab_padding * 2 - close_btn_w) as f32;
+        let display_title = glyphs.truncate_to_pixel_width(title, max_text_px);
 
         let text_x = x0 + tab_padding as f32;
         let text_y = top + (tab_h - cell_h as f32) / 2.0;
@@ -1134,7 +1128,8 @@ impl GpuRenderer {
             );
         }
         let close_fg = if close_hovered { tc.text_fg } else { tc.close_fg };
-        let close_text_x = close_x + (close_btn_wf - cell_w as f32) / 2.0;
+        let close_glyph_w = glyphs.char_advance('\u{00D7}');
+        let close_text_x = close_x + (close_btn_wf - close_glyph_w) / 2.0;
         let close_text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(
             fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
@@ -1348,7 +1343,6 @@ impl GpuRenderer {
         let layout = TabBarLayout::compute(params.tab_info.len(), params.width as usize, s as f64);
         let tab_w = layout.tab_width;
         let tab_wf = tab_w as f32;
-        let cell_w = glyphs.cell_width;
         let cell_h = glyphs.cell_height;
         let top = TAB_TOP_MARGIN as f32 * s;
         let tab_h = TAB_BAR_HEIGHT as f32 * s - top;
@@ -1360,7 +1354,7 @@ impl GpuRenderer {
 
         // Tab content (text + close button)
         self.render_tab_content(
-            bg, fg, drag_x, tab_w, cell_w, cell_h, title,
+            bg, fg, drag_x, tab_w, cell_h, title,
             tc.text_fg, &tc, drag_idx, params, glyphs, queue,
         );
     }
@@ -1434,7 +1428,6 @@ impl GpuRenderer {
         let w = params.width as f32;
         let h = params.height as f32;
         let cell_h = glyphs.cell_height;
-        let cell_w = glyphs.cell_width;
 
         let bar_h = cell_h as f32 + 12.0 * sc; // cell height + padding
         let bar_y = h - bar_h;
@@ -1456,13 +1449,13 @@ impl GpuRenderer {
         self.push_text_instances(fg, prefix, prefix_x, text_y, tc.inactive_text, glyphs, queue);
 
         // Query text
-        let query_x = prefix_x + (prefix.len() * cell_w) as f32;
+        let query_x = prefix_x + glyphs.text_advance(prefix);
         if !search.query.is_empty() {
             self.push_text_instances(fg, &search.query, query_x, text_y, tc.text_fg, glyphs, queue);
         }
 
         // Cursor (blinking rect after query text)
-        let cursor_x = query_x + (search.query.chars().count() * cell_w) as f32;
+        let cursor_x = query_x + glyphs.text_advance(&search.query);
         bg.push_rect(cursor_x, text_y, 2.0 * sc, cell_h as f32, tc.text_fg);
 
         // Match count on the right
@@ -1477,7 +1470,7 @@ impl GpuRenderer {
         };
 
         if !count_text.is_empty() {
-            let count_w = (count_text.len() * cell_w) as f32;
+            let count_w = glyphs.text_advance(&count_text);
             let count_x = w - count_w - 12.0 * sc;
             self.push_text_instances(fg, &count_text, count_x, text_y, tc.inactive_text, glyphs, queue);
         }
@@ -1834,7 +1827,6 @@ impl GpuRenderer {
         bg.push_rect(w - 1.0, 0.0, 1.0, h, border_c);
 
         let cell_h = glyphs.cell_height;
-        let cell_w = glyphs.cell_width;
 
         // Title "Theme"
         let title_y = (50.0 - cell_h as f32) / 2.0;
@@ -1843,7 +1835,8 @@ impl GpuRenderer {
         );
 
         // Close button "×" in top-right
-        let close_x = w - 30.0 + (30.0 - cell_w as f32) / 2.0;
+        let close_glyph_w = glyphs.char_advance('\u{00D7}');
+        let close_x = w - 30.0 + (30.0 - close_glyph_w) / 2.0;
         let close_y = (30.0 - cell_h as f32) / 2.0;
         self.push_text_instances(
             &mut fg, "\u{00D7}", close_x, close_y, row_fg, glyphs, &gpu.queue,
@@ -2000,7 +1993,6 @@ impl GpuRenderer {
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) {
-        let cw = glyphs.cell_width;
         let baseline = glyphs.baseline;
         let mut cx = x;
 
@@ -2008,6 +2000,8 @@ impl GpuRenderer {
             let entry =
                 self.atlas
                     .get_or_insert(ch, FontStyle::Regular, glyphs, queue);
+
+            let advance = entry.metrics.advance_width.ceil();
 
             if entry.metrics.width > 0 && entry.metrics.height > 0 {
                 // Round to pixel boundaries — with nearest-neighbor sampling,
@@ -2028,7 +2022,7 @@ impl GpuRenderer {
                 );
             }
 
-            cx += cw as f32;
+            cx += advance;
         }
     }
 }

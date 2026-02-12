@@ -46,6 +46,8 @@ pub struct TermHandler<'a> {
     keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
     inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
     bell_start: &'a mut Option<Instant>,
+    has_explicit_title: &'a mut bool,
+    suppress_title: &'a mut bool,
 }
 
 impl<'a> TermHandler<'a> {
@@ -65,6 +67,8 @@ impl<'a> TermHandler<'a> {
         keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
         inactive_keyboard_mode_stack: &'a mut Vec<KeyboardModes>,
         bell_start: &'a mut Option<Instant>,
+        has_explicit_title: &'a mut bool,
+        suppress_title: &'a mut bool,
     ) -> Self {
         Self {
             grid,
@@ -81,6 +85,8 @@ impl<'a> TermHandler<'a> {
             keyboard_mode_stack,
             inactive_keyboard_mode_stack,
             bell_start,
+            has_explicit_title,
+            suppress_title,
         }
     }
 
@@ -462,8 +468,12 @@ impl Handler for TermHandler<'_> {
     }
 
     fn set_title(&mut self, title: Option<String>) {
+        if *self.suppress_title {
+            return;
+        }
         if let Some(t) = title {
             *self.title = t;
+            *self.has_explicit_title = true;
         }
     }
 

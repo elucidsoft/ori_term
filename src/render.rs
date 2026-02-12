@@ -144,6 +144,68 @@ const DWRITE_FALLBACK_FAMILIES: &[&str] = &[
     "Segoe UI",
 ];
 
+/// UI font family names to try on Windows (proportional).
+#[cfg(target_os = "windows")]
+const DWRITE_UI_FAMILIES: &[&str] = &[
+    "Segoe UI",
+    "Tahoma",
+    "Arial",
+];
+
+/// Detect the OS system UI font family name.
+///
+/// On Windows, queries `SystemParametersInfo(SPI_GETNONCLIENTMETRICS)` to get
+/// the message font (used for dialogs and general UI text).
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+fn detect_system_ui_font_name() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETNONCLIENTMETRICS, NONCLIENTMETRICSW,
+    };
+
+    // SAFETY: We pass a properly sized and zeroed NONCLIENTMETRICSW buffer to
+    // SystemParametersInfoW, which is a standard Win32 API call that fills the
+    // struct with system font metrics.
+    let mut metrics = unsafe { std::mem::zeroed::<NONCLIENTMETRICSW>() };
+    metrics.cbSize = size_of::<NONCLIENTMETRICSW>() as u32;
+
+    let success = unsafe {
+        SystemParametersInfoW(
+            SPI_GETNONCLIENTMETRICS,
+            metrics.cbSize,
+            (&raw mut metrics).cast::<std::ffi::c_void>(),
+            0,
+        )
+    };
+
+    if success == 0 {
+        return None;
+    }
+
+    // lfMessageFont is the font used for message boxes and general dialog UI.
+    let face_name = &metrics.lfMessageFont.lfFaceName;
+    let len = face_name.iter().position(|&c| c == 0).unwrap_or(face_name.len());
+    String::from_utf16(&face_name[..len]).ok()
+}
+
+/// UI font filenames to try on Linux (proportional, SemiBold preferred).
+#[cfg(not(target_os = "windows"))]
+const UI_FONT_NAMES: &[&str] = &[
+    "Cantarell-Bold.otf",
+    "Ubuntu-M.ttf",
+    "NotoSans-SemiBold.ttf",
+    "NotoSans-SemiBold.otf",
+    "DejaVuSans-Bold.ttf",
+    "LiberationSans-Bold.ttf",
+    // Regular fallbacks
+    "Cantarell-Regular.otf",
+    "Ubuntu-R.ttf",
+    "NotoSans-Regular.ttf",
+    "NotoSans-Regular.otf",
+    "DejaVuSans.ttf",
+    "LiberationSans-Regular.ttf",
+];
+
 /// Resolve a single font variant via DirectWrite by family name + weight + style.
 #[cfg(target_os = "windows")]
 fn resolve_font_dwrite(
@@ -381,6 +443,138 @@ impl FontSet {
             baseline,
             cache: HashMap::new(),
         }
+    }
+
+    /// Load the OS system UI font at the given size (semi-bold weight).
+    ///
+    /// On Windows, queries `SystemParametersInfo` for the message font name
+    /// and resolves it via DirectWrite at semi-bold weight for crisp tab labels.
+    /// Returns `None` if no UI font is found (caller should fall back to
+    /// resizing the monospace font).
+    #[cfg(target_os = "windows")]
+    pub fn load_ui(size: f32) -> Option<Self> {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+
+        // Try the user's configured system font first
+        if let Some(name) = detect_system_ui_font_name() {
+            if let Some(fs) = Self::try_load_ui_font_dwrite(&name, size) {
+                crate::log(&format!("ui font: loaded system font {name:?} (SemiBold) via DirectWrite"));
+                return Some(fs);
+            }
+        }
+
+        // Fall back to common UI font families
+        for name in DWRITE_UI_FAMILIES {
+            if let Some(fs) = Self::try_load_ui_font_dwrite(name, size) {
+                crate::log(&format!("ui font: loaded {name:?} (SemiBold) via DirectWrite"));
+                return Some(fs);
+            }
+        }
+
+        None
+    }
+
+    /// Load a single UI font at semi-bold weight via DirectWrite.
+    #[cfg(target_os = "windows")]
+    fn try_load_ui_font_dwrite(family_name: &str, size: f32) -> Option<Self> {
+        // Try SemiBold first, fall back to Bold, then Regular
+        let path = resolve_font_dwrite(family_name, dwrote::FontWeight::SemiBold, dwrote::FontStyle::Normal)
+            .or_else(|| resolve_font_dwrite(family_name, dwrote::FontWeight::Bold, dwrote::FontStyle::Normal))
+            .or_else(|| resolve_font_dwrite(family_name, dwrote::FontWeight::Regular, dwrote::FontStyle::Normal))?;
+
+        let data = std::fs::read(&path).ok()?;
+        let font = parse_font(&data)?;
+        let (cell_width, cell_height, baseline) = Self::compute_metrics(&font, size);
+        let fallback_paths = resolve_fallback_paths_dwrite();
+
+        Some(Self {
+            fonts: [Some(font), None, None, None],
+            has_variant: [true, false, false, false],
+            font_paths: [Some(path), None, None, None],
+            fallback_fonts: Vec::new(),
+            fallback_paths,
+            fallbacks_loaded: false,
+            size,
+            cell_width,
+            cell_height,
+            baseline,
+            cache: HashMap::new(),
+        })
+    }
+
+    /// Load the OS system UI font at the given size (Linux).
+    #[cfg(not(target_os = "windows"))]
+    pub fn load_ui(size: f32) -> Option<Self> {
+        let size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        let font_index = build_font_index();
+
+        for name in UI_FONT_NAMES {
+            if let Some(path) = font_index.get(*name) {
+                if let Ok(data) = std::fs::read(path) {
+                    if let Some(font) = parse_font(&data) {
+                        let (cell_width, cell_height, baseline) =
+                            Self::compute_metrics(&font, size);
+                        let fallback_paths = resolve_fallback_paths(&font_index);
+                        crate::log(&format!("ui font: loaded {name:?}"));
+                        return Some(Self {
+                            fonts: [Some(font), None, None, None],
+                            has_variant: [true, false, false, false],
+                            font_paths: [Some(path.clone()), None, None, None],
+                            fallback_fonts: Vec::new(),
+                            fallback_paths,
+                            fallbacks_loaded: false,
+                            size,
+                            cell_width,
+                            cell_height,
+                            baseline,
+                            cache: HashMap::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get the advance width of a single character in pixels.
+    pub fn char_advance(&mut self, ch: char) -> f32 {
+        self.ensure(ch, FontStyle::Regular);
+        self.get(ch, FontStyle::Regular)
+            .map_or(self.cell_width as f32, |(m, _)| m.advance_width.ceil())
+    }
+
+    /// Get the total advance width of a string in pixels.
+    pub fn text_advance(&mut self, text: &str) -> f32 {
+        text.chars().map(|ch| self.char_advance(ch)).sum()
+    }
+
+    /// Truncate a string to fit within `max_width` pixels, appending an
+    /// ellipsis only if the full text overflows. Uses per-glyph advance
+    /// widths for accuracy with proportional fonts.
+    pub fn truncate_to_pixel_width(&mut self, text: &str, max_width: f32) -> String {
+        // Check if the full text fits — no truncation needed
+        if self.text_advance(text) <= max_width {
+            return text.to_string();
+        }
+
+        // Need to truncate: find the cut point leaving room for ellipsis
+        let ellipsis = '\u{2026}';
+        let ellipsis_w = self.char_advance(ellipsis);
+        let target = (max_width - ellipsis_w).max(0.0);
+        let mut width = 0.0f32;
+        let mut result = String::new();
+
+        for ch in text.chars() {
+            let cw = self.char_advance(ch);
+            if width + cw > target {
+                result.push(ellipsis);
+                return result;
+            }
+            width += cw;
+            result.push(ch);
+        }
+        result
     }
 
     /// Try to load a font family via DirectWrite by family name.
