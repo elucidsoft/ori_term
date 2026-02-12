@@ -33,8 +33,7 @@ impl CellFlags {
         .union(Self::DASHED_UNDERLINE);
 }
 
-#[derive(Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct CellExtra {
     pub zerowidth: Vec<char>,
     pub underline_color: Option<Color>,
@@ -53,7 +52,6 @@ impl Clone for CellExtra {
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct Cell {
@@ -78,10 +76,7 @@ impl Default for Cell {
 
 impl PartialEq for Cell {
     fn eq(&self, other: &Self) -> bool {
-        self.c == other.c
-            && self.fg == other.fg
-            && self.bg == other.bg
-            && self.flags == other.flags
+        self.c == other.c && self.fg == other.fg && self.bg == other.bg && self.flags == other.flags
     }
 }
 
@@ -90,8 +85,11 @@ impl Cell {
         self.c = template.c;
         self.fg = template.fg;
         self.bg = template.bg;
-        self.flags = template.flags & !(CellFlags::WIDE_CHAR | CellFlags::WIDE_CHAR_SPACER
-            | CellFlags::WRAPLINE | CellFlags::LEADING_WIDE_CHAR_SPACER);
+        self.flags = template.flags
+            & !(CellFlags::WIDE_CHAR
+                | CellFlags::WIDE_CHAR_SPACER
+                | CellFlags::WRAPLINE
+                | CellFlags::LEADING_WIDE_CHAR_SPACER);
         self.extra = None;
     }
 
@@ -103,7 +101,9 @@ impl Cell {
     }
 
     pub fn push_zerowidth(&mut self, c: char) {
-        let extra = self.extra.get_or_insert_with(|| Arc::new(CellExtra::default()));
+        let extra = self
+            .extra
+            .get_or_insert_with(|| Arc::new(CellExtra::default()));
         Arc::make_mut(extra).zerowidth.push(c);
     }
 
@@ -111,7 +111,9 @@ impl Cell {
         if color.is_none() && self.extra.is_none() {
             return;
         }
-        let extra = self.extra.get_or_insert_with(|| Arc::new(CellExtra::default()));
+        let extra = self
+            .extra
+            .get_or_insert_with(|| Arc::new(CellExtra::default()));
         Arc::make_mut(extra).underline_color = color;
     }
 
@@ -123,7 +125,9 @@ impl Cell {
         if hyperlink.is_none() && self.extra.is_none() {
             return;
         }
-        let extra = self.extra.get_or_insert_with(|| Arc::new(CellExtra::default()));
+        let extra = self
+            .extra
+            .get_or_insert_with(|| Arc::new(CellExtra::default()));
         Arc::make_mut(extra).hyperlink = hyperlink;
     }
 
@@ -134,7 +138,11 @@ impl Cell {
     pub fn to_rgb(color: Color) -> Rgb {
         match color {
             Color::Spec(rgb) => rgb,
-            Color::Indexed(idx) => Rgb { r: idx, g: idx, b: idx },
+            Color::Indexed(idx) => Rgb {
+                r: idx,
+                g: idx,
+                b: idx,
+            },
             Color::Named(_) => Rgb { r: 0, g: 0, b: 0 },
         }
     }
@@ -149,7 +157,11 @@ mod tests {
     fn cell_size() {
         // Cell should be reasonably compact. With Option<Arc<CellExtra>> it's:
         // char(4) + Color(4) + Color(4) + CellFlags(2) + padding(2) + Option<Arc>(8) = 24
-        assert!(size_of::<Cell>() <= 32, "Cell is {} bytes", size_of::<Cell>());
+        assert!(
+            size_of::<Cell>() <= 32,
+            "Cell is {} bytes",
+            size_of::<Cell>()
+        );
     }
 
     #[test]

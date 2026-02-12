@@ -38,7 +38,9 @@ bitflags! {
 
 impl TermMode {
     /// Any mouse reporting mode is active.
-    pub const ANY_MOUSE: Self = Self::MOUSE_REPORT.union(Self::MOUSE_MOTION).union(Self::MOUSE_ALL);
+    pub const ANY_MOUSE: Self = Self::MOUSE_REPORT
+        .union(Self::MOUSE_MOTION)
+        .union(Self::MOUSE_ALL);
 }
 
 impl From<KeyboardModes> for TermMode {

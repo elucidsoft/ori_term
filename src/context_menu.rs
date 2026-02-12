@@ -109,9 +109,14 @@ impl MenuOverlay {
         let s = self.scale;
         // Checkmark rendered as a vector icon — use fixed icon size + gap
         let check_prefix_w = CHECKMARK_ICON_SIZE * s + CHECKMARK_GAP * s;
-        let has_checks = self.entries.iter().any(|e| matches!(e, MenuEntry::Check { .. }));
+        let has_checks = self
+            .entries
+            .iter()
+            .any(|e| matches!(e, MenuEntry::Check { .. }));
 
-        let max_label_width = self.entries.iter()
+        let max_label_width = self
+            .entries
+            .iter()
             .filter_map(|e| {
                 let label = e.label()?;
                 let text_w = glyphs.text_advance(label);
@@ -122,8 +127,8 @@ impl MenuOverlay {
 
         self.width = (max_label_width + (ITEM_PADDING_X * 2.0 + MENU_EXTRA_WIDTH) * s)
             .max(MENU_MIN_WIDTH * s);
-        self.height = MENU_PADDING_Y * 2.0 * s
-            + self.entries.iter().map(|e| e.height() * s).sum::<f32>();
+        self.height =
+            MENU_PADDING_Y * 2.0 * s + self.entries.iter().map(|e| e.height() * s).sum::<f32>();
     }
 
     /// Hit-test a physical pixel position. Returns the entry index if the
@@ -164,23 +169,33 @@ impl MenuOverlay {
     }
 
     /// Rendering constants (scaled).
-    pub fn menu_radius(&self) -> f32 { MENU_RADIUS * self.scale }
-    pub fn menu_padding_y(&self) -> f32 { MENU_PADDING_Y * self.scale }
-    pub fn item_padding_x(&self) -> f32 { ITEM_PADDING_X * self.scale }
-    pub fn item_hover_radius(&self) -> f32 { ITEM_HOVER_RADIUS * self.scale }
-    pub fn item_hover_inset(&self) -> f32 { ITEM_HOVER_INSET * self.scale }
-    pub fn separator_thickness(&self) -> f32 { SEPARATOR_THICKNESS * self.scale }
-    pub fn separator_margin_x(&self) -> f32 { SEPARATOR_MARGIN_X * self.scale }
+    pub fn menu_radius(&self) -> f32 {
+        MENU_RADIUS * self.scale
+    }
+    pub fn menu_padding_y(&self) -> f32 {
+        MENU_PADDING_Y * self.scale
+    }
+    pub fn item_padding_x(&self) -> f32 {
+        ITEM_PADDING_X * self.scale
+    }
+    pub fn item_hover_radius(&self) -> f32 {
+        ITEM_HOVER_RADIUS * self.scale
+    }
+    pub fn item_hover_inset(&self) -> f32 {
+        ITEM_HOVER_INSET * self.scale
+    }
+    pub fn separator_thickness(&self) -> f32 {
+        SEPARATOR_THICKNESS * self.scale
+    }
+    pub fn separator_margin_x(&self) -> f32 {
+        SEPARATOR_MARGIN_X * self.scale
+    }
 }
 
 // ── Menu builders ───────────────────────────────────────────────────────────
 
 /// Build the tab right-click menu.
-pub fn build_tab_menu(
-    position: (f32, f32),
-    tab_index: usize,
-    scale: f32,
-) -> MenuOverlay {
+pub fn build_tab_menu(position: (f32, f32), tab_index: usize, scale: f32) -> MenuOverlay {
     MenuOverlay {
         entries: vec![
             MenuEntry::Item {
@@ -220,11 +235,7 @@ pub fn build_tab_bar_menu(position: (f32, f32), scale: f32) -> MenuOverlay {
 }
 
 /// Build the dropdown menu (settings + color scheme submenu).
-pub fn build_dropdown_menu(
-    position: (f32, f32),
-    active_scheme: &str,
-    scale: f32,
-) -> MenuOverlay {
+pub fn build_dropdown_menu(position: (f32, f32), active_scheme: &str, scale: f32) -> MenuOverlay {
     let mut entries = vec![
         MenuEntry::Item {
             label: "Settings".into(),

@@ -259,10 +259,7 @@ mod tests {
 
     #[test]
     fn windows_to_wsl_path_drive() {
-        assert_eq!(
-            windows_to_wsl_path(r"C:\foo\bar\baz"),
-            "/mnt/c/foo/bar/baz"
-        );
+        assert_eq!(windows_to_wsl_path(r"C:\foo\bar\baz"), "/mnt/c/foo/bar/baz");
     }
 
     #[test]

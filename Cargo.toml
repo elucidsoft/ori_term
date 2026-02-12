@@ -6,10 +6,8 @@ description = "A Rust console/TUI library that gets terminal interaction right"
 license = "MIT"
 
 [dependencies]
-crossterm = "0.28"
 unicode-width = "0.2"
 unicode-segmentation = "1.12"
-strip-ansi-escapes = "0.2"
 winit = "0.30"
 wgpu = "28"
 pollster = "0.4"

@@ -135,7 +135,6 @@ impl<'a> TermHandler<'a> {
             self.apply_keyboard_mode();
         }
     }
-
 }
 
 /// Find the column of the previous base cell (skipping wide char spacers).
@@ -157,7 +156,11 @@ fn prev_base_col(grid: &Grid) -> Option<usize> {
     }
 
     // Skip wide char spacer to find the base cell
-    if grid.row(row)[col].flags.contains(CellFlags::WIDE_CHAR_SPACER) && col > 0 {
+    if grid.row(row)[col]
+        .flags
+        .contains(CellFlags::WIDE_CHAR_SPACER)
+        && col > 0
+    {
         Some(col - 1)
     } else {
         Some(col)
@@ -168,9 +171,12 @@ impl Handler for TermHandler<'_> {
     fn input(&mut self, c: char) {
         // Apply charset mapping (e.g., DEC Special Graphics for box-drawing)
         let c = self.charset.map(c);
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         let width = UnicodeWidthChar::width(c);
-
 
         // ZWJ continuation: after a ZWJ, the next printable char joins the cluster
         // (e.g., family emoji: 👩 + ZWJ + 👩 + ZWJ + 👧 + ZWJ + 👦)
@@ -228,64 +234,104 @@ impl Handler for TermHandler<'_> {
 
     fn goto(&mut self, line: i32, col: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         let row = if line < 0 { 0 } else { line as usize };
         grid.goto(row, col);
     }
 
     fn goto_line(&mut self, line: i32) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         let row = if line < 0 { 0 } else { line as usize };
         grid.goto_line(row);
     }
 
     fn goto_col(&mut self, col: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.goto_col(col);
     }
 
     fn move_up(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_up(n);
     }
 
     fn move_down(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_down(n);
     }
 
     fn move_forward(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_forward(n);
     }
 
     fn move_backward(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_backward(n);
     }
 
     fn move_down_and_cr(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_down(n);
         grid.carriage_return();
     }
 
     fn move_up_and_cr(&mut self, n: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.move_up(n);
         grid.carriage_return();
     }
 
     fn terminal_attribute(&mut self, attr: Attr) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         let template = &mut grid.cursor.template;
         match attr {
             Attr::Reset => {
@@ -342,76 +388,128 @@ impl Handler for TermHandler<'_> {
 
     fn clear_screen(&mut self, mode: ClearMode) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.erase_display(mode);
     }
 
     fn clear_line(&mut self, mode: LineClearMode) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.erase_line(mode);
     }
 
     fn clear_tabs(&mut self, mode: TabulationClearMode) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.clear_tab_stops(mode);
     }
 
     fn erase_chars(&mut self, count: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.erase_chars(count);
     }
 
     fn delete_chars(&mut self, count: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.delete_chars(count);
     }
 
     fn insert_blank(&mut self, count: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.insert_blank_chars(count);
     }
 
     fn insert_blank_lines(&mut self, count: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.insert_lines(count);
     }
 
     fn delete_lines(&mut self, count: usize) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.delete_lines(count);
     }
 
     fn scroll_up(&mut self, count: usize) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.scroll_up(count);
     }
 
     fn scroll_down(&mut self, count: usize) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.scroll_down(count);
     }
 
     fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.set_scroll_region(top, bottom);
         // Cursor moves to home after DECSTBM
         grid.goto(0, 0);
     }
 
     fn reverse_index(&mut self) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.reverse_index();
     }
 
     fn linefeed(&mut self) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.linefeed();
         if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) {
             grid.carriage_return();
@@ -420,50 +518,86 @@ impl Handler for TermHandler<'_> {
 
     fn carriage_return(&mut self) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.carriage_return();
     }
 
     fn backspace(&mut self) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.backspace();
     }
 
     fn newline(&mut self) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.linefeed();
         grid.carriage_return();
     }
 
     fn put_tab(&mut self, count: u16) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.advance_tab(count);
     }
 
     fn move_forward_tabs(&mut self, count: u16) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.advance_tab(count);
     }
 
     fn move_backward_tabs(&mut self, count: u16) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.backward_tab(count);
     }
 
     fn set_horizontal_tabstop(&mut self) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.set_tab_stop();
     }
 
     fn save_cursor_position(&mut self) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.save_cursor();
     }
 
     fn restore_cursor_position(&mut self) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.restore_cursor();
     }
 
@@ -485,12 +619,12 @@ impl Handler for TermHandler<'_> {
             }
             // DSR 6 — Cursor Position Report
             6 => {
-                let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
-                let response = format!(
-                    "\x1b[{};{}R",
-                    grid.cursor.row + 1,
-                    grid.cursor.col + 1,
-                );
+                let grid = if *self.active_is_alt {
+                    &*self.alt_grid
+                } else {
+                    &*self.grid
+                };
+                let response = format!("\x1b[{};{}R", grid.cursor.row + 1, grid.cursor.col + 1,);
                 self.write_pty(response.as_bytes());
             }
             _ => {}
@@ -516,12 +650,22 @@ impl Handler for TermHandler<'_> {
         // DECRPM response: CSI Ps; Pm $ y
         // Pm: 1 = set, 2 = reset, 0 = not recognized
         let (param, state) = match mode {
-            Mode::Named(NamedMode::Insert) => {
-                (4, if self.mode.contains(TermMode::INSERT) { 1 } else { 2 })
-            }
-            Mode::Named(NamedMode::LineFeedNewLine) => {
-                (20, if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) { 1 } else { 2 })
-            }
+            Mode::Named(NamedMode::Insert) => (
+                4,
+                if self.mode.contains(TermMode::INSERT) {
+                    1
+                } else {
+                    2
+                },
+            ),
+            Mode::Named(NamedMode::LineFeedNewLine) => (
+                20,
+                if self.mode.contains(TermMode::LINE_FEED_NEW_LINE) {
+                    1
+                } else {
+                    2
+                },
+            ),
             Mode::Unknown(n) => (n as u32, 0u8),
         };
         let response = format!("\x1b[{param};{state}$y");
@@ -559,7 +703,9 @@ impl Handler for TermHandler<'_> {
     fn set_mode(&mut self, mode: Mode) {
         match mode {
             Mode::Named(NamedMode::Insert) => self.mode.insert(TermMode::INSERT),
-            Mode::Named(NamedMode::LineFeedNewLine) => self.mode.insert(TermMode::LINE_FEED_NEW_LINE),
+            Mode::Named(NamedMode::LineFeedNewLine) => {
+                self.mode.insert(TermMode::LINE_FEED_NEW_LINE);
+            }
             _ => {}
         }
     }
@@ -567,7 +713,9 @@ impl Handler for TermHandler<'_> {
     fn unset_mode(&mut self, mode: Mode) {
         match mode {
             Mode::Named(NamedMode::Insert) => self.mode.remove(TermMode::INSERT),
-            Mode::Named(NamedMode::LineFeedNewLine) => self.mode.remove(TermMode::LINE_FEED_NEW_LINE),
+            Mode::Named(NamedMode::LineFeedNewLine) => {
+                self.mode.remove(TermMode::LINE_FEED_NEW_LINE);
+            }
             _ => {}
         }
     }
@@ -668,8 +816,8 @@ impl Handler for TermHandler<'_> {
         // OSC 10 = foreground, OSC 11 = background, OSC 12 = cursor color
         // When the param is "?", we respond with the current color
         let color = match index {
-            0 => Some(self.palette.default_fg()),  // OSC 10
-            1 => Some(self.palette.default_bg()),  // OSC 11
+            0 => Some(self.palette.default_fg()),   // OSC 10
+            1 => Some(self.palette.default_bg()),   // OSC 11
             2 => Some(self.palette.cursor_color()), // OSC 12
             _ => None,
         };
@@ -694,7 +842,11 @@ impl Handler for TermHandler<'_> {
     }
 
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.cursor.template.set_hyperlink(hyperlink);
     }
 
@@ -711,13 +863,21 @@ impl Handler for TermHandler<'_> {
     }
 
     fn decaln(&mut self) {
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.decaln();
     }
 
     fn reset_state(&mut self) {
         self.grapheme.after_zwj = false;
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.clear_all();
         grid.cursor.reset_attrs();
         *self.mode = TermMode::default();
@@ -738,7 +898,11 @@ impl Handler for TermHandler<'_> {
     }
 
     fn text_area_size_chars(&mut self) {
-        let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
+        let grid = if *self.active_is_alt {
+            &*self.alt_grid
+        } else {
+            &*self.grid
+        };
         let response = format!("\x1b[8;{};{}t", grid.lines, grid.cols);
         self.write_pty(response.as_bytes());
     }
@@ -746,7 +910,11 @@ impl Handler for TermHandler<'_> {
     fn text_area_size_pixels(&mut self) {
         // Report pixel size as CSI 4 ; height ; width t
         // We don't track pixel size in the handler, so report character-based estimate
-        let grid = if *self.active_is_alt { &*self.alt_grid } else { &*self.grid };
+        let grid = if *self.active_is_alt {
+            &*self.alt_grid
+        } else {
+            &*self.grid
+        };
         // Approximate: 8px per col, 16px per row (common monospace metrics)
         let response = format!("\x1b[4;{};{}t", grid.lines * 16, grid.cols * 8);
         self.write_pty(response.as_bytes());
@@ -798,12 +966,20 @@ impl Handler for TermHandler<'_> {
 
     fn substitute(&mut self) {
         // SUB — treated as a space character
-        let grid = if *self.active_is_alt { &mut *self.alt_grid } else { &mut *self.grid };
+        let grid = if *self.active_is_alt {
+            &mut *self.alt_grid
+        } else {
+            &mut *self.grid
+        };
         grid.put_char(' ');
     }
 
     fn report_keyboard_mode(&mut self) {
-        let bits = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
+        let bits = self
+            .keyboard_mode_stack
+            .last()
+            .copied()
+            .unwrap_or(KeyboardModes::NO_MODE);
         let response = format!("\x1b[?{}u", bits.bits());
         self.write_pty(response.as_bytes());
     }
@@ -821,7 +997,11 @@ impl Handler for TermHandler<'_> {
     }
 
     fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior) {
-        let current = self.keyboard_mode_stack.last().copied().unwrap_or(KeyboardModes::NO_MODE);
+        let current = self
+            .keyboard_mode_stack
+            .last()
+            .copied()
+            .unwrap_or(KeyboardModes::NO_MODE);
         let new_mode = match behavior {
             KeyboardModesApplyBehavior::Replace => mode,
             KeyboardModesApplyBehavior::Union => current | mode,

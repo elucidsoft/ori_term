@@ -172,9 +172,7 @@ impl WindowConfig {
     /// Return tab bar opacity clamped to [0.0, 1.0].
     /// Falls back to `opacity` when not explicitly set.
     pub fn effective_tab_bar_opacity(&self) -> f32 {
-        self.tab_bar_opacity
-            .unwrap_or(self.opacity)
-            .clamp(0.0, 1.0)
+        self.tab_bar_opacity.unwrap_or(self.opacity).clamp(0.0, 1.0)
     }
 }
 
@@ -264,7 +262,10 @@ impl WindowState {
     pub fn save(&self) {
         let dir = config_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            log(&format!("state: failed to create dir {}: {e}", dir.display()));
+            log(&format!(
+                "state: failed to create dir {}: {e}",
+                dir.display()
+            ));
             return;
         }
         let path = state_path();
@@ -325,15 +326,17 @@ impl Config {
         let path = config_path();
         let data = std::fs::read_to_string(&path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        toml::from_str(&data)
-            .map_err(|e| format!("parse error in {}: {e}", path.display()))
+        toml::from_str(&data).map_err(|e| format!("parse error in {}: {e}", path.display()))
     }
 
     /// Save config to the default path. Creates the directory if needed.
     pub fn save(&self) {
         let dir = config_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            log(&format!("config: failed to create dir {}: {e}", dir.display()));
+            log(&format!(
+                "config: failed to create dir {}: {e}",
+                dir.display()
+            ));
             return;
         }
 
@@ -416,7 +419,10 @@ cursor_style = "bar"
 "#;
         let parsed: Config = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(parsed.terminal.cursor_style, "bar");
-        assert_eq!(parse_cursor_style(&parsed.terminal.cursor_style), CursorShape::Beam);
+        assert_eq!(
+            parse_cursor_style(&parsed.terminal.cursor_style),
+            CursorShape::Beam
+        );
     }
 
     #[test]
@@ -584,7 +590,10 @@ alpha_blending = "linear"
 alpha_blending = "linear_corrected"
 "#;
         let parsed2: Config = toml::from_str(toml_str2).expect("deserialize");
-        assert_eq!(parsed2.colors.alpha_blending, AlphaBlending::LinearCorrected);
+        assert_eq!(
+            parsed2.colors.alpha_blending,
+            AlphaBlending::LinearCorrected
+        );
     }
 
     #[test]
@@ -625,8 +634,14 @@ selection_background = "#3A3D5C"
         assert_eq!(parsed.colors.foreground.as_deref(), Some("#FFFFFF"));
         assert_eq!(parsed.colors.background.as_deref(), Some("#000000"));
         assert_eq!(parsed.colors.cursor.as_deref(), Some("#FF0000"));
-        assert_eq!(parsed.colors.selection_foreground.as_deref(), Some("#FFFFFF"));
-        assert_eq!(parsed.colors.selection_background.as_deref(), Some("#3A3D5C"));
+        assert_eq!(
+            parsed.colors.selection_foreground.as_deref(),
+            Some("#FFFFFF")
+        );
+        assert_eq!(
+            parsed.colors.selection_background.as_deref(),
+            Some("#3A3D5C")
+        );
     }
 
     #[test]
@@ -664,11 +679,20 @@ foreground = "#AABBCC"
 1 = "#FF0000"
 "##;
         let parsed: Config = toml::from_str(toml_str).expect("deserialize");
-        assert_eq!(parsed.colors.ansi.get("0").map(|s| s.as_str()), Some("#111111"));
+        assert_eq!(
+            parsed.colors.ansi.get("0").map(|s| s.as_str()),
+            Some("#111111")
+        );
         assert!(parsed.colors.ansi.get("1").is_none());
-        assert_eq!(parsed.colors.ansi.get("7").map(|s| s.as_str()), Some("#EEEEEE"));
+        assert_eq!(
+            parsed.colors.ansi.get("7").map(|s| s.as_str()),
+            Some("#EEEEEE")
+        );
         assert!(parsed.colors.bright.get("0").is_none());
-        assert_eq!(parsed.colors.bright.get("1").map(|s| s.as_str()), Some("#FF0000"));
+        assert_eq!(
+            parsed.colors.bright.get("1").map(|s| s.as_str()),
+            Some("#FF0000")
+        );
     }
 
     #[test]
@@ -679,7 +703,10 @@ foreground = "#AABBCC"
         let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
         let parsed: Config = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.colors.foreground.as_deref(), Some("#FFFFFF"));
-        assert_eq!(parsed.colors.selection_background.as_deref(), Some("#3A3D5C"));
+        assert_eq!(
+            parsed.colors.selection_background.as_deref(),
+            Some("#3A3D5C")
+        );
         assert!(parsed.colors.background.is_none());
     }
 }

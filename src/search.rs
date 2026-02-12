@@ -76,9 +76,9 @@ impl SearchState {
     /// Uses binary search for efficient lookup on sorted matches.
     pub fn cell_match_type(&self, abs_row: usize, col: usize) -> MatchType {
         // Binary search: find the first match whose end_row >= abs_row
-        let idx = self.matches.partition_point(|m| {
-            m.end_row < abs_row || (m.end_row == abs_row && m.end_col < col)
-        });
+        let idx = self
+            .matches
+            .partition_point(|m| m.end_row < abs_row || (m.end_row == abs_row && m.end_col < col));
 
         // Check a small window of matches near the found index
         for i in idx.saturating_sub(1)..self.matches.len().min(idx + 2) {
@@ -353,9 +353,24 @@ mod tests {
     fn search_next_prev() {
         let mut state = SearchState::new();
         state.matches = vec![
-            SearchMatch { start_row: 0, start_col: 0, end_row: 0, end_col: 2 },
-            SearchMatch { start_row: 1, start_col: 0, end_row: 1, end_col: 2 },
-            SearchMatch { start_row: 2, start_col: 0, end_row: 2, end_col: 2 },
+            SearchMatch {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 2,
+            },
+            SearchMatch {
+                start_row: 1,
+                start_col: 0,
+                end_row: 1,
+                end_col: 2,
+            },
+            SearchMatch {
+                start_row: 2,
+                start_col: 0,
+                end_row: 2,
+                end_col: 2,
+            },
         ];
         state.focused = 0;
 
@@ -376,8 +391,18 @@ mod tests {
     fn cell_match_type_check() {
         let mut state = SearchState::new();
         state.matches = vec![
-            SearchMatch { start_row: 0, start_col: 5, end_row: 0, end_col: 9 },
-            SearchMatch { start_row: 2, start_col: 0, end_row: 2, end_col: 3 },
+            SearchMatch {
+                start_row: 0,
+                start_col: 5,
+                end_row: 0,
+                end_col: 9,
+            },
+            SearchMatch {
+                start_row: 2,
+                start_col: 0,
+                end_row: 2,
+                end_col: 3,
+            },
         ];
         state.focused = 0;
 

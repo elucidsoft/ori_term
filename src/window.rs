@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use crate::gpu::renderer::GpuState;
+use crate::gpu::GpuState;
 use crate::tab::TabId;
 use crate::tab_bar::TAB_BAR_HEIGHT;
 
@@ -17,10 +17,7 @@ pub struct TermWindow {
 }
 
 impl TermWindow {
-    pub fn new(
-        window: Arc<Window>,
-        gpu: &GpuState,
-    ) -> Option<Self> {
+    pub fn new(window: Arc<Window>, gpu: &GpuState) -> Option<Self> {
         let (surface, config) = gpu.create_surface(&window)?;
         Some(Self {
             window,

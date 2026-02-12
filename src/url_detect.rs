@@ -42,9 +42,7 @@ impl UrlDetectCache {
     pub fn url_at(&mut self, grid: &Grid, abs_row: usize, col: usize) -> Option<DetectedUrl> {
         let line_start = self.ensure_logical_line(grid, abs_row);
         let urls = self.lines.get(&line_start)?;
-        urls.iter()
-            .find(|u| u.contains(abs_row, col))
-            .cloned()
+        urls.iter().find(|u| u.contains(abs_row, col)).cloned()
     }
 
     /// Ensure the logical line containing `abs_row` is computed and cached.
@@ -268,10 +266,7 @@ mod tests {
         }
         let urls = detect_urls_in_logical_line(&grid, 0, 0);
         assert_eq!(urls.len(), 1);
-        assert_eq!(
-            urls[0].url,
-            "https://en.wikipedia.org/wiki/Rust_(language)"
-        );
+        assert_eq!(urls[0].url, "https://en.wikipedia.org/wiki/Rust_(language)");
     }
 
     #[test]

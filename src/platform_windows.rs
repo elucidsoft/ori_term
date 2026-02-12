@@ -16,16 +16,12 @@ use windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
 use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, IsZoomed,
-    SetWindowLongPtrW, SetWindowPos,
-    GWL_STYLE,
-    HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT,
-    HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
-    NCCALCSIZE_PARAMS,
-    SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    WM_DPICHANGED, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-    WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
+    GWL_STYLE, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
+    HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed,
+    NCCALCSIZE_PARAMS, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, WM_DPICHANGED,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+    WS_THICKFRAME,
 };
 
 const SUBCLASS_ID: usize = 0xBEEF;
@@ -98,7 +94,10 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
         SetWindowPos(
             hwnd,
             std::ptr::null_mut(),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
         );
 
@@ -120,12 +119,7 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
             last_dpi: AtomicU32::new(0),
         });
         let data_ptr = Box::into_raw(data);
-        SetWindowSubclass(
-            hwnd,
-            Some(subclass_proc),
-            SUBCLASS_ID,
-            data_ptr as usize,
-        );
+        SetWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID, data_ptr as usize);
 
         // Register pointer so set_client_rects can find it
         if let Ok(mut map) = snap_ptrs().lock() {
@@ -237,10 +231,10 @@ unsafe extern "system" fn subclass_proc(
                     // When maximized, inset by frame thickness to prevent overflow.
                     if IsZoomed(hwnd) != 0 {
                         let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
-                        let frame_x = GetSystemMetrics(SM_CXFRAME)
-                            + GetSystemMetrics(SM_CXPADDEDBORDER);
-                        let frame_y = GetSystemMetrics(SM_CYFRAME)
-                            + GetSystemMetrics(SM_CXPADDEDBORDER);
+                        let frame_x =
+                            GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                        let frame_y =
+                            GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
                         params.rgrc[0].left += frame_x;
                         params.rgrc[0].top += frame_y;
                         params.rgrc[0].right -= frame_x;

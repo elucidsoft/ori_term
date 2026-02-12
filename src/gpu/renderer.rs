@@ -1,220 +1,30 @@
-use std::sync::Arc;
+//! GPU renderer — owns pipelines, atlas, bind groups, and frame caching.
+//!
+//! Rendering sub-modules (`render_grid`, `render_tab_bar`, `render_overlay`,
+//! `render_settings`) add domain-specific `impl GpuRenderer` blocks.
 
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
 use vte::ansi::CursorShape;
 
-use crate::cell::CellFlags;
 use crate::config::AlphaBlending;
 use crate::grid::Grid;
 use crate::palette::Palette;
 use crate::render::{FontSet, FontStyle};
-use crate::search::{MatchType, SearchState};
+use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::tab::TabId;
-use crate::palette::BUILTIN_SCHEMES;
-use crate::tab_bar::{
-    TabBarHit, TabBarLayout, GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT,
-    DROPDOWN_BUTTON_WIDTH, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
-};
+use crate::tab_bar::TabBarHit;
 #[cfg(target_os = "windows")]
 use crate::tab_bar::{WINDOW_BORDER_COLOR, WINDOW_BORDER_WIDTH};
 use crate::term_mode::TermMode;
 
 use super::atlas::GlyphAtlas;
+#[cfg(target_os = "windows")]
+use super::color_util::u32_to_rgba;
+use super::color_util::{ortho_projection, palette_to_rgba};
 use super::pipeline::{self, INSTANCE_STRIDE};
-
-const CONTROL_CLOSE_HOVER_BG: [f32; 4] = rgb_const(0xc4, 0x2b, 0x1c);
-const CONTROL_CLOSE_HOVER_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-
-// Default UI colors (non-themed) — used for context menus, popups, panels.
-// All values in linear space (compile-time sRGB→linear via rgb_const).
-const UI_BG: [f32; 4] = rgb_const(0x29, 0x29, 0x29);
-const UI_BG_HOVER: [f32; 4] = rgb_const(0x3D, 0x3D, 0x3D);
-const UI_SEPARATOR: [f32; 4] = rgb_const(0x3D, 0x3F, 0x43);
-const UI_TEXT: [f32; 4] = rgb_const(0xE8, 0xEB, 0xED);
-const UI_TEXT_DIM: [f32; 4] = rgb_const(0xA6, 0xA8, 0xAB);
-
-/// Tab bar colors derived dynamically from the palette.
-///
-/// The bar is dark, inactive tabs are slightly lighter (solid, fully opaque),
-/// the active tab matches the content area exactly.  All colors are alpha 1.0 —
-/// no transparency anywhere in the tab bar.
-struct TabBarColors {
-    bar_bg: [f32; 4],
-    active_bg: [f32; 4],
-    inactive_bg: [f32; 4],
-    tab_hover_bg: [f32; 4],
-    button_hover_bg: [f32; 4],
-    separator: [f32; 4],
-    text_fg: [f32; 4],
-    inactive_text: [f32; 4],
-    close_fg: [f32; 4],
-    control_fg: [f32; 4],
-    control_fg_dim: [f32; 4],
-    control_hover_bg: [f32; 4],
-}
-
-impl TabBarColors {
-    fn from_palette(palette: &Palette) -> Self {
-        let base = vte_rgb_to_rgba(palette.default_bg());
-        let fg = vte_rgb_to_rgba(palette.default_fg());
-
-        // Derive tab bar colors using OKLab for colored themes (preserves hue),
-        // neutral gray shading for near-black/achromatic themes.
-        let lab = to_oklab(base);
-        let oklab_chroma = lab[1].hypot(lab[2]);
-        let active_bg = base;
-
-        let (bar_bg, inactive_bg, tab_hover_bg, button_hover_bg, separator, control_hover_bg);
-        if oklab_chroma > 0.01 {
-            // Colored theme — shift lightness in OKLab, preserving hue exactly
-            bar_bg = oklab_shift(base, -0.06);
-            inactive_bg = oklab_shift(base, -0.04);
-            tab_hover_bg = oklab_shift(base, 0.04);
-            button_hover_bg = oklab_shift(bar_bg, 0.06);
-            separator = oklab_shift(bar_bg, 0.03);
-            control_hover_bg = oklab_shift(bar_bg, 0.06);
-        } else {
-            // Near-black/achromatic — use neutral gray shading
-            let gray = [0.04, 0.04, 0.04, 1.0];
-            bar_bg = darken(gray, 0.35);
-            inactive_bg = darken(gray, 0.15);
-            tab_hover_bg = lighten(gray, 0.08);
-            button_hover_bg = lighten(bar_bg, 0.15);
-            separator = lighten(bar_bg, 0.06);
-            control_hover_bg = lighten(bar_bg, 0.15);
-        }
-
-        let inactive_text = lerp_color(fg, bar_bg, 0.40);
-        let close_fg = inactive_text;
-        let control_fg = fg;
-        let control_fg_dim = lerp_color(fg, bar_bg, 0.50);
-
-        Self {
-            bar_bg,
-            active_bg,
-            inactive_bg,
-            tab_hover_bg,
-            button_hover_bg,
-            separator,
-            text_fg: fg,
-            inactive_text,
-            close_fg,
-            control_fg,
-            control_fg_dim,
-            control_hover_bg,
-        }
-    }
-}
-
-/// Darken a color by a factor (0.0 = unchanged, 1.0 = black).
-fn darken(c: [f32; 4], amount: f32) -> [f32; 4] {
-    let f = 1.0 - amount;
-    [c[0] * f, c[1] * f, c[2] * f, c[3]]
-}
-
-/// Lighten a color by a factor (0.0 = unchanged, 1.0 = white).
-fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
-    [
-        c[0] + (1.0 - c[0]) * amount,
-        c[1] + (1.0 - c[1]) * amount,
-        c[2] + (1.0 - c[2]) * amount,
-        c[3],
-    ]
-}
-
-
-/// Linear interpolation between two colors.  t=0 → a, t=1 → b.  Alpha always 1.0.
-fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-        1.0,
-    ]
-}
-
-/// Convert linear RGB to `OKLab` (L, a, b).
-#[allow(clippy::excessive_precision)]
-fn to_oklab(c: [f32; 4]) -> [f32; 3] {
-    let l_ = (0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]).cbrt();
-    let m_ = (0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]).cbrt();
-    let s_ = (0.0883024619 * c[0] + 0.2817188376 * c[1] + 0.6299787005 * c[2]).cbrt();
-    [
-        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
-        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
-        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
-    ]
-}
-
-/// Convert `OKLab` (L, a, b) back to linear RGB with alpha=1, clamped to sRGB gamut.
-#[allow(clippy::excessive_precision)]
-fn from_oklab(lab: [f32; 3]) -> [f32; 4] {
-    let l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
-    let m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];
-    let s_ = lab[0] - 0.0894841775 * lab[1] - 1.2914855480 * lab[2];
-    let l_ = l_ * l_ * l_;
-    let m_ = m_ * m_ * m_;
-    let s_ = s_ * s_ * s_;
-    [
-        (4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_).clamp(0.0, 1.0),
-        (-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_).clamp(0.0, 1.0),
-        (-0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_).clamp(0.0, 1.0),
-        1.0,
-    ]
-}
-
-/// Adjust a color's perceptual lightness in `OKLab` space while preserving hue and chroma.
-/// Positive delta = lighter, negative delta = darker.
-fn oklab_shift(c: [f32; 4], delta_l: f32) -> [f32; 4] {
-    let mut lab = to_oklab(c);
-    lab[0] = (lab[0] + delta_l).clamp(0.0, 1.0);
-    from_oklab(lab)
-}
-
-const TAB_TOP_MARGIN: usize = 8;
-const TAB_PADDING: usize = 8;
-const CLOSE_BUTTON_WIDTH: usize = 24;
-const CLOSE_BUTTON_RIGHT_PAD: usize = 8;
-// Windows 10/11 style: wide rectangular buttons
-#[cfg(target_os = "windows")]
-const CONTROL_BUTTON_WIDTH: usize = 58;
-#[cfg(target_os = "windows")]
-const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3;
-#[cfg(target_os = "windows")]
-const ICON_SIZE: usize = 10;
-
-// Linux (GNOME-style): circular buttons, semi-transparent
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_DIAMETER: usize = 24;
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_SPACING: usize = 8;
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_MARGIN: usize = 12;
-#[cfg(not(target_os = "windows"))]
-const CONTROLS_ZONE_WIDTH: usize =
-    CONTROL_BUTTON_MARGIN + 3 * CONTROL_BUTTON_DIAMETER + 2 * CONTROL_BUTTON_SPACING + CONTROL_BUTTON_MARGIN;
-#[cfg(not(target_os = "windows"))]
-const ICON_SIZE: usize = 8;
-#[cfg(not(target_os = "windows"))]
-const CONTROL_CIRCLE_ALPHA: f32 = 0.3;
-
-/// Convert an sRGB u8 triplet to linear RGBA at compile time (approximate).
-/// Uses a simple gamma-2.2 power curve (close enough for UI constants).
-const fn rgb_const(r: u8, g: u8, b: u8) -> [f32; 4] {
-    // Approximate sRGB→linear via x^2.2.  We need const fn so we use a
-    // piecewise quadratic approximation: (x/255)^2.2 ≈ pow22(x).
-    // For exact conversion at runtime, see `srgb_to_linear`.
-    const fn pow22(v: u8) -> f32 {
-        let x = v as f32 / 255.0;
-        // x^2.2 ≈ x^2 * x^0.2;  x^0.2 ≈ 1 - 0.8*(1-x) for x>0.04
-        // Simpler: just use x*x as a rough gamma-2.0 approximation which
-        // is close enough for compile-time UI element colors.
-        x * x
-    }
-    [pow22(r), pow22(g), pow22(b), 1.0]
-}
+use super::state::GpuState;
 
 /// Frame data needed to build a frame.
 #[allow(clippy::struct_excessive_bools)]
@@ -244,7 +54,7 @@ pub struct FrameParams<'a> {
     pub tab_offsets: &'a [f32],
     /// Per-tab bell badge: true for tabs that received a bell while inactive.
     pub bell_badges: &'a [bool],
-    /// Sine pulse phase for bell badge animation (0.0–1.0).
+    /// Sine pulse phase for bell badge animation (0.0-1.0).
     pub bell_phase: f32,
     /// Display scale factor for `HiDPI` (1.0 = normal, 2.0 = Retina).
     pub scale: f32,
@@ -258,278 +68,6 @@ pub struct FrameParams<'a> {
     pub window_id: WindowId,
     /// Chrome-style locked tab width (after close, tabs keep width until mouse leaves bar).
     pub tab_width_lock: Option<usize>,
-}
-
-/// GPU state shared across all windows.
-pub struct GpuState {
-    pub instance: wgpu::Instance,
-    pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    /// The native surface format (used for surface configuration).
-    pub surface_format: wgpu::TextureFormat,
-    /// The sRGB format used for render passes and pipelines.
-    /// May differ from `surface_format` when the surface doesn't natively
-    /// support sRGB (e.g. DX12 `DirectComposition`).
-    pub render_format: wgpu::TextureFormat,
-    pub surface_alpha_mode: wgpu::CompositeAlphaMode,
-    /// Vulkan pipeline cache (compiled shaders cached to disk across sessions).
-    pub pipeline_cache: Option<wgpu::PipelineCache>,
-    pipeline_cache_path: Option<std::path::PathBuf>,
-}
-
-impl GpuState {
-    /// Initialize GPU: create instance, surface, adapter, device, queue.
-    /// When `transparent` is true on Windows, uses DX12 with `DirectComposition`
-    /// (the only path that gives `PreMultiplied` alpha on Windows HWND swapchains).
-    /// Otherwise prefers Vulkan (supports pipeline caching for faster subsequent launches).
-    pub fn new(window: &Arc<Window>, transparent: bool) -> Self {
-        #[cfg(not(target_os = "windows"))]
-        let _ = transparent;
-        // On Windows with transparency, DX12+DComp is the only path for PreMultiplied alpha
-        #[cfg(target_os = "windows")]
-        if transparent {
-            if let Some(state) = Self::try_init(window, wgpu::Backends::DX12, true) {
-                return state;
-            }
-            crate::log("DX12 DComp init failed, falling back to Vulkan");
-        }
-
-        // Prefer Vulkan — it supports pipeline caching (compiled shaders persisted to disk)
-        if let Some(state) = Self::try_init(window, wgpu::Backends::VULKAN, false) {
-            return state;
-        }
-        // Fall back to other primary backends (DX12, Metal)
-        if let Some(state) = Self::try_init(window, wgpu::Backends::PRIMARY, false) {
-            return state;
-        }
-        // Last resort: secondary backends (GL, etc.)
-        Self::try_init(window, wgpu::Backends::SECONDARY, false)
-            .expect("failed to initialize GPU with any backend")
-    }
-
-    fn try_init(window: &Arc<Window>, backends: wgpu::Backends, dcomp: bool) -> Option<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends,
-            backend_options: wgpu::BackendOptions {
-                dx12: wgpu::Dx12BackendOptions {
-                    presentation_system: if dcomp {
-                        wgpu::Dx12SwapchainKind::DxgiFromVisual
-                    } else {
-                        wgpu::Dx12SwapchainKind::default()
-                    },
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).ok()?;
-
-        // Use enumerate_adapters instead of the slow request_adapter.
-        // Pick the first discrete GPU that supports our surface, falling
-        // back to any compatible adapter.
-        let mut adapter: Option<wgpu::Adapter> = None;
-        let mut fallback: Option<wgpu::Adapter> = None;
-        for a in pollster::block_on(instance.enumerate_adapters(backends)) {
-            if !a.is_surface_supported(&surface) {
-                continue;
-            }
-            let info = a.get_info();
-            if info.device_type == wgpu::DeviceType::DiscreteGpu {
-                adapter = Some(a);
-                break;
-            }
-            if fallback.is_none() {
-                fallback = Some(a);
-            }
-        }
-        let adapter = adapter.or(fallback)?;
-
-        // Request PIPELINE_CACHE if the adapter supports it (Vulkan only)
-        let mut features = wgpu::Features::empty();
-        if adapter.features().contains(wgpu::Features::PIPELINE_CACHE) {
-            features |= wgpu::Features::PIPELINE_CACHE;
-        }
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("oriterm"),
-                required_features: features,
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            },
-        ))
-        .map_err(|e| crate::log(&format!("GPU device request failed: {e}")))
-        .ok()?;
-
-        let caps = surface.get_capabilities(&adapter);
-        // Pick the native surface format, then derive an sRGB render format.
-        // Some backends (DX12 DirectComposition) only expose non-sRGB surface
-        // formats.  We use `view_formats` + `add_srgb_suffix()` so the GPU
-        // still performs gamma-aware blending in all cases.
-        let surface_format = caps.formats[0];
-        let render_format = surface_format.add_srgb_suffix();
-
-        // view_formats lets us create an sRGB view of a non-sRGB surface
-        let view_formats = if render_format == surface_format {
-            vec![]
-        } else {
-            vec![render_format]
-        };
-
-        // Prefer a non-opaque alpha mode so the compositor can see our
-        // transparent pixels and show blur/acrylic through them.
-        let surface_alpha_mode = if caps
-            .alpha_modes
-            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-        {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else if caps
-            .alpha_modes
-            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
-        {
-            wgpu::CompositeAlphaMode::PostMultiplied
-        } else {
-            caps.alpha_modes[0]
-        };
-
-        // Configure the initial surface (it will be used by the first window)
-        let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: surface_format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: surface_alpha_mode,
-                view_formats,
-                desired_maximum_frame_latency: 2,
-            },
-        );
-
-        let info = adapter.get_info();
-        let transparency_supported = !matches!(
-            surface_alpha_mode,
-            wgpu::CompositeAlphaMode::Opaque
-        );
-        crate::log(&format!(
-            "GPU init: adapter={}, backend={:?}, surface_format={surface_format:?}, \
-             render_format={render_format:?}, \
-             alpha_mode={surface_alpha_mode:?} (available: {:?}), \
-             transparency={}",
-            info.name, info.backend, caps.alpha_modes,
-            if transparency_supported { "supported" } else { "not supported (opaque)" },
-        ));
-
-        // Pipeline cache: Vulkan supports caching compiled shaders to disk.
-        // On subsequent launches, this skips shader recompilation.
-        let (pipeline_cache, pipeline_cache_path) =
-            Self::load_pipeline_cache(&device, &info);
-
-        Some(Self {
-            instance,
-            adapter,
-            device,
-            queue,
-            surface_format,
-            render_format,
-            surface_alpha_mode,
-            pipeline_cache,
-            pipeline_cache_path,
-        })
-    }
-
-    /// Returns true if the surface alpha mode supports transparency.
-    pub fn supports_transparency(&self) -> bool {
-        !matches!(self.surface_alpha_mode, wgpu::CompositeAlphaMode::Opaque)
-    }
-
-    /// Load a pipeline cache from disk (Vulkan only).
-    /// Returns `(None, None)` on non-Vulkan backends.
-    ///
-    /// Safety: `create_pipeline_cache` is unsafe because it accepts arbitrary bytes.
-    /// If the data is corrupt or from a different driver version, Vulkan silently
-    /// ignores it and starts with an empty cache (we set `fallback: true`).
-    #[allow(unsafe_code)]
-    fn load_pipeline_cache(
-        device: &wgpu::Device,
-        adapter_info: &wgpu::AdapterInfo,
-    ) -> (Option<wgpu::PipelineCache>, Option<std::path::PathBuf>) {
-        let cache_key = match wgpu::util::pipeline_cache_key(adapter_info) {
-            Some(key) if device.features().contains(wgpu::Features::PIPELINE_CACHE) => key,
-            _ => return (None, None),
-        };
-        let cache_dir = crate::config::config_dir();
-        let cache_path = cache_dir.join(cache_key);
-        let cache_data = std::fs::read(&cache_path).ok();
-
-        // Safety: cache data came from a previous `get_data()` call on the same adapter.
-        // If the data is corrupt or from a different driver, wgpu/Vulkan silently ignores it.
-        let cache = unsafe {
-            device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-                label: Some("oriterm_pipeline_cache"),
-                data: cache_data.as_deref(),
-                fallback: true,
-            })
-        };
-
-        crate::log(&format!(
-            "pipeline cache: loaded from {} ({})",
-            cache_path.display(),
-            if cache_data.is_some() { "existing" } else { "new" },
-        ));
-
-        (Some(cache), Some(cache_path))
-    }
-
-    /// Save the pipeline cache to disk. Call before exit.
-    pub fn save_pipeline_cache(&self) {
-        let (Some(cache), Some(path)) = (&self.pipeline_cache, &self.pipeline_cache_path) else {
-            return;
-        };
-        let Some(data) = cache.get_data() else {
-            return;
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        // Atomic write: write to temp, then rename
-        let temp = path.with_extension("tmp");
-        if std::fs::write(&temp, &data).is_ok() {
-            let _ = std::fs::rename(&temp, path);
-            crate::log(&format!("pipeline cache: saved {} bytes to {}", data.len(), path.display()));
-        }
-    }
-
-    /// Create and configure a new surface for a window.
-    pub fn create_surface(
-        &self,
-        window: &Arc<Window>,
-    ) -> Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)> {
-        let surface = self.instance.create_surface(window.clone()).ok()?;
-        let size = window.inner_size();
-        let view_formats = if self.render_format == self.surface_format {
-            vec![]
-        } else {
-            vec![self.render_format]
-        };
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: self.surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: self.surface_alpha_mode,
-            view_formats,
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&self.device, &config);
-        Some((surface, config))
-    }
 }
 
 /// Pre-built frame data ready for a render pass.
@@ -551,9 +89,9 @@ struct PreparedFrame {
 pub struct GpuRenderer {
     bg_pipeline: wgpu::RenderPipeline,
     fg_pipeline: wgpu::RenderPipeline,
-    uniform_buffer: wgpu::Buffer,
+    pub(super) uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    atlas: GlyphAtlas,
+    pub(super) atlas: GlyphAtlas,
     atlas_bind_group: wgpu::BindGroup,
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -644,7 +182,12 @@ impl GpuRenderer {
     }
 
     /// Rebuild the atlas after font size change.
-    pub fn rebuild_atlas(&mut self, gpu: &GpuState, _glyphs: &mut FontSet, _ui_glyphs: &mut FontSet) {
+    pub fn rebuild_atlas(
+        &mut self,
+        gpu: &GpuState,
+        _glyphs: &mut FontSet,
+        _ui_glyphs: &mut FontSet,
+    ) {
         self.atlas = GlyphAtlas::new(&gpu.device);
         self.cached_frame = None;
 
@@ -679,12 +222,12 @@ impl GpuRenderer {
             Err(_) => return,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(self.render_format),
-                ..Default::default()
-            });
-        let mut encoder =
-            gpu.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            format: Some(self.render_format),
+            ..Default::default()
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
@@ -724,7 +267,9 @@ impl GpuRenderer {
         ui_glyphs: &mut FontSet,
     ) {
         self.prepare_frame(gpu, params, glyphs, ui_glyphs);
-        let Some(prepared) = self.cached_frame.as_ref() else { return };
+        let Some(prepared) = self.cached_frame.as_ref() else {
+            return;
+        };
 
         // Get surface texture
         let frame = match surface.get_current_texture() {
@@ -776,18 +321,23 @@ impl GpuRenderer {
         let w = params.width as f32;
         let h = params.height as f32;
 
-        // Update projection matrix (orthographic: pixels → NDC)
+        // Update projection matrix (orthographic: pixels to NDC)
         let projection = ortho_projection(w, h);
-        gpu.queue
-            .write_buffer(&self.uniform_buffer, 0, &projection);
+        gpu.queue.write_buffer(&self.uniform_buffer, 0, &projection);
 
         // Write rendering flags and minimum contrast ratio
         let flags: u32 = u32::from(params.alpha_blending == AlphaBlending::LinearCorrected);
-        gpu.queue.write_buffer(&self.uniform_buffer, 64, &flags.to_ne_bytes());
-        gpu.queue.write_buffer(&self.uniform_buffer, 68, &params.minimum_contrast.to_ne_bytes());
+        gpu.queue
+            .write_buffer(&self.uniform_buffer, 64, &flags.to_ne_bytes());
+        gpu.queue.write_buffer(
+            &self.uniform_buffer,
+            68,
+            &params.minimum_contrast.to_ne_bytes(),
+        );
 
         // Damage tracking: reuse cached frame (GPU buffers + all) when nothing changed.
-        let needs_rebuild = params.grid_dirty || params.tab_bar_dirty || self.cached_frame.is_none();
+        let needs_rebuild =
+            params.grid_dirty || params.tab_bar_dirty || self.cached_frame.is_none();
 
         if !needs_rebuild {
             // Main frame cached. But dragged-tab overlay may need updating
@@ -801,10 +351,18 @@ impl GpuRenderer {
                 let mut overlay_bg_w = InstanceWriter::new();
                 let mut overlay_fg_w = InstanceWriter::new();
                 self.build_dragged_tab_overlay(
-                    &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+                    &mut overlay_bg_w,
+                    &mut overlay_fg_w,
+                    params,
+                    ui_glyphs,
+                    &gpu.queue,
                 );
                 self.build_context_menu_overlay(
-                    &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+                    &mut overlay_bg_w,
+                    &mut overlay_fg_w,
+                    params,
+                    ui_glyphs,
+                    &gpu.queue,
                 );
 
                 let overlay_bg_bytes = overlay_bg_w.as_bytes();
@@ -881,10 +439,18 @@ impl GpuRenderer {
         let mut overlay_bg_w = InstanceWriter::new();
         let mut overlay_fg_w = InstanceWriter::new();
         self.build_dragged_tab_overlay(
-            &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+            &mut overlay_bg_w,
+            &mut overlay_fg_w,
+            params,
+            ui_glyphs,
+            &gpu.queue,
         );
         self.build_context_menu_overlay(
-            &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+            &mut overlay_bg_w,
+            &mut overlay_fg_w,
+            params,
+            ui_glyphs,
+            &gpu.queue,
         );
 
         let bg_bytes = bg.as_bytes();
@@ -899,7 +465,8 @@ impl GpuRenderer {
         let fg_count = fg.count();
         let overlay_bg_count = overlay_bg_w.count();
         let overlay_fg_count = overlay_fg_w.count();
-        let has_overlay = !overlay_bg_w.as_bytes().is_empty() || !overlay_fg_w.as_bytes().is_empty();
+        let has_overlay =
+            !overlay_bg_w.as_bytes().is_empty() || !overlay_fg_w.as_bytes().is_empty();
 
         // Create and upload GPU buffers
         let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -935,7 +502,8 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             });
             if !overlay_bg_bytes.is_empty() {
-                gpu.queue.write_buffer(&overlay_bg_buffer, 0, overlay_bg_bytes);
+                gpu.queue
+                    .write_buffer(&overlay_bg_buffer, 0, overlay_bg_bytes);
             }
             overlay_fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("overlay_fg"),
@@ -944,27 +512,36 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             });
             if !overlay_fg_bytes.is_empty() {
-                gpu.queue.write_buffer(&overlay_fg_buffer, 0, overlay_fg_bytes);
+                gpu.queue
+                    .write_buffer(&overlay_fg_buffer, 0, overlay_fg_bytes);
             }
         } else {
             // Dummy — never used
             overlay_bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: INSTANCE_STRIDE,
-                usage: wgpu::BufferUsages::VERTEX, mapped_at_creation: false,
+                label: None,
+                size: INSTANCE_STRIDE,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
             });
             overlay_fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None, size: INSTANCE_STRIDE,
-                usage: wgpu::BufferUsages::VERTEX, mapped_at_creation: false,
+                label: None,
+                size: INSTANCE_STRIDE,
+                usage: wgpu::BufferUsages::VERTEX,
+                mapped_at_creation: false,
             });
         }
 
         self.cached_frame = Some(PreparedFrame {
             default_bg,
             opacity: params.opacity,
-            bg_buffer, bg_count,
-            fg_buffer, fg_count,
-            overlay_bg_buffer, overlay_bg_count,
-            overlay_fg_buffer, overlay_fg_count,
+            bg_buffer,
+            bg_count,
+            fg_buffer,
+            fg_count,
+            overlay_bg_buffer,
+            overlay_bg_count,
+            overlay_fg_buffer,
+            overlay_fg_count,
             has_overlay,
         });
     }
@@ -1033,1006 +610,17 @@ impl GpuRenderer {
         }
     }
 
-    // --- Instance building: Tab bar ---
-
-    fn build_tab_bar_instances(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) {
-        let tc = TabBarColors::from_palette(params.palette);
-        let w = params.width as f32;
-        let s = params.scale;
-        let tab_bar_h = TAB_BAR_HEIGHT as f32 * s;
-
-        // Full-width bar background (darkest layer)
-        bg.push_rect(0.0, 0.0, w, tab_bar_h, tc.bar_bg);
-
-        let tab_count = params.tab_info.len();
-        let layout = TabBarLayout::compute(tab_count, params.width as usize, s as f64, params.tab_width_lock);
-        let tab_w = layout.tab_width;
-
-        let cell_h = glyphs.cell_height;
-
-        let dragged_idx = params.dragged_tab.map(|(idx, _)| idx);
-        let top = TAB_TOP_MARGIN as f32 * s;
-        let tab_h = tab_bar_h - top;
-
-        let tab_wf = tab_w as f32;
-
-        // --- Pass 1: inactive tabs (drawn first, behind active) ---
-        let left_margin = (TAB_LEFT_MARGIN as f32 * s) as usize;
-        for (i, (_id, title)) in params.tab_info.iter().enumerate() {
-            if Some(i) == dragged_idx || i == params.active_tab {
-                continue;
-            }
-
-            let base_x = (left_margin + i * tab_w) as f32;
-            let x0 = base_x + params.tab_offsets.get(i).copied().unwrap_or(0.0);
-            let is_hovered = params.hover_hit == TabBarHit::Tab(i);
-
-            let has_bell = params.bell_badges.get(i).copied().unwrap_or(false);
-            let tab_bg = if is_hovered {
-                tc.tab_hover_bg
-            } else if has_bell {
-                // Subtle sine pulse between inactive and hover bg
-                let t = params.bell_phase.clamp(0.0, 1.0);
-                lerp_color(tc.inactive_bg, tc.tab_hover_bg, t)
-            } else {
-                tc.inactive_bg
-            };
-
-            bg.push_rounded_rect(x0, top, tab_wf, tab_h, tab_bg, 8.0 * s);
-
-            // Separator — hidden next to active, hovered, or dragged tabs
-            let next_is_active = (i + 1) == params.active_tab;
-            let next_is_dragged = Some(i + 1) == dragged_idx;
-            let next_is_hovered = params.hover_hit == TabBarHit::Tab(i + 1);
-            if !is_hovered && !next_is_active && !next_is_dragged && !next_is_hovered {
-                let sep_x = x0 + tab_wf - 0.5;
-                bg.push_rect(sep_x, top + 8.0 * s, 1.0 * s, tab_h - 16.0 * s, tc.separator);
-            }
-
-            self.render_tab_content(
-                bg, fg, x0, tab_w, cell_h, title,
-                tc.inactive_text, &tc, i, params, glyphs, queue,
-            );
-        }
-
-        // --- Pass 2: active tab (drawn on top of inactive) ---
-        if let Some((_id, title)) = params.tab_info.get(params.active_tab) {
-            if Some(params.active_tab) != dragged_idx {
-                let base_x = (left_margin + params.active_tab * tab_w) as f32;
-                let x0 = base_x
-                    + params.tab_offsets.get(params.active_tab).copied().unwrap_or(0.0);
-
-                bg.push_rounded_rect(x0, top, tab_wf, tab_h, tc.active_bg, 8.0 * s);
-
-                self.render_tab_content(
-                    bg, fg, x0, tab_w, cell_h, title,
-                    tc.text_fg, &tc, params.active_tab, params, glyphs, queue,
-                );
-            }
-        }
-
-        // Dragged tab is rendered in the overlay pass (see build_dragged_tab_overlay)
-        // so its bg+fg both draw AFTER all main-pass bg+fg, giving correct occlusion.
-
-        // New tab "+" and dropdown buttons — when dragging, these are rendered
-        // in the overlay pass so they move with the dragged tab (fast path).
-        if params.dragged_tab.is_none() {
-            let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * s;
-            let plus_x = (left_margin + tab_count * tab_w) as f32;
-            let plus_hovered = params.hover_hit == TabBarHit::NewTab;
-            let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
-            bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
-            let plus_cx = plus_x + new_tab_w / 2.0;
-            let plus_cy = top + tab_h / 2.0;
-            self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
-
-            // Dropdown button — vector chevron icon
-            let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
-            let dropdown_x = plus_x + new_tab_w;
-            let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
-            let dropdown_bg = if dropdown_hovered || params.context_menu.is_some() {
-                tc.button_hover_bg
-            } else {
-                tc.bar_bg
-            };
-            bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
-            let dd_cx = dropdown_x + dropdown_w / 2.0;
-            let dd_cy = top + tab_h / 2.0;
-            self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
-        }
-
-        // Window control buttons
-        let controls_zone_w = (CONTROLS_ZONE_WIDTH as f32 * s) as usize;
-        let controls_start = (params.width as usize).saturating_sub(controls_zone_w) as f32;
-        self.build_window_controls(bg, controls_start, params, &tc);
-    }
-
-    /// Render a single tab's text content and close button.
-    #[allow(clippy::too_many_arguments)]
-    fn render_tab_content(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        x0: f32,
-        tab_w: usize,
-        cell_h: usize,
-        title: &str,
-        text_fg: [f32; 4],
-        tc: &TabBarColors,
-        tab_idx: usize,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) {
-        let s = params.scale;
-        let top = TAB_TOP_MARGIN as f32 * s;
-        let tab_h = TAB_BAR_HEIGHT as f32 * s - top;
-        let tab_padding = (TAB_PADDING as f32 * s) as usize;
-        let close_btn_w = (CLOSE_BUTTON_WIDTH as f32 * s) as usize;
-
-        // Title text — only truncated if it overflows the available space
-        let max_text_px = (tab_w - tab_padding * 2 - close_btn_w) as f32;
-        let display_title = glyphs.truncate_to_pixel_width(title, max_text_px);
-
-        let text_x = x0 + tab_padding as f32;
-        let text_y = top + (tab_h - cell_h as f32) / 2.0;
-        self.push_text_instances(fg, &display_title, text_x, text_y, text_fg, glyphs, queue);
-
-        // Close button — vector icon
-        let close_btn_wf = close_btn_w as f32;
-        let close_right_pad = CLOSE_BUTTON_RIGHT_PAD as f32 * s;
-        let close_x = x0 + tab_w as f32 - close_btn_wf - close_right_pad;
-        let close_hovered = params.hover_hit == TabBarHit::CloseTab(tab_idx);
-        if close_hovered {
-            let sq_y = top + (tab_h - close_btn_wf) / 2.0;
-            bg.push_rect(
-                close_x, sq_y,
-                close_btn_wf, close_btn_wf,
-                lighten(tc.bar_bg, 0.10),
-            );
-        }
-        let close_fg = if close_hovered { tc.text_fg } else { tc.close_fg };
-        let icon_cx = close_x + close_btn_wf / 2.0;
-        let icon_cy = top + tab_h / 2.0;
-        self.push_icon(fg, crate::icons::Icon::Close, icon_cx, icon_cy, 10.0, s, close_fg, queue);
-    }
-
-    #[cfg(target_os = "windows")]
-    fn build_window_controls(
+    /// Submit a simple two-pass frame (bg + fg) to a surface.
+    /// Used by `draw_settings_frame` and any other single-shot window rendering.
+    pub(super) fn submit_simple_frame(
         &self,
-        bg: &mut InstanceWriter,
-        controls_start: f32,
-        params: &FrameParams<'_>,
-        tc: &TabBarColors,
-    ) {
-        let sc = params.scale;
-        let btn_w = CONTROL_BUTTON_WIDTH as f32 * sc;
-        let bar_h = TAB_BAR_HEIGHT as f32 * sc;
-        let icon_sz = ICON_SIZE as f32 * sc;
-        let line_t = 1.0 * sc; // line thickness
-
-        // Minimize button (geometric horizontal line)
-        {
-            let btn_x = controls_start;
-            let hovered = params.hover_hit == TabBarHit::Minimize;
-            if hovered {
-                bg.push_rect(btn_x, 0.0, btn_w, bar_h, tc.control_hover_bg);
-            }
-            let fg_color = if hovered { tc.control_fg } else { tc.control_fg_dim };
-            let line_w: f32 = 10.0 * sc;
-            let line_x = btn_x + (btn_w - line_w) / 2.0;
-            let line_y = bar_h / 2.0;
-            bg.push_rect(line_x, line_y, line_w, line_t, fg_color);
-        }
-
-        // Maximize/Restore button
-        {
-            let btn_x = controls_start + btn_w;
-            let hovered = params.hover_hit == TabBarHit::Maximize;
-            if hovered {
-                bg.push_rect(btn_x, 0.0, btn_w, bar_h, tc.control_hover_bg);
-            }
-            let fg_color = if hovered { tc.control_fg } else { tc.control_fg_dim };
-            let icon_x = btn_x + (btn_w - icon_sz) / 2.0;
-            let icon_y = (bar_h - icon_sz) / 2.0;
-            if params.is_maximized {
-                let sm = icon_sz - 2.0 * sc;
-                bg.push_rect(icon_x + 2.0 * sc, icon_y, sm, line_t, fg_color);
-                bg.push_rect(icon_x + 2.0 * sc, icon_y + sm - line_t, sm, line_t, fg_color);
-                bg.push_rect(icon_x + 2.0 * sc, icon_y, line_t, sm, fg_color);
-                bg.push_rect(icon_x + sm + 2.0 * sc - line_t, icon_y, line_t, sm, fg_color);
-                bg.push_rect(icon_x, icon_y + 2.0 * sc, sm, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y + sm + 2.0 * sc - line_t, sm, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y + 2.0 * sc, line_t, sm, fg_color);
-                bg.push_rect(icon_x + sm - line_t, icon_y + 2.0 * sc, line_t, sm, fg_color);
-                let inner_bg = if hovered { tc.control_hover_bg } else { tc.bar_bg };
-                bg.push_rect(icon_x + line_t, icon_y + 3.0 * sc, sm - 2.0 * line_t, sm - 2.0 * line_t, inner_bg);
-            } else {
-                bg.push_rect(icon_x, icon_y, icon_sz, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y + icon_sz - line_t, icon_sz, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y, line_t, icon_sz, fg_color);
-                bg.push_rect(icon_x + icon_sz - line_t, icon_y, line_t, icon_sz, fg_color);
-            }
-        }
-
-        // Close button (Windows 11 style: geometric × drawn with small rects)
-        {
-            let btn_x = controls_start + btn_w * 2.0;
-            let hovered = params.hover_hit == TabBarHit::CloseWindow;
-            if hovered {
-                bg.push_rect(btn_x, 0.0, btn_w, bar_h, CONTROL_CLOSE_HOVER_BG);
-            }
-            let close_fg = if hovered {
-                CONTROL_CLOSE_HOVER_FG
-            } else {
-                tc.control_fg_dim
-            };
-            let x_size: f32 = 10.0 * sc;
-            let cx = btn_x + (btn_w - x_size) / 2.0;
-            let cy = (bar_h - x_size) / 2.0;
-            let steps = (10.0 * sc) as usize;
-            let step = x_size / steps as f32;
-            for i in 0..steps {
-                let fi = i as f32 * step;
-                bg.push_rect(cx + fi, cy + fi, sc, sc, close_fg);
-                bg.push_rect(cx + x_size - sc - fi, cy + fi, sc, sc, close_fg);
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn build_window_controls(
-        &self,
-        bg: &mut InstanceWriter,
-        controls_start: f32,
-        params: &FrameParams<'_>,
-        tc: &TabBarColors,
-    ) {
-        let sc = params.scale;
-        let bar_h = TAB_BAR_HEIGHT as f32 * sc;
-        let r = CONTROL_BUTTON_DIAMETER as f32 * sc / 2.0;
-        let cy = bar_h / 2.0;
-        let icon_s = ICON_SIZE as f32 * sc;
-        let margin = CONTROL_BUTTON_MARGIN as f32 * sc;
-        let diameter = CONTROL_BUTTON_DIAMETER as f32 * sc;
-        let spacing = CONTROL_BUTTON_SPACING as f32 * sc;
-        let line_t = 1.0 * sc;
-
-        // Button center X positions: minimize, maximize, close (left to right)
-        let btn_cx = [
-            controls_start + margin + r,
-            controls_start + margin + diameter + spacing + r,
-            controls_start + margin + 2.0 * (diameter + spacing) + r,
-        ];
-        let hits = [TabBarHit::Minimize, TabBarHit::Maximize, TabBarHit::CloseWindow];
-
-        for (i, &bcx) in btn_cx.iter().enumerate() {
-            let hovered = params.hover_hit == hits[i];
-            let is_close = i == 2;
-
-            // Circle background (blended with bar bg for semi-transparency)
-            let circle_fg = if hovered && is_close {
-                CONTROL_CLOSE_HOVER_BG
-            } else if hovered {
-                tc.control_hover_bg
-            } else {
-                tc.control_fg_dim
-            };
-            let circle_bg = lerp_color(tc.bar_bg, circle_fg, CONTROL_CIRCLE_ALPHA);
-            // Draw filled circle as horizontal slices
-            let d = (CONTROL_BUTTON_DIAMETER as f32 * sc) as i32;
-            for row in 0..d {
-                let dy = row as f32 - r + 0.5;
-                let half_w = (r * r - dy * dy).sqrt();
-                let x0 = bcx - half_w;
-                let w = half_w * 2.0;
-                bg.push_rect(x0, cy - r + row as f32, w, 1.0, circle_bg);
-            }
-
-            // Icon foreground
-            let fg_color = if hovered && is_close {
-                CONTROL_CLOSE_HOVER_FG
-            } else {
-                tc.control_fg
-            };
-            let ix = bcx - icon_s / 2.0;
-            let iy = cy - icon_s / 2.0;
-
-            match i {
-                0 => {
-                    // Minimize: horizontal line
-                    bg.push_rect(ix, cy, icon_s, line_t, fg_color);
-                }
-                1 => {
-                    // Maximize/Restore
-                    if params.is_maximized {
-                        let sm = icon_s - 2.0 * sc;
-                        // Back square
-                        bg.push_rect(ix + 2.0 * sc, iy, sm, line_t, fg_color);
-                        bg.push_rect(ix + 2.0 * sc, iy + sm - line_t, sm, line_t, fg_color);
-                        bg.push_rect(ix + 2.0 * sc, iy, line_t, sm, fg_color);
-                        bg.push_rect(ix + sm + 2.0 * sc - line_t, iy, line_t, sm, fg_color);
-                        // Front square
-                        bg.push_rect(ix, iy + 2.0 * sc, sm, line_t, fg_color);
-                        bg.push_rect(ix, iy + sm + 2.0 * sc - line_t, sm, line_t, fg_color);
-                        bg.push_rect(ix, iy + 2.0 * sc, line_t, sm, fg_color);
-                        bg.push_rect(ix + sm - line_t, iy + 2.0 * sc, line_t, sm, fg_color);
-                        bg.push_rect(ix + line_t, iy + 3.0 * sc, sm - 2.0 * line_t, sm - 2.0 * line_t, circle_bg);
-                    } else {
-                        // Single square outline
-                        bg.push_rect(ix, iy, icon_s, line_t, fg_color);
-                        bg.push_rect(ix, iy + icon_s - line_t, icon_s, line_t, fg_color);
-                        bg.push_rect(ix, iy, line_t, icon_s, fg_color);
-                        bg.push_rect(ix + icon_s - line_t, iy, line_t, icon_s, fg_color);
-                    }
-                }
-                _ => {
-                    // Close: × drawn as 1px diagonal squares
-                    let steps = (ICON_SIZE as f32 * sc) as usize;
-                    let step = icon_s / steps as f32;
-                    for j in 0..steps {
-                        let fj = j as f32 * step;
-                        bg.push_rect(ix + fj, iy + fj, sc, sc, fg_color);
-                        bg.push_rect(ix + icon_s - sc - fj, iy + fj, sc, sc, fg_color);
-                    }
-                }
-            }
-        }
-    }
-
-    // --- Instance building: Dragged tab overlay (rendered AFTER main bg+fg) ---
-
-    fn build_dragged_tab_overlay(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) {
-        let (drag_idx, drag_x) = match params.dragged_tab {
-            Some(d) => d,
-            None => return,
-        };
-        let (_id, title) = match params.tab_info.get(drag_idx) {
-            Some(t) => t,
-            None => return,
-        };
-
-        let s = params.scale;
-        let tc = TabBarColors::from_palette(params.palette);
-        let layout = TabBarLayout::compute(params.tab_info.len(), params.width as usize, s as f64, params.tab_width_lock);
-        let tab_w = layout.tab_width;
-        let tab_wf = tab_w as f32;
-        let cell_h = glyphs.cell_height;
-        let top = TAB_TOP_MARGIN as f32 * s;
-        let tab_h = TAB_BAR_HEIGHT as f32 * s - top;
-
-        // Opaque backing rect (covers underlying tab text from main FG pass)
-        bg.push_rect(drag_x, top, tab_wf, tab_h, tc.bar_bg);
-        // Rounded tab shape on top
-        bg.push_rounded_rect(drag_x, top, tab_wf, tab_h, tc.active_bg, 8.0 * s);
-
-        // Tab content (text + close button)
-        self.render_tab_content(
-            bg, fg, drag_x, tab_w, cell_h, title,
-            tc.text_fg, &tc, drag_idx, params, glyphs, queue,
-        );
-
-        // + and dropdown buttons — rendered in overlay during drag so they
-        // move with the dragged tab via the fast path.
-        let left_margin = (TAB_LEFT_MARGIN as f32 * s) as usize;
-        let tab_count = params.tab_info.len();
-        let default_plus_x = (left_margin + tab_count * tab_w) as f32;
-        let plus_x = default_plus_x.max(drag_x + tab_wf);
-
-        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * s;
-        let plus_bg = tc.bar_bg;
-        bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
-        let plus_cx = plus_x + new_tab_w / 2.0;
-        let plus_cy = top + tab_h / 2.0;
-        self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
-
-        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
-        let dropdown_x = plus_x + new_tab_w;
-        let dropdown_bg = if params.context_menu.is_some() {
-            tc.button_hover_bg
-        } else {
-            tc.bar_bg
-        };
-        bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
-        let dd_cx = dropdown_x + dropdown_w / 2.0;
-        let dd_cy = top + tab_h / 2.0;
-        self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
-    }
-
-    // --- Instance building: Dropdown overlay (rendered AFTER grid so it's on top) ---
-
-    fn build_context_menu_overlay(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) {
-        use crate::context_menu::MenuEntry;
-
-        let menu = match params.context_menu {
-            Some(m) => m,
-            None => return,
-        };
-
-        let (mx, my) = menu.position;
-        let mw = menu.width;
-        let mh = menu.height;
-        let cell_h = glyphs.cell_height as f32;
-
-        let menu_bg = UI_BG;
-        let hover_bg = UI_BG_HOVER;
-        let separator_color = UI_SEPARATOR;
-        let text_color = UI_TEXT;
-        let text_dim = UI_TEXT_DIM;
-        let check_color = text_color;
-
-        // 1. Shadow (offset down-right, all corners rounded)
-        let shadow_offset = 2.0 * menu.scale;
-        let shadow_color = [0.0, 0.0, 0.0, 0.35];
-        bg.push_all_rounded_rect(
-            mx + shadow_offset, my + shadow_offset,
-            mw, mh, shadow_color, menu.menu_radius(),
-        );
-
-        // 2. Menu background with all corners rounded
-        bg.push_all_rounded_rect(mx, my, mw, mh, menu_bg, menu.menu_radius());
-
-        // 3. Iterate entries and draw items
-        let mut y = my + menu.menu_padding_y();
-        for (i, entry) in menu.entries.iter().enumerate() {
-            let item_h = entry.height() * menu.scale;
-
-            match entry {
-                MenuEntry::Item { label, .. } => {
-                    // Hover highlight
-                    if menu.hovered == Some(i) {
-                        let inset = menu.item_hover_inset();
-                        bg.push_all_rounded_rect(
-                            mx + inset, y,
-                            mw - inset * 2.0, item_h,
-                            hover_bg, menu.item_hover_radius(),
-                        );
-                    }
-                    // Text
-                    let tx = mx + menu.item_padding_x();
-                    let ty = y + (item_h - cell_h) / 2.0;
-                    self.push_text_instances(fg, label, tx, ty, text_color, glyphs, queue);
-                }
-                MenuEntry::Check { label, checked, .. } => {
-                    // Hover highlight
-                    if menu.hovered == Some(i) {
-                        let inset = menu.item_hover_inset();
-                        bg.push_all_rounded_rect(
-                            mx + inset, y,
-                            mw - inset * 2.0, item_h,
-                            hover_bg, menu.item_hover_radius(),
-                        );
-                    }
-                    let tx = mx + menu.item_padding_x();
-                    let ty = y + (item_h - cell_h) / 2.0;
-
-                    // Checkmark (vector icon — no font fallback needed)
-                    let icon_sz = crate::context_menu::CHECKMARK_ICON_SIZE * menu.scale;
-                    let gap = crate::context_menu::CHECKMARK_GAP * menu.scale;
-                    if *checked {
-                        let icon_cx = tx + icon_sz / 2.0;
-                        let icon_cy = y + item_h / 2.0;
-                        self.push_icon(
-                            fg, crate::icons::Icon::Checkmark,
-                            icon_cx, icon_cy,
-                            crate::context_menu::CHECKMARK_ICON_SIZE,
-                            menu.scale, check_color, queue,
-                        );
-                    }
-                    // Label (indented past checkmark space)
-                    let label_x = tx + icon_sz + gap;
-                    let color = if *checked { text_color } else { text_dim };
-                    self.push_text_instances(fg, label, label_x, ty, color, glyphs, queue);
-                }
-                MenuEntry::Separator => {
-                    let sep_y = y + (item_h - menu.separator_thickness()) / 2.0;
-                    let sep_mx = menu.separator_margin_x();
-                    bg.push_rect(
-                        mx + sep_mx, sep_y,
-                        mw - sep_mx * 2.0, menu.separator_thickness(),
-                        separator_color,
-                    );
-                }
-            }
-            y += item_h;
-        }
-    }
-
-    // --- Instance building: Search bar ---
-
-    fn build_search_bar_overlay(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) {
-        let search = match params.search {
-            Some(s) => s,
-            None => return,
-        };
-
-        let sc = params.scale;
-        let w = params.width as f32;
-        let h = params.height as f32;
-        let cell_h = glyphs.cell_height;
-
-        let bar_h = cell_h as f32 + 12.0 * sc; // cell height + padding
-        let bar_y = h - bar_h;
-
-        let tc = TabBarColors::from_palette(params.palette);
-
-        // Bar background
-        bg.push_rect(0.0, bar_y, w, bar_h, tc.bar_bg);
-
-        // Top border
-        let border_c = lighten(tc.bar_bg, 0.25);
-        bg.push_rect(0.0, bar_y, w, 1.0 * sc, border_c);
-
-        let text_y = bar_y + (bar_h - cell_h as f32) / 2.0;
-
-        // Search icon ">" prefix
-        let prefix = "> ";
-        let prefix_x = 8.0 * sc;
-        self.push_text_instances(fg, prefix, prefix_x, text_y, tc.inactive_text, glyphs, queue);
-
-        // Query text
-        let query_x = prefix_x + glyphs.text_advance(prefix);
-        if !search.query.is_empty() {
-            self.push_text_instances(fg, &search.query, query_x, text_y, tc.text_fg, glyphs, queue);
-        }
-
-        // Cursor (blinking rect after query text)
-        let cursor_x = query_x + glyphs.text_advance(&search.query);
-        bg.push_rect(cursor_x, text_y, 2.0 * sc, cell_h as f32, tc.text_fg);
-
-        // Match count on the right
-        let count_text = if search.matches.is_empty() {
-            if search.query.is_empty() {
-                String::new()
-            } else {
-                "No matches".to_owned()
-            }
-        } else {
-            format!("{} of {}", search.focused + 1, search.matches.len())
-        };
-
-        if !count_text.is_empty() {
-            let count_w = glyphs.text_advance(&count_text);
-            let count_x = w - count_w - 12.0 * sc;
-            self.push_text_instances(fg, &count_text, count_x, text_y, tc.inactive_text, glyphs, queue);
-        }
-    }
-
-    // --- Instance building: Grid ---
-
-    #[allow(clippy::too_many_lines)]
-    fn build_grid_instances(
-        &mut self,
-        bg: &mut InstanceWriter,
-        fg: &mut InstanceWriter,
-        params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-        default_bg: &[f32; 4],
-    ) {
-        let grid = params.grid;
-        let palette = params.palette;
-        let cw = glyphs.cell_width;
-        let ch = glyphs.cell_height;
-        let baseline = glyphs.baseline;
-        let synthetic_bold = glyphs.needs_synthetic_bold();
-        let sc = params.scale;
-        let x_offset = (GRID_PADDING_LEFT as f32 * sc).round() as usize;
-        let y_offset = ((TAB_BAR_HEIGHT + GRID_PADDING_TOP) as f32 * sc).round() as usize;
-
-        let default_bg_u32 = crate::palette::rgb_to_u32(palette.default_bg());
-
-        for line in 0..grid.lines {
-            let row = grid.visible_row(line);
-            for col in 0..grid.cols {
-                let cell = &row[col];
-                let x0 = (col * cw + x_offset) as f32;
-                let y0 = (line * ch + y_offset) as f32;
-
-                // Skip wide char spacers
-                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-
-                // Resolve colors
-                let mut fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
-                let mut bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
-
-                // Compute absolute row for search/selection
-                let abs_row = grid
-                    .scrollback
-                    .len()
-                    .saturating_sub(grid.display_offset)
-                    + line;
-
-                // Search match highlighting
-                if let Some(search) = params.search {
-                    match search.cell_match_type(abs_row, col) {
-                        MatchType::FocusedMatch => {
-                            bg_rgb = vte::ansi::Rgb { r: 200, g: 120, b: 30 };
-                            fg_rgb = vte::ansi::Rgb { r: 0, g: 0, b: 0 };
-                        }
-                        MatchType::Match => {
-                            bg_rgb = vte::ansi::Rgb { r: 80, g: 80, b: 20 };
-                        }
-                        MatchType::None => {}
-                    }
-                }
-
-                // Selection highlight
-                let is_selected = params.selection.is_some_and(|sel| {
-                    sel.contains(abs_row, col)
-                });
-                if is_selected {
-                    let (sel_fg, sel_bg) = palette.selection_colors(fg_rgb, bg_rgb);
-                    fg_rgb = sel_fg;
-                    bg_rgb = sel_bg;
-                }
-
-                let bg_u32 = crate::palette::rgb_to_u32(bg_rgb);
-                let fg_rgba = vte_rgb_to_rgba(fg_rgb);
-                let bg_rgba = vte_rgb_to_rgba(bg_rgb);
-
-                let cell_w = if cell.flags.contains(CellFlags::WIDE_CHAR) {
-                    (cw * 2) as f32
-                } else {
-                    cw as f32
-                };
-
-                // Cell background (only if non-default or selected)
-                if bg_u32 != default_bg_u32 || is_selected {
-                    bg.push_rect(x0, y0, cell_w, ch as f32, bg_rgba);
-                }
-
-                // Cursor
-                let is_cursor = grid.display_offset == 0
-                    && params.mode.contains(TermMode::SHOW_CURSOR)
-                    && line == grid.cursor.row
-                    && col == grid.cursor.col;
-                if is_cursor && params.cursor_visible {
-                    let cursor_color = vte_rgb_to_rgba(palette.cursor_color());
-                    match params.cursor_shape {
-                        CursorShape::Beam => {
-                            // 2px vertical bar at left edge
-                            bg.push_rect(x0, y0, 2.0 * sc, ch as f32, cursor_color);
-                        }
-                        CursorShape::Underline => {
-                            // 2px horizontal bar at bottom
-                            bg.push_rect(x0, y0 + ch as f32 - 2.0 * sc, cw as f32, 2.0 * sc, cursor_color);
-                        }
-                        _ => {
-                            // Block (default): filled rect
-                            bg.push_rect(x0, y0, cw as f32, ch as f32, cursor_color);
-                        }
-                    }
-                }
-
-                // Underline decorations
-                if cell.flags.intersects(CellFlags::ANY_UNDERLINE) {
-                    let ul_color = if let Some(ul) = cell.underline_color() {
-                        vte_rgb_to_rgba(palette.resolve(ul, CellFlags::empty()))
-                    } else {
-                        fg_rgba
-                    };
-
-                    let underline_y = y0 + ch as f32 - 2.0;
-                    let draw_w = cell_w;
-
-                    if cell.flags.contains(CellFlags::UNDERCURL) {
-                        // Approximate undercurl with small rectangles at wave positions
-                        let steps = draw_w as usize;
-                        for dx in 0..steps {
-                            let phase =
-                                (dx as f32 / draw_w) * std::f32::consts::TAU;
-                            let offset = (phase.sin() * 2.0).round();
-                            bg.push_rect(
-                                x0 + dx as f32,
-                                underline_y + offset,
-                                1.0,
-                                1.0,
-                                ul_color,
-                            );
-                        }
-                    } else if cell.flags.contains(CellFlags::DOUBLE_UNDERLINE) {
-                        bg.push_rect(x0, underline_y, draw_w, 1.0, ul_color);
-                        bg.push_rect(x0, underline_y - 2.0, draw_w, 1.0, ul_color);
-                    } else if cell.flags.contains(CellFlags::DOTTED_UNDERLINE) {
-                        // Dotted: every other pixel
-                        let steps = draw_w as usize;
-                        for dx in (0..steps).step_by(2) {
-                            bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, ul_color);
-                        }
-                    } else if cell.flags.contains(CellFlags::DASHED_UNDERLINE) {
-                        // Dashed: 3px on, 2px off
-                        let steps = draw_w as usize;
-                        for dx in 0..steps {
-                            if dx % 5 < 3 {
-                                bg.push_rect(
-                                    x0 + dx as f32,
-                                    underline_y,
-                                    1.0,
-                                    1.0,
-                                    ul_color,
-                                );
-                            }
-                        }
-                    } else if cell.flags.contains(CellFlags::UNDERLINE) {
-                        bg.push_rect(x0, underline_y, draw_w, 1.0, ul_color);
-                    } else {
-                        // No underline decoration
-                    }
-                }
-
-                // Hyperlink underline (only when cell doesn't already have an underline)
-                if cell.hyperlink().is_some()
-                    && !cell.flags.intersects(CellFlags::ANY_UNDERLINE)
-                {
-                    let underline_y = y0 + ch as f32 - 2.0;
-                    let is_hovered = params.hover_hyperlink.is_some_and(|hover_uri| {
-                        cell.hyperlink().is_some_and(|h| h.uri == hover_uri)
-                    });
-                    if is_hovered {
-                        // Solid underline on hover
-                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
-                    } else {
-                        // Dotted underline (every other pixel)
-                        let steps = cell_w as usize;
-                        for dx in (0..steps).step_by(2) {
-                            bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, fg_rgba);
-                        }
-                    }
-                }
-
-                // Implicit URL underline (when hovered via Ctrl, no OSC 8, no explicit underline)
-                if let Some(segments) = params.hover_url_range {
-                    let in_url = segments.iter().any(|&(r, sc, ec)| {
-                        abs_row == r && col >= sc && col <= ec
-                    });
-                    if in_url
-                        && cell.hyperlink().is_none()
-                        && !cell.flags.intersects(CellFlags::ANY_UNDERLINE)
-                    {
-                        let underline_y = y0 + ch as f32 - 2.0;
-                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
-                    }
-                }
-
-                // Strikethrough
-                if cell.flags.contains(CellFlags::STRIKEOUT) {
-                    let strike_y = y0 + ch as f32 / 2.0;
-                    bg.push_rect(x0, strike_y, cell_w, 1.0, fg_rgba);
-                }
-
-                // Glyph (skip space/null)
-                if cell.c == ' ' || cell.c == '\0' {
-                    continue;
-                }
-
-                // Custom block character rendering (pixel-perfect, no font glyph)
-                if draw_block_char(cell.c, x0, y0, cell_w, ch as f32, fg_rgba, bg) {
-                    continue;
-                }
-
-                let style = FontStyle::from_cell_flags(cell.flags);
-                let entry =
-                    self.atlas
-                        .get_or_insert(cell.c, style, glyphs, queue);
-
-                if entry.metrics.width == 0 || entry.metrics.height == 0 {
-                    continue;
-                }
-
-                // Glyph position
-                let gx = x0 + entry.metrics.xmin as f32;
-                let gy = y0 + baseline as f32 - entry.metrics.height as f32
-                    - entry.metrics.ymin as f32;
-
-                // Only invert text color for block cursor (beam/underline don't cover the glyph)
-                let is_block_cursor = is_cursor && params.cursor_visible && matches!(params.cursor_shape, CursorShape::Block);
-                let glyph_fg = if is_block_cursor {
-                    *default_bg
-                } else {
-                    fg_rgba
-                };
-
-                // Effective background behind this glyph (for contrast/correction)
-                let glyph_bg = if is_block_cursor {
-                    vte_rgb_to_rgba(palette.cursor_color())
-                } else if bg_u32 != default_bg_u32 || is_selected {
-                    bg_rgba
-                } else {
-                    *default_bg
-                };
-
-                fg.push_glyph(
-                    gx,
-                    gy,
-                    entry.metrics.width as f32,
-                    entry.metrics.height as f32,
-                    entry.uv_pos,
-                    entry.uv_size,
-                    glyph_fg,
-                    glyph_bg,
-                );
-
-                // Synthetic bold: render glyph again 1px to the right
-                if synthetic_bold
-                    && (style == FontStyle::Bold || style == FontStyle::BoldItalic)
-                {
-                    fg.push_glyph(
-                        gx + 1.0,
-                        gy,
-                        entry.metrics.width as f32,
-                        entry.metrics.height as f32,
-                        entry.uv_pos,
-                        entry.uv_size,
-                        glyph_fg,
-                        glyph_bg,
-                    );
-                }
-
-                // Overlay combining marks (zerowidth characters stored in CellExtra)
-                for &zw in cell.zerowidth() {
-                    let zw_entry =
-                        self.atlas
-                            .get_or_insert(zw, style, glyphs, queue);
-                    if zw_entry.metrics.width == 0 || zw_entry.metrics.height == 0 {
-                        continue;
-                    }
-                    let zx = x0 + zw_entry.metrics.xmin as f32;
-                    let zy = y0 + baseline as f32 - zw_entry.metrics.height as f32
-                        - zw_entry.metrics.ymin as f32;
-                    fg.push_glyph(
-                        zx,
-                        zy,
-                        zw_entry.metrics.width as f32,
-                        zw_entry.metrics.height as f32,
-                        zw_entry.uv_pos,
-                        zw_entry.uv_size,
-                        glyph_fg,
-                        glyph_bg,
-                    );
-                }
-            }
-        }
-    }
-
-    // --- Settings window rendering ---
-
-    /// Render the settings window frame.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_settings_frame(
-        &mut self,
         gpu: &GpuState,
         surface: &wgpu::Surface<'_>,
         config: &wgpu::SurfaceConfiguration,
-        width: u32,
-        height: u32,
-        active_scheme: &str,
-        palette: Option<&Palette>,
-        glyphs: &mut FontSet, // UI font
+        bg: &InstanceWriter,
+        fg: &InstanceWriter,
+        clear_color: [f32; 4],
     ) {
-        let w = width as f32;
-        let h = height as f32;
-
-        // Update projection
-        let projection = ortho_projection(w, h);
-        gpu.queue.write_buffer(&self.uniform_buffer, 0, &projection);
-
-        let mut bg = InstanceWriter::new();
-        let mut fg = InstanceWriter::new();
-
-        // Derive colors from palette or use defaults
-        let (win_bg, title_fg, row_fg, row_hover, border_c) = if let Some(pal) = palette {
-            let base = vte_rgb_to_rgba(pal.default_bg());
-            let text = vte_rgb_to_rgba(pal.default_fg());
-            let bg_dark = darken(base, 0.20);
-            let hover = lighten(bg_dark, 0.15);
-            let brd = lighten(bg_dark, 0.25);
-            (bg_dark, text, text, hover, brd)
-        } else {
-            let s = srgb_to_linear;
-            let bg_dark = [s(0.08), s(0.08), s(0.12), 1.0];
-            let text = [s(0.8), s(0.84), s(0.96), 1.0];
-            let hover = [s(0.18), s(0.18), s(0.25), 1.0];
-            let brd = [s(0.3), s(0.3), s(0.4), 1.0];
-            (bg_dark, text, text, hover, brd)
-        };
-
-        // Full background
-        bg.push_rect(0.0, 0.0, w, h, win_bg);
-
-        // 1px border
-        bg.push_rect(0.0, 0.0, w, 1.0, border_c);
-        bg.push_rect(0.0, h - 1.0, w, 1.0, border_c);
-        bg.push_rect(0.0, 0.0, 1.0, h, border_c);
-        bg.push_rect(w - 1.0, 0.0, 1.0, h, border_c);
-
-        let cell_h = glyphs.cell_height;
-
-        // Title "Theme"
-        let title_y = (50.0 - cell_h as f32) / 2.0;
-        self.push_text_instances(
-            &mut fg, "Theme", 16.0, title_y, title_fg, glyphs, &gpu.queue,
-        );
-
-        // Close button — vector icon
-        let close_cx = w - 30.0 + 15.0;
-        let close_cy = 15.0;
-        self.push_icon(&mut fg, crate::icons::Icon::Close, close_cx, close_cy, 10.0, 1.0, row_fg, &gpu.queue);
-
-        // Scheme rows
-        let title_h: f32 = 50.0;
-        let row_h: f32 = 40.0;
-
-        for (i, scheme) in BUILTIN_SCHEMES.iter().enumerate() {
-            let y0 = title_h + i as f32 * row_h;
-            let is_active = scheme.name == active_scheme;
-
-            if is_active {
-                bg.push_rect(4.0, y0, w - 8.0, row_h, row_hover);
-            }
-
-            // Color preview swatch (small square of the scheme's bg)
-            let swatch_color = vte_rgb_to_rgba(scheme.bg);
-            let swatch_x: f32 = 16.0;
-            let swatch_y = y0 + (row_h - 16.0) / 2.0;
-            bg.push_rect(swatch_x, swatch_y, 16.0, 16.0, swatch_color);
-            // Swatch border
-            bg.push_rect(swatch_x, swatch_y, 16.0, 1.0, border_c);
-            bg.push_rect(swatch_x, swatch_y + 15.0, 16.0, 1.0, border_c);
-            bg.push_rect(swatch_x, swatch_y, 1.0, 16.0, border_c);
-            bg.push_rect(swatch_x + 15.0, swatch_y, 1.0, 16.0, border_c);
-
-            // Scheme name
-            let text_x: f32 = 40.0;
-            let text_y = y0 + (row_h - cell_h as f32) / 2.0;
-            let name_color = if is_active {
-                title_fg
-            } else {
-                lerp_color(win_bg, row_fg, 0.75)
-            };
-            self.push_text_instances(
-                &mut fg, scheme.name, text_x, text_y, name_color, glyphs, &gpu.queue,
-            );
-
-            // Active indicator: checkmark icon
-            if is_active {
-                let check_cx = w - 30.0 + 5.0;
-                let check_cy = y0 + row_h / 2.0;
-                self.push_icon(&mut fg, crate::icons::Icon::Checkmark, check_cx, check_cy, 10.0, 1.0, title_fg, &gpu.queue);
-            }
-        }
-
-        // Submit render
         let bg_bytes = bg.as_bytes();
         let fg_bytes = fg.as_bytes();
 
@@ -2041,7 +629,7 @@ impl GpuRenderer {
         }
 
         let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("settings_bg"),
+            label: Some("simple_bg"),
             size: (bg_bytes.len() as u64).max(INSTANCE_STRIDE),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -2051,7 +639,7 @@ impl GpuRenderer {
         }
 
         let fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("settings_fg"),
+            label: Some("simple_fg"),
             size: (fg_bytes.len() as u64).max(INSTANCE_STRIDE),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -2067,7 +655,7 @@ impl GpuRenderer {
                 return;
             }
             Err(e) => {
-                crate::log(&format!("settings surface error: {e}"));
+                crate::log(&format!("surface error: {e}"));
                 return;
             }
         };
@@ -2079,21 +667,21 @@ impl GpuRenderer {
         let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("settings_encoder"),
+                label: Some("simple_encoder"),
             });
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("settings_pass"),
+                label: Some("simple_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(win_bg[0]),
-                            g: f64::from(win_bg[1]),
-                            b: f64::from(win_bg[2]),
+                            r: f64::from(clear_color[0]),
+                            g: f64::from(clear_color[1]),
+                            b: f64::from(clear_color[2]),
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -2128,7 +716,7 @@ impl GpuRenderer {
     // --- Text rendering helpers ---
 
     /// Push glyph instances for a text string at the given pixel position.
-    fn push_text_instances(
+    pub(super) fn push_text_instances(
         &mut self,
         fg: &mut InstanceWriter,
         text: &str,
@@ -2142,9 +730,9 @@ impl GpuRenderer {
         let mut cx = x;
 
         for ch in text.chars() {
-            let entry =
-                self.atlas
-                    .get_or_insert(ch, FontStyle::Regular, glyphs, queue);
+            let entry = self
+                .atlas
+                .get_or_insert(ch, FontStyle::Regular, glyphs, queue);
 
             let advance = entry.metrics.advance_width.ceil();
 
@@ -2152,8 +740,9 @@ impl GpuRenderer {
                 // Round to pixel boundaries — with nearest-neighbor sampling,
                 // sub-pixel positions cause jagged/distorted glyphs.
                 let gx = (cx + entry.metrics.xmin as f32).round();
-                let gy = (y + baseline as f32 - entry.metrics.height as f32
-                    - entry.metrics.ymin as f32).round();
+                let gy =
+                    (y + baseline as f32 - entry.metrics.height as f32 - entry.metrics.ymin as f32)
+                        .round();
 
                 fg.push_glyph(
                     gx,
@@ -2172,7 +761,7 @@ impl GpuRenderer {
     }
 
     /// Push a vector icon centered at (cx, cy). `size` is in logical pixels.
-    fn push_icon(
+    pub(super) fn push_icon(
         &mut self,
         fg: &mut InstanceWriter,
         icon: crate::icons::Icon,
@@ -2198,206 +787,16 @@ impl GpuRenderer {
     }
 }
 
-// --- Block character rendering ---
-
-/// Draw a Unicode block element (U+2580–U+259F) as pixel-perfect rectangles.
-/// Returns `true` if the character was handled, `false` to fall through to the
-/// normal glyph path.
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
-fn draw_block_char(
-    c: char,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    fg: [f32; 4],
-    bg: &mut InstanceWriter,
-) -> bool {
-    match c {
-        // ▀ Upper half block
-        '\u{2580}' => {
-            bg.push_rect(x, y, w, (h / 2.0).round(), fg);
-        }
-        // ▁ Lower 1/8
-        '\u{2581}' => {
-            let bh = (h / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▂ Lower 1/4
-        '\u{2582}' => {
-            let bh = (h / 4.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▃ Lower 3/8
-        '\u{2583}' => {
-            let bh = (h * 3.0 / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▄ Lower half
-        '\u{2584}' => {
-            let bh = (h / 2.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▅ Lower 5/8
-        '\u{2585}' => {
-            let bh = (h * 5.0 / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▆ Lower 3/4
-        '\u{2586}' => {
-            let bh = (h * 3.0 / 4.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // ▇ Lower 7/8
-        '\u{2587}' => {
-            let bh = (h * 7.0 / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // █ Full block
-        '\u{2588}' => {
-            bg.push_rect(x, y, w, h, fg);
-        }
-        // ▉ Left 7/8
-        '\u{2589}' => {
-            bg.push_rect(x, y, (w * 7.0 / 8.0).round(), h, fg);
-        }
-        // ▊ Left 3/4
-        '\u{258A}' => {
-            bg.push_rect(x, y, (w * 3.0 / 4.0).round(), h, fg);
-        }
-        // ▋ Left 5/8
-        '\u{258B}' => {
-            bg.push_rect(x, y, (w * 5.0 / 8.0).round(), h, fg);
-        }
-        // ▌ Left half
-        '\u{258C}' => {
-            bg.push_rect(x, y, (w / 2.0).round(), h, fg);
-        }
-        // ▍ Left 3/8
-        '\u{258D}' => {
-            bg.push_rect(x, y, (w * 3.0 / 8.0).round(), h, fg);
-        }
-        // ▎ Left 1/4
-        '\u{258E}' => {
-            bg.push_rect(x, y, (w / 4.0).round(), h, fg);
-        }
-        // ▏ Left 1/8
-        '\u{258F}' => {
-            bg.push_rect(x, y, (w / 8.0).round(), h, fg);
-        }
-        // ▐ Right half
-        '\u{2590}' => {
-            let hw = (w / 2.0).round();
-            bg.push_rect(x + w - hw, y, hw, h, fg);
-        }
-        // ░ Light shade (25%)
-        '\u{2591}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.25];
-            bg.push_rect(x, y, w, h, shade);
-        }
-        // ▒ Medium shade (50%)
-        '\u{2592}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.5];
-            bg.push_rect(x, y, w, h, shade);
-        }
-        // ▓ Dark shade (75%)
-        '\u{2593}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.75];
-            bg.push_rect(x, y, w, h, shade);
-        }
-        // ▔ Upper 1/8
-        '\u{2594}' => {
-            bg.push_rect(x, y, w, (h / 8.0).round(), fg);
-        }
-        // ▕ Right 1/8
-        '\u{2595}' => {
-            let bw = (w / 8.0).round();
-            bg.push_rect(x + w - bw, y, bw, h, fg);
-        }
-        // Quadrant block elements (U+2596–U+259F)
-        // Each is a combination of quarter-cell fills:
-        //   TL = top-left, TR = top-right, BL = bottom-left, BR = bottom-right
-        '\u{2596}' => {
-            // ▖ Quadrant lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y + hh, hw, h - hh, fg);
-        }
-        '\u{2597}' => {
-            // ▗ Quadrant lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg);
-        }
-        '\u{2598}' => {
-            // ▘ Quadrant upper left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg);
-        }
-        '\u{2599}' => {
-            // ▙ Quadrant upper left + lower left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg);           // TL
-            bg.push_rect(x, y + hh, w, h - hh, fg);   // full bottom
-        }
-        '\u{259A}' => {
-            // ▚ Quadrant upper left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg);                    // TL
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg); // BR
-        }
-        '\u{259B}' => {
-            // ▛ Quadrant upper left + upper right + lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, w, hh, fg);            // full top
-            bg.push_rect(x, y + hh, hw, h - hh, fg);  // BL
-        }
-        '\u{259C}' => {
-            // ▜ Quadrant upper left + upper right + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, w, hh, fg);                     // full top
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg);  // BR
-        }
-        '\u{259D}' => {
-            // ▝ Quadrant upper right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg);
-        }
-        '\u{259E}' => {
-            // ▞ Quadrant upper right + lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg);       // TR
-            bg.push_rect(x, y + hh, hw, h - hh, fg);       // BL
-        }
-        '\u{259F}' => {
-            // ▟ Quadrant upper right + lower left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg);   // TR
-            bg.push_rect(x, y + hh, w, h - hh, fg);    // full bottom
-        }
-        _ => return false,
-    }
-    true
-}
-
 // --- Instance data serialization ---
 
 /// Writes cell instance data to a byte buffer without unsafe code.
-struct InstanceWriter {
+pub(super) struct InstanceWriter {
     data: Vec<u8>,
-    opacity: f32,
+    pub(super) opacity: f32,
 }
 
 impl InstanceWriter {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             data: Vec::with_capacity(4096),
             opacity: 1.0,
@@ -2406,7 +805,7 @@ impl InstanceWriter {
 
     /// Push a colored background rectangle (no texture, sharp corners).
     /// When opacity < 1.0, the color is premultiplied by opacity.
-    fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, bg_color: [f32; 4]) {
+    pub(super) fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, bg_color: [f32; 4]) {
         let color = if self.opacity < 1.0 {
             [
                 bg_color[0] * self.opacity,
@@ -2430,7 +829,7 @@ impl InstanceWriter {
     }
 
     /// Push a colored background rectangle with rounded top corners.
-    fn push_rounded_rect(
+    pub(super) fn push_rounded_rect(
         &mut self,
         x: f32,
         y: f32,
@@ -2462,7 +861,7 @@ impl InstanceWriter {
     }
 
     /// Push a colored rectangle with all four corners rounded.
-    fn push_all_rounded_rect(
+    pub(super) fn push_all_rounded_rect(
         &mut self,
         x: f32,
         y: f32,
@@ -2496,7 +895,7 @@ impl InstanceWriter {
 
     /// Push a textured glyph quad (alpha-blended).
     /// `bg_color` is passed through to the shader for contrast/correction.
-    fn push_glyph(
+    pub(super) fn push_glyph(
         &mut self,
         x: f32,
         y: f32,
@@ -2507,16 +906,7 @@ impl InstanceWriter {
         fg_color: [f32; 4],
         bg_color: [f32; 4],
     ) {
-        self.push_raw(
-            [x, y],
-            [w, h],
-            uv_pos,
-            uv_size,
-            fg_color,
-            bg_color,
-            1,
-            0.0,
-        );
+        self.push_raw([x, y], [w, h], uv_pos, uv_size, fg_color, bg_color, 1, 0.0);
     }
 
     /// Write a full 80-byte instance record.
@@ -2556,78 +946,11 @@ impl InstanceWriter {
         self.data.extend_from_slice(&[0u8; 8]);
     }
 
-    fn count(&self) -> u32 {
+    pub(super) fn count(&self) -> u32 {
         (self.data.len() / INSTANCE_STRIDE as usize) as u32
     }
 
-    fn as_bytes(&self) -> &[u8] {
+    pub(super) fn as_bytes(&self) -> &[u8] {
         &self.data
     }
-}
-
-// --- Color conversion helpers ---
-
-/// Convert an sRGB component (0.0–1.0) to linear light.
-pub(crate) fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Convert VTE RGB to [f32; 4] RGBA in **linear** space (alpha=1.0).
-fn vte_rgb_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
-    [
-        srgb_to_linear(f32::from(rgb.r) / 255.0),
-        srgb_to_linear(f32::from(rgb.g) / 255.0),
-        srgb_to_linear(f32::from(rgb.b) / 255.0),
-        1.0,
-    ]
-}
-
-/// Convert palette `default_bg()` to RGBA (linear).
-fn palette_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
-    vte_rgb_to_rgba(rgb)
-}
-
-/// Convert a u32 color (0x00RRGGBB) to [f32; 4] RGBA in **linear** space.
-#[cfg(target_os = "windows")]
-fn u32_to_rgba(c: u32) -> [f32; 4] {
-    [
-        srgb_to_linear(((c >> 16) & 0xFF) as f32 / 255.0),
-        srgb_to_linear(((c >> 8) & 0xFF) as f32 / 255.0),
-        srgb_to_linear((c & 0xFF) as f32 / 255.0),
-        1.0,
-    ]
-}
-
-/// Build an orthographic projection matrix (pixels → NDC) as 64 bytes.
-/// Maps (0,0)-(w,h) to (-1,1)-(1,-1), column-major for WGSL mat4x4.
-fn ortho_projection(w: f32, h: f32) -> [u8; 64] {
-    let proj: [f32; 16] = [
-        2.0 / w,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        -2.0 / h,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        -1.0,
-        1.0,
-        0.0,
-        1.0,
-    ];
-
-    let mut bytes = [0u8; 64];
-    for (i, &v) in proj.iter().enumerate() {
-        let b = v.to_ne_bytes();
-        bytes[i * 4..i * 4 + 4].copy_from_slice(&b);
-    }
-    bytes
 }

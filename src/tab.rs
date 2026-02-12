@@ -3,8 +3,8 @@ use std::path::Path;
 use std::thread;
 use std::time::Instant;
 
-use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
 use vte::Perform;
+use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
 use winit::event_loop::EventLoopProxy;
 
 use crate::grid::Grid;
@@ -95,16 +95,14 @@ impl Perform for RawInterceptor<'_> {
                 if params.len() >= 2 {
                     let uri = std::str::from_utf8(params[1]).unwrap_or_default();
                     // Strip file:// prefix and optional hostname to get the path.
-                    let path = uri
-                        .strip_prefix("file://")
-                        .map_or(uri, |rest| {
-                            // Skip hostname (everything before the next /)
-                            if let Some(slash) = rest.find('/') {
-                                rest.split_at(slash).1
-                            } else {
-                                rest
-                            }
-                        });
+                    let path = uri.strip_prefix("file://").map_or(uri, |rest| {
+                        // Skip hostname (everything before the next /)
+                        if let Some(slash) = rest.find('/') {
+                            rest.split_at(slash).1
+                        } else {
+                            rest
+                        }
+                    });
                     if !path.is_empty() {
                         *self.cwd = Some(path.to_owned());
                         // CWD-based title should override ConPTY's auto-generated
@@ -149,13 +147,16 @@ impl Perform for RawInterceptor<'_> {
                 if params.len() >= 2 {
                     let action = std::str::from_utf8(params[1]).unwrap_or_default();
                     if action == "notify" {
-                        let title = params.get(2)
+                        let title = params
+                            .get(2)
                             .map(|p| String::from_utf8_lossy(p).into_owned())
                             .unwrap_or_default();
-                        let body = params.get(3)
+                        let body = params
+                            .get(3)
                             .map(|p| String::from_utf8_lossy(p).into_owned())
                             .unwrap_or_default();
-                        self.pending_notifications.push(Notification { title, body });
+                        self.pending_notifications
+                            .push(Notification { title, body });
                     }
                 }
             }
@@ -264,8 +265,8 @@ impl Tab {
             cmd.arg(arg);
         }
 
-        let detected_shell = integration_dir
-            .and_then(|_| shell_integration::detect_shell(&shell_program));
+        let detected_shell =
+            integration_dir.and_then(|_| shell_integration::detect_shell(&shell_program));
 
         // For WSL, CWD is passed via --cd (Linux paths don't work as Windows CWD).
         // For native shells, use cmd.cwd().
@@ -278,9 +279,8 @@ impl Tab {
 
         if let Some(integ_dir) = integration_dir {
             if let Some(shell_type) = detected_shell {
-                let extra_arg = shell_integration::setup_injection(
-                    &mut cmd, shell_type, integ_dir, cwd,
-                );
+                let extra_arg =
+                    shell_integration::setup_injection(&mut cmd, shell_type, integ_dir, cwd);
                 if let Some(arg) = extra_arg {
                     cmd.arg(arg);
                 }
@@ -330,20 +330,27 @@ impl Tab {
             if let Some(pid) = child.process_id() {
                 let wait_id = id;
                 thread::spawn(move || {
-                    use windows_sys::Win32::System::Threading::{
-                        OpenProcess, WaitForSingleObject, INFINITE,
-                    };
                     use windows_sys::Win32::Foundation::CloseHandle;
+                    use windows_sys::Win32::System::Threading::{
+                        INFINITE, OpenProcess, WaitForSingleObject,
+                    };
                     const SYNCHRONIZE: u32 = 0x0010_0000;
 
-                    log(&format!("child waiter thread started for tab {:?} (pid {})", wait_id, pid));
+                    log(&format!(
+                        "child waiter thread started for tab {:?} (pid {})",
+                        wait_id, pid
+                    ));
                     #[allow(unsafe_code)]
                     let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
                     if !handle.is_null() {
                         #[allow(unsafe_code)]
-                        unsafe { WaitForSingleObject(handle, INFINITE) };
+                        unsafe {
+                            WaitForSingleObject(handle, INFINITE)
+                        };
                         #[allow(unsafe_code)]
-                        unsafe { CloseHandle(handle) };
+                        unsafe {
+                            CloseHandle(handle)
+                        };
                         log(&format!("child exited (waiter) for tab {:?}", wait_id));
                         let _ = wait_proxy.send_event(TermEvent::PtyExited(wait_id));
                     }
@@ -353,7 +360,8 @@ impl Tab {
 
         // Derive a good initial title. For WSL, use the distro name.
         let initial_title = if is_wsl {
-            shell_args.iter()
+            shell_args
+                .iter()
                 .zip(shell_args.iter().skip(1))
                 .find(|&(&flag, _)| flag == "-d" || flag == "--distribution")
                 .map_or_else(|| "WSL".to_owned(), |(_, &name)| name.to_owned())
@@ -365,7 +373,7 @@ impl Tab {
         Ok(Self {
             id,
             primary_grid: Grid::with_max_scrollback(cols, rows, max_scrollback),
-            alt_grid: Grid::new(cols, rows),  // alt screen has no scrollback
+            alt_grid: Grid::new(cols, rows), // alt screen has no scrollback
             active_is_alt: false,
             pty_writer: Some(writer),
             processor: vte::ansi::Processor::new(),
@@ -417,11 +425,19 @@ impl Tab {
     }
 
     pub fn grid(&self) -> &Grid {
-        if self.active_is_alt { &self.alt_grid } else { &self.primary_grid }
+        if self.active_is_alt {
+            &self.alt_grid
+        } else {
+            &self.primary_grid
+        }
     }
 
     pub fn grid_mut(&mut self) -> &mut Grid {
-        if self.active_is_alt { &mut self.alt_grid } else { &mut self.primary_grid }
+        if self.active_is_alt {
+            &mut self.alt_grid
+        } else {
+            &mut self.primary_grid
+        }
     }
 
     pub fn process_output(&mut self, data: &[u8]) {
@@ -511,7 +527,11 @@ fn short_path(path: &str) -> String {
     // Try to replace home directory with ~.
     if let Ok(home) = std::env::var("HOME") {
         if let Some(rest) = path.strip_prefix(&home) {
-            let relative = if rest.is_empty() { "" } else { rest.trim_start_matches('/') };
+            let relative = if rest.is_empty() {
+                ""
+            } else {
+                rest.trim_start_matches('/')
+            };
             if relative.is_empty() {
                 return "~".to_owned();
             }
@@ -521,7 +541,11 @@ fn short_path(path: &str) -> String {
     #[cfg(target_os = "windows")]
     if let Ok(profile) = std::env::var("USERPROFILE") {
         if let Some(rest) = path.strip_prefix(&profile) {
-            let relative = if rest.is_empty() { "" } else { rest.trim_start_matches('\\').trim_start_matches('/') };
+            let relative = if rest.is_empty() {
+                ""
+            } else {
+                rest.trim_start_matches('\\').trim_start_matches('/')
+            };
             if relative.is_empty() {
                 return "~".to_owned();
             }

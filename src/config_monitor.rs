@@ -52,10 +52,7 @@ impl ConfigMonitor {
             return None;
         }
 
-        log(&format!(
-            "config_monitor: watching {}",
-            parent.display()
-        ));
+        log(&format!("config_monitor: watching {}", parent.display()));
 
         let config_file = path;
         let thread = std::thread::Builder::new()

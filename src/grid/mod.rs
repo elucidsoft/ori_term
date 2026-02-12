@@ -118,14 +118,20 @@ impl Grid {
         let row = self.cursor.row;
 
         // Clear wide char spacer if we're overwriting the first cell of a wide char
-        if col > 0 && self.rows[row][col].flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+        if col > 0
+            && self.rows[row][col]
+                .flags
+                .contains(CellFlags::WIDE_CHAR_SPACER)
+        {
             self.rows[row][col - 1].c = ' ';
             self.rows[row][col - 1].flags.remove(CellFlags::WIDE_CHAR);
         }
         // Clear wide char if we're overwriting the wide char itself
         if self.rows[row][col].flags.contains(CellFlags::WIDE_CHAR) && col + 1 < self.cols {
             self.rows[row][col + 1].c = ' ';
-            self.rows[row][col + 1].flags.remove(CellFlags::WIDE_CHAR_SPACER);
+            self.rows[row][col + 1]
+                .flags
+                .remove(CellFlags::WIDE_CHAR_SPACER);
         }
 
         let cell = &mut self.rows[row][col];
@@ -196,7 +202,9 @@ impl Grid {
         // Set WRAPLINE flag on current row
         let row = self.cursor.row;
         if self.cols > 0 {
-            self.rows[row][self.cols - 1].flags.insert(CellFlags::WRAPLINE);
+            self.rows[row][self.cols - 1]
+                .flags
+                .insert(CellFlags::WRAPLINE);
         }
 
         self.cursor.col = 0;
@@ -696,7 +704,11 @@ impl Grid {
 
             // Wrapped rows: all cells up to old_cols are content
             // Non-wrapped rows: trim trailing blanks
-            let content_len = if wrapped { old_cols } else { src_row.content_len() };
+            let content_len = if wrapped {
+                old_cols
+            } else {
+                src_row.content_len()
+            };
 
             // Process each source cell
             for src_col in 0..content_len {
@@ -727,7 +739,9 @@ impl Grid {
                     // Pad with spacer if wide char at boundary
                     if is_wide && out_col < new_cols {
                         out_row[out_col] = Cell::default();
-                        out_row[out_col].flags.insert(CellFlags::LEADING_WIDE_CHAR_SPACER);
+                        out_row[out_col]
+                            .flags
+                            .insert(CellFlags::LEADING_WIDE_CHAR_SPACER);
                     }
                     out_row.occ = new_cols;
                     out_row[new_cols - 1].flags.insert(CellFlags::WRAPLINE);
@@ -835,7 +849,9 @@ impl Grid {
                 break;
             }
             // Check if the last row is blank
-            let is_blank = self.rows[last_idx].iter().all(|c| c.c == ' ' || c.c == '\0');
+            let is_blank = self.rows[last_idx]
+                .iter()
+                .all(|c| c.c == ' ' || c.c == '\0');
             if !is_blank {
                 break;
             }
@@ -1161,7 +1177,11 @@ mod tests {
         g.cursor.col = 4; // Last column
         g.put_wide_char('漢');
         // Should place LEADING_WIDE_CHAR_SPACER at col 4 and wrap
-        assert!(g.row(0)[4].flags.contains(CellFlags::LEADING_WIDE_CHAR_SPACER));
+        assert!(
+            g.row(0)[4]
+                .flags
+                .contains(CellFlags::LEADING_WIDE_CHAR_SPACER)
+        );
         assert_eq!(g.row(1)[0].c, '漢');
         assert!(g.row(1)[0].flags.contains(CellFlags::WIDE_CHAR));
         assert!(g.row(1)[1].flags.contains(CellFlags::WIDE_CHAR_SPACER));

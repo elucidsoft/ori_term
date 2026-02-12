@@ -146,7 +146,9 @@ impl GlyphAtlas {
             let entry = self.upload_bitmap(&metrics, &bmp.data, queue);
             self.icon_entries.insert(key, entry);
         }
-        self.icon_entries.get(&key).expect("icon entry just inserted")
+        self.icon_entries
+            .get(&key)
+            .expect("icon entry just inserted")
     }
 
     /// Get a glyph entry if it already exists in the atlas.

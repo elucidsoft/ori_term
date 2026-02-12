@@ -334,8 +334,8 @@ pub fn extract_text(grid: &Grid, selection: &Selection) -> String {
                 }
 
                 // Check if this row is soft-wrapped (continues on next row)
-                let is_wrapped = !row.is_empty()
-                    && row[row.len() - 1].flags.contains(CellFlags::WRAPLINE);
+                let is_wrapped =
+                    !row.is_empty() && row[row.len() - 1].flags.contains(CellFlags::WRAPLINE);
 
                 if is_wrapped && abs_row < end.row {
                     // Soft wrap: don't trim, don't add newline
@@ -361,9 +361,21 @@ mod tests {
 
     #[test]
     fn selection_point_ordering() {
-        let a = SelectionPoint { row: 0, col: 5, side: Side::Left };
-        let b = SelectionPoint { row: 0, col: 5, side: Side::Right };
-        let c = SelectionPoint { row: 1, col: 0, side: Side::Left };
+        let a = SelectionPoint {
+            row: 0,
+            col: 5,
+            side: Side::Left,
+        };
+        let b = SelectionPoint {
+            row: 0,
+            col: 5,
+            side: Side::Right,
+        };
+        let c = SelectionPoint {
+            row: 1,
+            col: 0,
+            side: Side::Left,
+        };
         assert!(a < b);
         assert!(b < c);
         assert!(a < c);
@@ -373,9 +385,21 @@ mod tests {
     fn selection_contains_single_row() {
         let sel = Selection {
             mode: SelectionMode::Char,
-            anchor: SelectionPoint { row: 5, col: 2, side: Side::Left },
-            pivot: SelectionPoint { row: 5, col: 2, side: Side::Left },
-            end: SelectionPoint { row: 5, col: 8, side: Side::Right },
+            anchor: SelectionPoint {
+                row: 5,
+                col: 2,
+                side: Side::Left,
+            },
+            pivot: SelectionPoint {
+                row: 5,
+                col: 2,
+                side: Side::Left,
+            },
+            end: SelectionPoint {
+                row: 5,
+                col: 8,
+                side: Side::Right,
+            },
         };
         assert!(!sel.contains(5, 1));
         assert!(sel.contains(5, 2));
@@ -390,9 +414,21 @@ mod tests {
     fn selection_contains_multi_row() {
         let sel = Selection {
             mode: SelectionMode::Char,
-            anchor: SelectionPoint { row: 2, col: 5, side: Side::Left },
-            pivot: SelectionPoint { row: 2, col: 5, side: Side::Left },
-            end: SelectionPoint { row: 4, col: 3, side: Side::Right },
+            anchor: SelectionPoint {
+                row: 2,
+                col: 5,
+                side: Side::Left,
+            },
+            pivot: SelectionPoint {
+                row: 2,
+                col: 5,
+                side: Side::Left,
+            },
+            end: SelectionPoint {
+                row: 4,
+                col: 3,
+                side: Side::Right,
+            },
         };
         // Row 2: col >= 5
         assert!(!sel.contains(2, 4));
@@ -421,9 +457,21 @@ mod tests {
     fn block_selection_contains() {
         let sel = Selection {
             mode: SelectionMode::Block,
-            anchor: SelectionPoint { row: 2, col: 3, side: Side::Left },
-            pivot: SelectionPoint { row: 2, col: 3, side: Side::Left },
-            end: SelectionPoint { row: 5, col: 7, side: Side::Right },
+            anchor: SelectionPoint {
+                row: 2,
+                col: 3,
+                side: Side::Left,
+            },
+            pivot: SelectionPoint {
+                row: 2,
+                col: 3,
+                side: Side::Left,
+            },
+            end: SelectionPoint {
+                row: 5,
+                col: 7,
+                side: Side::Right,
+            },
         };
         assert!(sel.contains(3, 5));
         assert!(!sel.contains(3, 2));
@@ -506,9 +554,21 @@ mod tests {
 
         let sel = Selection {
             mode: SelectionMode::Char,
-            anchor: SelectionPoint { row: 0, col: 0, side: Side::Left },
-            pivot: SelectionPoint { row: 0, col: 0, side: Side::Left },
-            end: SelectionPoint { row: 0, col: 1, side: Side::Right },
+            anchor: SelectionPoint {
+                row: 0,
+                col: 0,
+                side: Side::Left,
+            },
+            pivot: SelectionPoint {
+                row: 0,
+                col: 0,
+                side: Side::Left,
+            },
+            end: SelectionPoint {
+                row: 0,
+                col: 1,
+                side: Side::Right,
+            },
         };
         let text = extract_text(&grid, &sel);
         assert_eq!(text, "e\u{0301}x");
@@ -528,9 +588,21 @@ mod tests {
 
         let sel = Selection {
             mode: SelectionMode::Char,
-            anchor: SelectionPoint { row: 0, col: 0, side: Side::Left },
-            pivot: SelectionPoint { row: 0, col: 0, side: Side::Left },
-            end: SelectionPoint { row: 1, col: 4, side: Side::Right },
+            anchor: SelectionPoint {
+                row: 0,
+                col: 0,
+                side: Side::Left,
+            },
+            pivot: SelectionPoint {
+                row: 0,
+                col: 0,
+                side: Side::Left,
+            },
+            end: SelectionPoint {
+                row: 1,
+                col: 4,
+                side: Side::Right,
+            },
         };
         let text = extract_text(&grid, &sel);
         assert_eq!(text, "Hello\nWorld");

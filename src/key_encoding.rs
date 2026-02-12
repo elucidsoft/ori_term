@@ -79,34 +79,64 @@ struct TildeKey {
 
 fn letter_key(key: NamedKey) -> Option<LetterKey> {
     Some(match key {
-        NamedKey::ArrowUp    => LetterKey { term: b'A', ss3: true },
-        NamedKey::ArrowDown  => LetterKey { term: b'B', ss3: true },
-        NamedKey::ArrowRight => LetterKey { term: b'C', ss3: true },
-        NamedKey::ArrowLeft  => LetterKey { term: b'D', ss3: true },
-        NamedKey::Home       => LetterKey { term: b'H', ss3: true },
-        NamedKey::End        => LetterKey { term: b'F', ss3: true },
-        NamedKey::F1         => LetterKey { term: b'P', ss3: true },
-        NamedKey::F2         => LetterKey { term: b'Q', ss3: true },
-        NamedKey::F3         => LetterKey { term: b'R', ss3: true },
-        NamedKey::F4         => LetterKey { term: b'S', ss3: true },
+        NamedKey::ArrowUp => LetterKey {
+            term: b'A',
+            ss3: true,
+        },
+        NamedKey::ArrowDown => LetterKey {
+            term: b'B',
+            ss3: true,
+        },
+        NamedKey::ArrowRight => LetterKey {
+            term: b'C',
+            ss3: true,
+        },
+        NamedKey::ArrowLeft => LetterKey {
+            term: b'D',
+            ss3: true,
+        },
+        NamedKey::Home => LetterKey {
+            term: b'H',
+            ss3: true,
+        },
+        NamedKey::End => LetterKey {
+            term: b'F',
+            ss3: true,
+        },
+        NamedKey::F1 => LetterKey {
+            term: b'P',
+            ss3: true,
+        },
+        NamedKey::F2 => LetterKey {
+            term: b'Q',
+            ss3: true,
+        },
+        NamedKey::F3 => LetterKey {
+            term: b'R',
+            ss3: true,
+        },
+        NamedKey::F4 => LetterKey {
+            term: b'S',
+            ss3: true,
+        },
         _ => return None,
     })
 }
 
 fn tilde_key(key: NamedKey) -> Option<TildeKey> {
     Some(match key {
-        NamedKey::Insert   => TildeKey { num: 2 },
-        NamedKey::Delete   => TildeKey { num: 3 },
-        NamedKey::PageUp   => TildeKey { num: 5 },
+        NamedKey::Insert => TildeKey { num: 2 },
+        NamedKey::Delete => TildeKey { num: 3 },
+        NamedKey::PageUp => TildeKey { num: 5 },
         NamedKey::PageDown => TildeKey { num: 6 },
-        NamedKey::F5       => TildeKey { num: 15 },
-        NamedKey::F6       => TildeKey { num: 17 },
-        NamedKey::F7       => TildeKey { num: 18 },
-        NamedKey::F8       => TildeKey { num: 19 },
-        NamedKey::F9       => TildeKey { num: 20 },
-        NamedKey::F10      => TildeKey { num: 21 },
-        NamedKey::F11      => TildeKey { num: 23 },
-        NamedKey::F12      => TildeKey { num: 24 },
+        NamedKey::F5 => TildeKey { num: 15 },
+        NamedKey::F6 => TildeKey { num: 17 },
+        NamedKey::F7 => TildeKey { num: 18 },
+        NamedKey::F8 => TildeKey { num: 19 },
+        NamedKey::F9 => TildeKey { num: 20 },
+        NamedKey::F10 => TildeKey { num: 21 },
+        NamedKey::F11 => TildeKey { num: 23 },
+        NamedKey::F12 => TildeKey { num: 24 },
         _ => return None,
     })
 }
@@ -140,7 +170,7 @@ fn encode_legacy(key: &Key, mods: Modifiers, mode: TermMode, text: Option<&str>)
 
         // Simple named keys that produce fixed bytes.
         return match named {
-            NamedKey::Enter     => vec![b'\r'],
+            NamedKey::Enter => vec![b'\r'],
             NamedKey::Backspace => {
                 if mods.contains(Modifiers::ALT) {
                     vec![0x1b, 0x7f]
@@ -218,13 +248,13 @@ fn ctrl_key_byte(s: &str) -> Option<u8> {
         // a-z → 0x01-0x1A
         b'a'..=b'z' => Some(b - b'a' + 1),
         b'A'..=b'Z' => Some(b - b'A' + 1),
-        b'[' | b'3' => Some(0x1b), // Ctrl+[ = ESC
+        b'[' | b'3' => Some(0x1b),  // Ctrl+[ = ESC
         b'\\' | b'4' => Some(0x1c), // Ctrl+\ = FS
-        b']' | b'5' => Some(0x1d), // Ctrl+] = GS
-        b'^' | b'6' => Some(0x1e), // Ctrl+^ = RS
-        b'_' | b'7' => Some(0x1f), // Ctrl+_ = US
-        b'`' | b'2' => Some(0x00), // Ctrl+` = NUL (same as Ctrl+Space)
-        b'8' => Some(0x7f),        // Ctrl+8 = DEL
+        b']' | b'5' => Some(0x1d),  // Ctrl+] = GS
+        b'^' | b'6' => Some(0x1e),  // Ctrl+^ = RS
+        b'_' | b'7' => Some(0x1f),  // Ctrl+_ = US
+        b'`' | b'2' => Some(0x00),  // Ctrl+` = NUL (same as Ctrl+Space)
+        b'8' => Some(0x7f),         // Ctrl+8 = DEL
         _ => None,
     }
 }
@@ -265,62 +295,62 @@ fn encode_numpad_app(key: &Key) -> Option<Vec<u8>> {
 /// Kitty-defined codepoints for functional keys.
 fn kitty_codepoint(key: NamedKey) -> Option<u32> {
     Some(match key {
-        NamedKey::Escape    => 27,
-        NamedKey::Enter     => 13,
-        NamedKey::Tab       => 9,
+        NamedKey::Escape => 27,
+        NamedKey::Enter => 13,
+        NamedKey::Tab => 9,
         NamedKey::Backspace => 127,
-        NamedKey::Insert    => 57348,
-        NamedKey::Delete    => 57349,
+        NamedKey::Insert => 57348,
+        NamedKey::Delete => 57349,
         NamedKey::ArrowLeft => 57350,
         NamedKey::ArrowRight => 57351,
-        NamedKey::ArrowUp   => 57352,
+        NamedKey::ArrowUp => 57352,
         NamedKey::ArrowDown => 57353,
-        NamedKey::PageUp    => 57354,
-        NamedKey::PageDown  => 57355,
-        NamedKey::Home      => 57356,
-        NamedKey::End       => 57357,
-        NamedKey::CapsLock  => 57358,
+        NamedKey::PageUp => 57354,
+        NamedKey::PageDown => 57355,
+        NamedKey::Home => 57356,
+        NamedKey::End => 57357,
+        NamedKey::CapsLock => 57358,
         NamedKey::ScrollLock => 57359,
-        NamedKey::NumLock   => 57360,
+        NamedKey::NumLock => 57360,
         NamedKey::PrintScreen => 57361,
-        NamedKey::Pause     => 57362,
+        NamedKey::Pause => 57362,
         NamedKey::ContextMenu => 57363,
-        NamedKey::F1        => 57364,
-        NamedKey::F2        => 57365,
-        NamedKey::F3        => 57366,
-        NamedKey::F4        => 57367,
-        NamedKey::F5        => 57368,
-        NamedKey::F6        => 57369,
-        NamedKey::F7        => 57370,
-        NamedKey::F8        => 57371,
-        NamedKey::F9        => 57372,
-        NamedKey::F10       => 57373,
-        NamedKey::F11       => 57374,
-        NamedKey::F12       => 57375,
-        NamedKey::F13       => 57376,
-        NamedKey::F14       => 57377,
-        NamedKey::F15       => 57378,
-        NamedKey::F16       => 57379,
-        NamedKey::F17       => 57380,
-        NamedKey::F18       => 57381,
-        NamedKey::F19       => 57382,
-        NamedKey::F20       => 57383,
-        NamedKey::F21       => 57384,
-        NamedKey::F22       => 57385,
-        NamedKey::F23       => 57386,
-        NamedKey::F24       => 57387,
-        NamedKey::F25       => 57388,
-        NamedKey::F26       => 57389,
-        NamedKey::F27       => 57390,
-        NamedKey::F28       => 57391,
-        NamedKey::F29       => 57392,
-        NamedKey::F30       => 57393,
-        NamedKey::F31       => 57394,
-        NamedKey::F32       => 57395,
-        NamedKey::F33       => 57396,
-        NamedKey::F34       => 57397,
-        NamedKey::F35       => 57398,
-        NamedKey::Space     => 32,
+        NamedKey::F1 => 57364,
+        NamedKey::F2 => 57365,
+        NamedKey::F3 => 57366,
+        NamedKey::F4 => 57367,
+        NamedKey::F5 => 57368,
+        NamedKey::F6 => 57369,
+        NamedKey::F7 => 57370,
+        NamedKey::F8 => 57371,
+        NamedKey::F9 => 57372,
+        NamedKey::F10 => 57373,
+        NamedKey::F11 => 57374,
+        NamedKey::F12 => 57375,
+        NamedKey::F13 => 57376,
+        NamedKey::F14 => 57377,
+        NamedKey::F15 => 57378,
+        NamedKey::F16 => 57379,
+        NamedKey::F17 => 57380,
+        NamedKey::F18 => 57381,
+        NamedKey::F19 => 57382,
+        NamedKey::F20 => 57383,
+        NamedKey::F21 => 57384,
+        NamedKey::F22 => 57385,
+        NamedKey::F23 => 57386,
+        NamedKey::F24 => 57387,
+        NamedKey::F25 => 57388,
+        NamedKey::F26 => 57389,
+        NamedKey::F27 => 57390,
+        NamedKey::F28 => 57391,
+        NamedKey::F29 => 57392,
+        NamedKey::F30 => 57393,
+        NamedKey::F31 => 57394,
+        NamedKey::F32 => 57395,
+        NamedKey::F33 => 57396,
+        NamedKey::F34 => 57397,
+        NamedKey::F35 => 57398,
+        NamedKey::Space => 32,
         _ => return None,
     })
 }
@@ -357,7 +387,8 @@ fn encode_kitty(
                     // For letters with Ctrl, use the base lowercase codepoint.
                     let cp = c as u32;
                     let needs_event_type = report_events && event_type != KeyEventType::Press;
-                    if !report_all && !needs_event_type && mods.is_empty() && cp >= 32 && cp != 127 {
+                    if !report_all && !needs_event_type && mods.is_empty() && cp >= 32 && cp != 127
+                    {
                         // No mods, printable, normal press — send as plain text.
                         return text.map_or_else(Vec::new, |t| t.as_bytes().to_vec());
                     }
@@ -424,19 +455,47 @@ mod tests {
     }
 
     fn enc(key: Key, mods: Modifiers, mode: TermMode) -> Vec<u8> {
-        encode_key(&key, mods, mode, None, KeyLocation::Standard, KeyEventType::Press)
+        encode_key(
+            &key,
+            mods,
+            mode,
+            None,
+            KeyLocation::Standard,
+            KeyEventType::Press,
+        )
     }
 
     fn enc_text(key: Key, mods: Modifiers, mode: TermMode, text: &str) -> Vec<u8> {
-        encode_key(&key, mods, mode, Some(text), KeyLocation::Standard, KeyEventType::Press)
+        encode_key(
+            &key,
+            mods,
+            mode,
+            Some(text),
+            KeyLocation::Standard,
+            KeyEventType::Press,
+        )
     }
 
     fn enc_numpad(key: Key, mods: Modifiers, mode: TermMode) -> Vec<u8> {
-        encode_key(&key, mods, mode, None, KeyLocation::Numpad, KeyEventType::Press)
+        encode_key(
+            &key,
+            mods,
+            mode,
+            None,
+            KeyLocation::Numpad,
+            KeyEventType::Press,
+        )
     }
 
     fn enc_release(key: Key, mods: Modifiers, mode: TermMode) -> Vec<u8> {
-        encode_key(&key, mods, mode, None, KeyLocation::Standard, KeyEventType::Release)
+        encode_key(
+            &key,
+            mods,
+            mode,
+            None,
+            KeyLocation::Standard,
+            KeyEventType::Release,
+        )
     }
 
     // === Ctrl+letter C0 codes ===
@@ -481,7 +540,11 @@ mod tests {
 
     #[test]
     fn alt_ctrl_a() {
-        let r = enc(Key::Character("a".into()), Modifiers::ALT | Modifiers::CONTROL, no_mode());
+        let r = enc(
+            Key::Character("a".into()),
+            Modifiers::ALT | Modifiers::CONTROL,
+            no_mode(),
+        );
         assert_eq!(r, vec![0x1b, 0x01]);
     }
 
@@ -495,13 +558,21 @@ mod tests {
 
     #[test]
     fn shift_right() {
-        let r = enc(Key::Named(NamedKey::ArrowRight), Modifiers::SHIFT, no_mode());
+        let r = enc(
+            Key::Named(NamedKey::ArrowRight),
+            Modifiers::SHIFT,
+            no_mode(),
+        );
         assert_eq!(r, b"\x1b[1;2C");
     }
 
     #[test]
     fn ctrl_shift_left() {
-        let r = enc(Key::Named(NamedKey::ArrowLeft), Modifiers::CONTROL | Modifiers::SHIFT, no_mode());
+        let r = enc(
+            Key::Named(NamedKey::ArrowLeft),
+            Modifiers::CONTROL | Modifiers::SHIFT,
+            no_mode(),
+        );
         assert_eq!(r, b"\x1b[1;6D");
     }
 
@@ -533,14 +604,22 @@ mod tests {
 
     #[test]
     fn app_cursor_up_no_mods() {
-        let r = enc(Key::Named(NamedKey::ArrowUp), Modifiers::empty(), app_cursor_mode());
+        let r = enc(
+            Key::Named(NamedKey::ArrowUp),
+            Modifiers::empty(),
+            app_cursor_mode(),
+        );
         assert_eq!(r, b"\x1bOA");
     }
 
     #[test]
     fn app_cursor_up_with_ctrl() {
         // Modifiers override SS3 — use CSI format.
-        let r = enc(Key::Named(NamedKey::ArrowUp), Modifiers::CONTROL, app_cursor_mode());
+        let r = enc(
+            Key::Named(NamedKey::ArrowUp),
+            Modifiers::CONTROL,
+            app_cursor_mode(),
+        );
         assert_eq!(r, b"\x1b[1;5A");
     }
 
@@ -548,39 +627,66 @@ mod tests {
 
     #[test]
     fn enter() {
-        assert_eq!(enc(Key::Named(NamedKey::Enter), Modifiers::empty(), no_mode()), b"\r");
+        assert_eq!(
+            enc(Key::Named(NamedKey::Enter), Modifiers::empty(), no_mode()),
+            b"\r"
+        );
     }
 
     #[test]
     fn backspace() {
-        assert_eq!(enc(Key::Named(NamedKey::Backspace), Modifiers::empty(), no_mode()), vec![0x7f]);
+        assert_eq!(
+            enc(
+                Key::Named(NamedKey::Backspace),
+                Modifiers::empty(),
+                no_mode()
+            ),
+            vec![0x7f]
+        );
     }
 
     #[test]
     fn tab() {
-        assert_eq!(enc(Key::Named(NamedKey::Tab), Modifiers::empty(), no_mode()), b"\t");
+        assert_eq!(
+            enc(Key::Named(NamedKey::Tab), Modifiers::empty(), no_mode()),
+            b"\t"
+        );
     }
 
     #[test]
     fn shift_tab() {
-        assert_eq!(enc(Key::Named(NamedKey::Tab), Modifiers::SHIFT, no_mode()), b"\x1b[Z");
+        assert_eq!(
+            enc(Key::Named(NamedKey::Tab), Modifiers::SHIFT, no_mode()),
+            b"\x1b[Z"
+        );
     }
 
     #[test]
     fn escape() {
-        assert_eq!(enc(Key::Named(NamedKey::Escape), Modifiers::empty(), no_mode()), vec![0x1b]);
+        assert_eq!(
+            enc(Key::Named(NamedKey::Escape), Modifiers::empty(), no_mode()),
+            vec![0x1b]
+        );
     }
 
     #[test]
     fn alt_backspace() {
-        assert_eq!(enc(Key::Named(NamedKey::Backspace), Modifiers::ALT, no_mode()), vec![0x1b, 0x7f]);
+        assert_eq!(
+            enc(Key::Named(NamedKey::Backspace), Modifiers::ALT, no_mode()),
+            vec![0x1b, 0x7f]
+        );
     }
 
     // === Plain text fallback ===
 
     #[test]
     fn plain_text() {
-        let r = enc_text(Key::Character("x".into()), Modifiers::empty(), no_mode(), "x");
+        let r = enc_text(
+            Key::Character("x".into()),
+            Modifiers::empty(),
+            no_mode(),
+            "x",
+        );
         assert_eq!(r, b"x");
     }
 
@@ -588,7 +694,11 @@ mod tests {
 
     #[test]
     fn numpad_5_app_keypad() {
-        let r = enc_numpad(Key::Character("5".into()), Modifiers::empty(), app_keypad_mode());
+        let r = enc_numpad(
+            Key::Character("5".into()),
+            Modifiers::empty(),
+            app_keypad_mode(),
+        );
         assert_eq!(r, b"\x1bOu");
     }
 
@@ -602,14 +712,23 @@ mod tests {
 
     #[test]
     fn numpad_enter_app_keypad() {
-        let r = enc_numpad(Key::Named(NamedKey::Enter), Modifiers::empty(), app_keypad_mode());
+        let r = enc_numpad(
+            Key::Named(NamedKey::Enter),
+            Modifiers::empty(),
+            app_keypad_mode(),
+        );
         assert_eq!(r, b"\x1bOM");
     }
 
     #[test]
     fn non_numpad_5_app_keypad() {
         // Standard location — APP_KEYPAD should not affect it.
-        let r = enc_text(Key::Character("5".into()), Modifiers::empty(), app_keypad_mode(), "5");
+        let r = enc_text(
+            Key::Character("5".into()),
+            Modifiers::empty(),
+            app_keypad_mode(),
+            "5",
+        );
         assert_eq!(r, b"5");
     }
 
@@ -617,32 +736,53 @@ mod tests {
 
     #[test]
     fn kitty_escape() {
-        let r = enc(Key::Named(NamedKey::Escape), Modifiers::empty(), kitty_disambiguate());
+        let r = enc(
+            Key::Named(NamedKey::Escape),
+            Modifiers::empty(),
+            kitty_disambiguate(),
+        );
         assert_eq!(r, b"\x1b[27u");
     }
 
     #[test]
     fn kitty_ctrl_a() {
-        let r = enc(Key::Character("a".into()), Modifiers::CONTROL, kitty_disambiguate());
+        let r = enc(
+            Key::Character("a".into()),
+            Modifiers::CONTROL,
+            kitty_disambiguate(),
+        );
         assert_eq!(r, b"\x1b[97;5u");
     }
 
     #[test]
     fn kitty_plain_text() {
         // Printable char with no mods — should send as plain text, not CSI u.
-        let r = enc_text(Key::Character("a".into()), Modifiers::empty(), kitty_disambiguate(), "a");
+        let r = enc_text(
+            Key::Character("a".into()),
+            Modifiers::empty(),
+            kitty_disambiguate(),
+            "a",
+        );
         assert_eq!(r, b"a");
     }
 
     #[test]
     fn kitty_enter() {
-        let r = enc(Key::Named(NamedKey::Enter), Modifiers::empty(), kitty_disambiguate());
+        let r = enc(
+            Key::Named(NamedKey::Enter),
+            Modifiers::empty(),
+            kitty_disambiguate(),
+        );
         assert_eq!(r, b"\x1b[13u");
     }
 
     #[test]
     fn kitty_shift_tab() {
-        let r = enc(Key::Named(NamedKey::Tab), Modifiers::SHIFT, kitty_disambiguate());
+        let r = enc(
+            Key::Named(NamedKey::Tab),
+            Modifiers::SHIFT,
+            kitty_disambiguate(),
+        );
         assert_eq!(r, b"\x1b[9;2u");
     }
 
@@ -651,24 +791,26 @@ mod tests {
     #[test]
     fn kitty_release_without_report_events() {
         // DISAMBIGUATE only — release should produce nothing.
-        let r = enc_release(Key::Named(NamedKey::Escape), Modifiers::empty(), kitty_disambiguate());
+        let r = enc_release(
+            Key::Named(NamedKey::Escape),
+            Modifiers::empty(),
+            kitty_disambiguate(),
+        );
         assert!(r.is_empty());
     }
 
     #[test]
     fn kitty_release_with_report_events() {
-        let mode = TermMode::default()
-            | TermMode::DISAMBIGUATE_ESC_CODES
-            | TermMode::REPORT_EVENT_TYPES;
+        let mode =
+            TermMode::default() | TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES;
         let r = enc_release(Key::Named(NamedKey::Escape), Modifiers::empty(), mode);
         assert_eq!(r, b"\x1b[27;1:3u");
     }
 
     #[test]
     fn kitty_repeat() {
-        let mode = TermMode::default()
-            | TermMode::DISAMBIGUATE_ESC_CODES
-            | TermMode::REPORT_EVENT_TYPES;
+        let mode =
+            TermMode::default() | TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_EVENT_TYPES;
         let r = encode_key(
             &Key::Character("a".into()),
             Modifiers::empty(),

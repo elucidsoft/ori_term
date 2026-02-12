@@ -17,7 +17,15 @@ fn main() {
         };
 
         let status = Command::new(windres)
-            .args(["--include-dir", "assets", rc_path, "-O", "coff", "-o", &res_path])
+            .args([
+                "--include-dir",
+                "assets",
+                rc_path,
+                "-O",
+                "coff",
+                "-o",
+                &res_path,
+            ])
             .status();
 
         match status {

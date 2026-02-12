@@ -68,7 +68,11 @@ fn rasterize_segments(
             data[(y * w + x) as usize] = (alpha * 255.0).round() as u8;
         }
     }
-    IconBitmap { width: w, height: h, data }
+    IconBitmap {
+        width: w,
+        height: h,
+        data,
+    }
 }
 
 /// Close icon (×): two diagonal lines.
@@ -76,10 +80,7 @@ fn rasterize_close(size: u32) -> IconBitmap {
     let s = size as f32;
     let pad = (s * 0.15).max(1.0);
     let thickness = (s * 0.18).max(1.4);
-    let segments = [
-        (pad, pad, s - pad, s - pad),
-        (s - pad, pad, pad, s - pad),
-    ];
+    let segments = [(pad, pad, s - pad, s - pad), (s - pad, pad, pad, s - pad)];
     rasterize_segments(size, size, &segments, thickness / 2.0)
 }
 
@@ -103,10 +104,7 @@ fn rasterize_plus(size: u32) -> IconBitmap {
     let pad = (s * 0.15).max(1.0);
     let mid = s / 2.0;
     let thickness = (s * 0.18).max(1.4);
-    let segments = [
-        (pad, mid, s - pad, mid),
-        (mid, pad, mid, s - pad),
-    ];
+    let segments = [(pad, mid, s - pad, mid), (mid, pad, mid, s - pad)];
     rasterize_segments(size, size, &segments, thickness / 2.0)
 }
 
@@ -118,8 +116,8 @@ fn rasterize_checkmark(size: u32) -> IconBitmap {
     let vx = s * 0.30;
     let vy = s * 0.75;
     let segments = [
-        (s * 0.10, s * 0.50, vx, vy),        // short left arm
-        (vx, vy, s * 0.88, s * 0.18),         // long right arm
+        (s * 0.10, s * 0.50, vx, vy), // short left arm
+        (vx, vy, s * 0.88, s * 0.18), // long right arm
     ];
     rasterize_segments(size, size, &segments, thickness / 2.0)
 }
