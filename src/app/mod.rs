@@ -1,6 +1,7 @@
 //! Application state, startup, and module dispatch.
 
 mod config_reload;
+mod cursor_hover;
 mod event_loop;
 mod input_keyboard;
 mod input_mouse;

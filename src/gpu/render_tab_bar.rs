@@ -6,37 +6,15 @@ use super::color_util::{
 use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
 use crate::render::FontSet;
 use crate::tab_bar::{
-    DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TabBarHit,
-    TabBarLayout,
+    CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH,
+    ICON_SIZE, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TAB_PADDING, TAB_TOP_MARGIN,
+    TabBarHit, TabBarLayout,
 };
-
-const TAB_TOP_MARGIN: usize = 8;
-const TAB_PADDING: usize = 8;
-const CLOSE_BUTTON_WIDTH: usize = 24;
-const CLOSE_BUTTON_RIGHT_PAD: usize = 8;
-
-// Windows 10/11 style: wide rectangular buttons
 #[cfg(target_os = "windows")]
-const CONTROL_BUTTON_WIDTH: usize = 58;
-#[cfg(target_os = "windows")]
-const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_WIDTH * 3;
-#[cfg(target_os = "windows")]
-const ICON_SIZE: usize = 10;
+use crate::tab_bar::CONTROL_BUTTON_WIDTH;
+#[cfg(not(target_os = "windows"))]
+use crate::tab_bar::{CONTROL_BUTTON_DIAMETER, CONTROL_BUTTON_MARGIN, CONTROL_BUTTON_SPACING};
 
-// Linux (GNOME-style): circular buttons, semi-transparent
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_DIAMETER: usize = 24;
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_SPACING: usize = 8;
-#[cfg(not(target_os = "windows"))]
-const CONTROL_BUTTON_MARGIN: usize = 12;
-#[cfg(not(target_os = "windows"))]
-const CONTROLS_ZONE_WIDTH: usize = CONTROL_BUTTON_MARGIN
-    + 3 * CONTROL_BUTTON_DIAMETER
-    + 2 * CONTROL_BUTTON_SPACING
-    + CONTROL_BUTTON_MARGIN;
-#[cfg(not(target_os = "windows"))]
-const ICON_SIZE: usize = 8;
 #[cfg(not(target_os = "windows"))]
 const CONTROL_CIRCLE_ALPHA: f32 = 0.3;
 

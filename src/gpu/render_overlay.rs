@@ -6,15 +6,14 @@
 use crate::context_menu::MenuEntry;
 use crate::render::FontSet;
 use crate::tab_bar::{
-    DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TabBarLayout,
+    DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TAB_TOP_MARGIN,
+    TabBarLayout,
 };
 
 use super::color_util::{
     TabBarColors, UI_BG, UI_BG_HOVER, UI_SEPARATOR, UI_TEXT, UI_TEXT_DIM, lighten,
 };
 use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
-
-const TAB_TOP_MARGIN: usize = 8;
 
 impl GpuRenderer {
     pub(super) fn build_dragged_tab_overlay(
