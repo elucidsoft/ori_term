@@ -29,6 +29,7 @@ use crate::selection::{
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, NEW_TAB_BUTTON_WIDTH,
+    DROPDOWN_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH,
     GRID_PADDING_LEFT, GRID_PADDING_TOP, GRID_PADDING_BOTTOM,
 };
 use crate::term_mode::TermMode;
@@ -899,12 +900,12 @@ impl App {
                 rects.push([tabs_end as i32, 0,
                     (tabs_end + new_tab_w) as i32, h]);
                 // Dropdown button
-                let dropdown_w = si(crate::tab_bar::DROPDOWN_BUTTON_WIDTH);
+                let dropdown_w = si(DROPDOWN_BUTTON_WIDTH);
                 let dd_start = tabs_end + new_tab_w;
                 rects.push([dd_start as i32, 0,
                     (dd_start + dropdown_w) as i32, h]);
                 // Window controls
-                let controls_w = si(crate::tab_bar::CONTROLS_ZONE_WIDTH);
+                let controls_w = si(CONTROLS_ZONE_WIDTH);
                 let controls_start = bar_w.saturating_sub(controls_w) as i32;
                 rects.push([controls_start, 0, bar_w as i32, h]);
                 crate::platform_windows::set_client_rects(&tw.window, rects);
@@ -2189,7 +2190,7 @@ impl App {
                     // X: past the window edges (left=0, right=controls start).
                     let sf = self.scale_factor;
                     let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round();
-                    let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f64 * sf;
+                    let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
                     let window_w = self.windows.get(&source_wid)
                         .map_or(0.0, |tw| tw.window.inner_size().width as f64);
                     let x_max = window_w - controls_w;
@@ -2211,13 +2212,10 @@ impl App {
                                 crate::platform_windows::set_dragging(&tw.window, true);
                             }
                         }
-                        // Clear drag visuals and force full repaint of source window
+                        // Clear drag visuals — source window was already rendered
+                        // inline by tear_off_tab with the tab removed.
                         self.drag_visual_x = None;
                         self.tab_anim_offsets.remove(&source_wid);
-                        self.tab_bar_dirty = true;
-                        if let Some(tw) = self.windows.get(&source_wid) {
-                            tw.window.request_redraw();
-                        }
                     } else {
                         self.update_drag_in_bar(window_id, position, tab_id, mouse_off);
                     }
@@ -2291,13 +2289,15 @@ impl App {
                                     self.tab_anim_offsets.remove(&old_twid);
                                     if let Some(tw) = self.windows.get_mut(&old_twid) {
                                         tw.remove_tab(tab_id);
-                                        tw.window.request_redraw();
                                     }
                                     if let Some(tw) = self.windows.get_mut(&new_twid) {
                                         tw.insert_tab_at(tab_id, new_idx);
                                         tw.window.request_redraw();
                                     }
                                     self.drop_preview = Some((new_twid, new_idx));
+                                    // Render old target inline to remove ghost tab
+                                    self.tab_bar_dirty = true;
+                                    self.render_window(old_twid);
                                 }
                                 self.set_preview_visual(new_twid, sx, mouse_off);
                             }
@@ -2308,7 +2308,6 @@ impl App {
                                 self.tab_anim_offsets.remove(&old_twid);
                                 if let Some(tw) = self.windows.get_mut(&old_twid) {
                                     tw.remove_tab(tab_id);
-                                    tw.window.request_redraw();
                                 }
                                 if let Some(tw) = self.windows.get_mut(&torn_wid) {
                                     tw.add_tab(tab_id);
@@ -2322,6 +2321,11 @@ impl App {
                                     tw.window.set_visible(true);
                                 }
                                 self.drop_preview = None;
+                                // Render target window inline to remove the
+                                // preview tab immediately (request_redraw is
+                                // deferred on Windows during mouse capture).
+                                self.tab_bar_dirty = true;
+                                self.render_window(old_twid);
                             }
                             (None, None) => {
                                 // Not over any target — nothing to do.
@@ -2376,17 +2380,17 @@ impl App {
                         .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
             }
-            // Render both windows before showing the new one:
-            // 1. Source window first — its tab bar lost a tab and must rebuild.
-            // 2. New window second — renders the torn-off tab, then becomes visible.
-            // We render source inline because request_redraw may never fire on
-            // Windows if the source window is obscured by the new one.
-            self.render_window(source_wid);
-            self.tab_bar_dirty = true;
+            // Render new window first (hidden), then show it, then render
+            // source window LAST so its frame is the final presented one and
+            // `last_rendered_window` points to the source — avoiding cache
+            // invalidation delays on Windows where request_redraw may be
+            // deferred while the torn-off window has mouse capture.
             self.render_window(new_wid);
             if let Some(tw) = self.windows.get(&new_wid) {
                 tw.window.set_visible(true);
             }
+            self.tab_bar_dirty = true;
+            self.render_window(source_wid);
 
             // Update drag.source_window to the torn-off window so the
             // release handler uses the correct window id.
@@ -2480,11 +2484,14 @@ impl App {
         let tab_wf = tab_w as f64;
 
         // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
-        // Allow free movement up to the window controls area.
+        // Dragged tab pushes + and dropdown buttons; max clamp reserves room
+        // for tab + both buttons before the window controls zone.
         let window_w = self.windows.get(&window_id)
             .map_or(0.0, |tw| tw.window.inner_size().width as f32);
-        let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f32 * sf as f32;
-        let max_x = window_w - controls_w - tab_wf as f32;
+        let controls_w = CONTROLS_ZONE_WIDTH as f32 * sf as f32;
+        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * sf as f32;
+        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * sf as f32;
+        let max_x = window_w - controls_w - new_tab_w - dropdown_w - tab_wf as f32;
         let dragged_x = ((position.x - mouse_offset_in_tab) as f32)
             .clamp(0.0, max_x);
 
@@ -2551,7 +2558,7 @@ impl App {
             let wy = pos.y as f64;
             let sf = self.scale_factor;
             let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
-            let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f64 * sf;
+            let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
             if screen_x >= wx
                 && screen_x < wx + size.width as f64 - controls_w
                 && screen_y >= wy

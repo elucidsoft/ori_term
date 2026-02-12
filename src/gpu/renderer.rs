@@ -1121,29 +1121,32 @@ impl GpuRenderer {
         // Dragged tab is rendered in the overlay pass (see build_dragged_tab_overlay)
         // so its bg+fg both draw AFTER all main-pass bg+fg, giving correct occlusion.
 
-        // New tab "+" button
-        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * s;
-        let plus_x = (left_margin + tab_count * tab_w) as f32;
-        let plus_hovered = params.hover_hit == TabBarHit::NewTab;
-        let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
-        bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
-        let plus_cx = plus_x + new_tab_w / 2.0;
-        let plus_cy = top + tab_h / 2.0;
-        self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
+        // New tab "+" and dropdown buttons — when dragging, these are rendered
+        // in the overlay pass so they move with the dragged tab (fast path).
+        if params.dragged_tab.is_none() {
+            let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * s;
+            let plus_x = (left_margin + tab_count * tab_w) as f32;
+            let plus_hovered = params.hover_hit == TabBarHit::NewTab;
+            let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
+            bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
+            let plus_cx = plus_x + new_tab_w / 2.0;
+            let plus_cy = top + tab_h / 2.0;
+            self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
 
-        // Dropdown button — vector chevron icon
-        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
-        let dropdown_x = plus_x + new_tab_w;
-        let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
-        let dropdown_bg = if dropdown_hovered || params.context_menu.is_some() {
-            tc.button_hover_bg
-        } else {
-            tc.bar_bg
-        };
-        bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
-        let dd_cx = dropdown_x + dropdown_w / 2.0;
-        let dd_cy = top + tab_h / 2.0;
-        self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
+            // Dropdown button — vector chevron icon
+            let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
+            let dropdown_x = plus_x + new_tab_w;
+            let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
+            let dropdown_bg = if dropdown_hovered || params.context_menu.is_some() {
+                tc.button_hover_bg
+            } else {
+                tc.bar_bg
+            };
+            bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
+            let dd_cx = dropdown_x + dropdown_w / 2.0;
+            let dd_cy = top + tab_h / 2.0;
+            self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
+        }
 
         // Window control buttons
         let controls_zone_w = (CONTROLS_ZONE_WIDTH as f32 * s) as usize;
@@ -1422,6 +1425,32 @@ impl GpuRenderer {
             bg, fg, drag_x, tab_w, cell_h, title,
             tc.text_fg, &tc, drag_idx, params, glyphs, queue,
         );
+
+        // + and dropdown buttons — rendered in overlay during drag so they
+        // move with the dragged tab via the fast path.
+        let left_margin = (TAB_LEFT_MARGIN as f32 * s) as usize;
+        let tab_count = params.tab_info.len();
+        let default_plus_x = (left_margin + tab_count * tab_w) as f32;
+        let plus_x = default_plus_x.max(drag_x + tab_wf);
+
+        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * s;
+        let plus_bg = tc.bar_bg;
+        bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
+        let plus_cx = plus_x + new_tab_w / 2.0;
+        let plus_cy = top + tab_h / 2.0;
+        self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
+
+        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
+        let dropdown_x = plus_x + new_tab_w;
+        let dropdown_bg = if params.context_menu.is_some() {
+            tc.button_hover_bg
+        } else {
+            tc.bar_bg
+        };
+        bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
+        let dd_cx = dropdown_x + dropdown_w / 2.0;
+        let dd_cy = top + tab_h / 2.0;
+        self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
     }
 
     // --- Instance building: Dropdown overlay (rendered AFTER grid so it's on top) ---
