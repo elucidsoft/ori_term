@@ -546,19 +546,9 @@ pub struct GpuRenderer {
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     render_format: wgpu::TextureFormat,
-    // Damage tracking: cached instance data from previous frame.
-    cached_bg_bytes: Vec<u8>,
-    cached_fg_bytes: Vec<u8>,
-    cached_overlay_bg_bytes: Vec<u8>,
-    cached_overlay_fg_bytes: Vec<u8>,
-    cached_bg_count: u32,
-    cached_fg_count: u32,
-    cached_overlay_bg_count: u32,
-    cached_overlay_fg_count: u32,
-    cached_default_bg: [f32; 4],
-    cached_opacity: f32,
-    cached_has_overlay: bool,
-    has_cached_frame: bool,
+    // Damage tracking: cached prepared frame with GPU buffers from previous render.
+    // When nothing changed, we skip instance building AND buffer creation entirely.
+    cached_frame: Option<PreparedFrame>,
 }
 
 impl GpuRenderer {
@@ -634,25 +624,14 @@ impl GpuRenderer {
             atlas_layout,
             sampler,
             render_format: format,
-            cached_bg_bytes: Vec::new(),
-            cached_fg_bytes: Vec::new(),
-            cached_overlay_bg_bytes: Vec::new(),
-            cached_overlay_fg_bytes: Vec::new(),
-            cached_bg_count: 0,
-            cached_fg_count: 0,
-            cached_overlay_bg_count: 0,
-            cached_overlay_fg_count: 0,
-            cached_default_bg: [0.0; 4],
-            cached_opacity: 1.0,
-            cached_has_overlay: false,
-            has_cached_frame: false,
+            cached_frame: None,
         }
     }
 
     /// Rebuild the atlas after font size change.
     pub fn rebuild_atlas(&mut self, gpu: &GpuState, _glyphs: &mut FontSet, _ui_glyphs: &mut FontSet) {
         self.atlas = GlyphAtlas::new(&gpu.device);
-        self.has_cached_frame = false;
+        self.cached_frame = None;
 
         // Recreate atlas bind group with new texture view
         self.atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -729,8 +708,8 @@ impl GpuRenderer {
         glyphs: &mut FontSet,
         ui_glyphs: &mut FontSet,
     ) {
-        let prepared = self.prepare_frame(gpu, params, glyphs, ui_glyphs);
-        let Some(prepared) = prepared else { return };
+        self.prepare_frame(gpu, params, glyphs, ui_glyphs);
+        let Some(prepared) = self.cached_frame.as_ref() else { return };
 
         // Get surface texture
         let frame = match surface.get_current_texture() {
@@ -755,13 +734,15 @@ impl GpuRenderer {
                 label: Some("frame_encoder"),
             });
 
-        self.encode_render_pass(&mut encoder, &view, &prepared);
+        self.encode_render_pass(&mut encoder, &view, prepared);
 
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
 
-    /// Build all instance data for a frame. Returns `None` if nothing to draw.
+    /// Build all instance data for a frame and cache the `PreparedFrame`.
+    /// When nothing changed (no grid or tab bar dirty flags), the cached
+    /// frame with its GPU buffers is reused — zero allocation, zero upload.
     #[allow(clippy::too_many_lines)]
     fn prepare_frame(
         &mut self,
@@ -769,7 +750,7 @@ impl GpuRenderer {
         params: &FrameParams<'_>,
         glyphs: &mut FontSet,
         ui_glyphs: &mut FontSet,
-    ) -> Option<PreparedFrame> {
+    ) {
         let w = params.width as f32;
         let h = params.height as f32;
 
@@ -783,102 +764,72 @@ impl GpuRenderer {
         gpu.queue.write_buffer(&self.uniform_buffer, 64, &flags.to_ne_bytes());
         gpu.queue.write_buffer(&self.uniform_buffer, 68, &params.minimum_contrast.to_ne_bytes());
 
-        // Damage tracking: reuse cached instance bytes when nothing changed.
-        let needs_rebuild = params.grid_dirty || params.tab_bar_dirty || !self.has_cached_frame;
+        // Damage tracking: reuse cached frame (GPU buffers + all) when nothing changed.
+        let needs_rebuild = params.grid_dirty || params.tab_bar_dirty || self.cached_frame.is_none();
 
-        let (bg_bytes_owned, fg_bytes_owned, overlay_bg_bytes_owned, overlay_fg_bytes_owned,
-             bg_count, fg_count, overlay_bg_count, overlay_fg_count, default_bg, has_overlay);
-
-        if needs_rebuild {
-            // Build instance data.
-            // Tab bar and window border are fully opaque (opacity=1.0).
-            // Grid cells use the configured opacity for transparency.
-            let mut bg = InstanceWriter::new();
-            let mut fg = InstanceWriter::new();
-
-            // Default background color
-            let default_bg_val = palette_to_rgba(params.palette.default_bg());
-
-            // 1. Tab bar (always fully opaque — individual tabs carry their own alpha)
-            self.build_tab_bar_instances(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
-
-            // Switch to transparent for grid content
-            bg.opacity = params.opacity;
-
-            // 2. Grid cells (semi-transparent — glass shows through, grid font)
-            self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg_val);
-
-            // 3. Search bar overlay (at bottom of grid, UI font)
-            self.build_search_bar_overlay(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
-
-            // 4. Window border (opaque, Windows only — Linux WM draws its own)
-            bg.opacity = 1.0;
-            #[cfg(target_os = "windows")]
-            if !params.is_maximized {
-                let border_color = u32_to_rgba(WINDOW_BORDER_COLOR);
-                let bw = WINDOW_BORDER_WIDTH as f32 * params.scale;
-                bg.push_rect(0.0, 0.0, w, bw, border_color);
-                bg.push_rect(0.0, h - bw, w, bw, border_color);
-                bg.push_rect(0.0, 0.0, bw, h, border_color);
-                bg.push_rect(w - bw, 0.0, bw, h, border_color);
-            }
-
-            // 5. Overlay pass (drawn after main bg+fg — dragged tab + dropdown)
-            let mut overlay_bg_w = InstanceWriter::new();
-            let mut overlay_fg_w = InstanceWriter::new();
-            self.build_dragged_tab_overlay(
-                &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
-            );
-            self.build_dropdown_overlay(
-                &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
-            );
-
-            bg_bytes_owned = bg.as_bytes().to_vec();
-            fg_bytes_owned = fg.as_bytes().to_vec();
-            overlay_bg_bytes_owned = overlay_bg_w.as_bytes().to_vec();
-            overlay_fg_bytes_owned = overlay_fg_w.as_bytes().to_vec();
-            bg_count = bg.count();
-            fg_count = fg.count();
-            overlay_bg_count = overlay_bg_w.count();
-            overlay_fg_count = overlay_fg_w.count();
-            default_bg = default_bg_val;
-            has_overlay = !overlay_bg_bytes_owned.is_empty() || !overlay_fg_bytes_owned.is_empty();
-
-            // Update cache
-            self.cached_bg_bytes.clone_from(&bg_bytes_owned);
-            self.cached_fg_bytes.clone_from(&fg_bytes_owned);
-            self.cached_overlay_bg_bytes.clone_from(&overlay_bg_bytes_owned);
-            self.cached_overlay_fg_bytes.clone_from(&overlay_fg_bytes_owned);
-            self.cached_bg_count = bg_count;
-            self.cached_fg_count = fg_count;
-            self.cached_overlay_bg_count = overlay_bg_count;
-            self.cached_overlay_fg_count = overlay_fg_count;
-            self.cached_default_bg = default_bg;
-            self.cached_opacity = params.opacity;
-            self.cached_has_overlay = has_overlay;
-            self.has_cached_frame = true;
-        } else {
-            // Reuse cached data
-            bg_bytes_owned = self.cached_bg_bytes.clone();
-            fg_bytes_owned = self.cached_fg_bytes.clone();
-            overlay_bg_bytes_owned = self.cached_overlay_bg_bytes.clone();
-            overlay_fg_bytes_owned = self.cached_overlay_fg_bytes.clone();
-            bg_count = self.cached_bg_count;
-            fg_count = self.cached_fg_count;
-            overlay_bg_count = self.cached_overlay_bg_count;
-            overlay_fg_count = self.cached_overlay_fg_count;
-            default_bg = self.cached_default_bg;
-            has_overlay = self.cached_has_overlay;
+        if !needs_rebuild {
+            // Cached frame already holds the right GPU buffers — nothing to do.
+            return;
         }
 
-        // Upload instance buffers
-        let bg_bytes = &bg_bytes_owned;
-        let fg_bytes = &fg_bytes_owned;
+        // Build instance data.
+        // Tab bar and window border are fully opaque (opacity=1.0).
+        // Grid cells use the configured opacity for transparency.
+        let mut bg = InstanceWriter::new();
+        let mut fg = InstanceWriter::new();
+
+        // Default background color
+        let default_bg = palette_to_rgba(params.palette.default_bg());
+
+        // 1. Tab bar (always fully opaque — individual tabs carry their own alpha)
+        self.build_tab_bar_instances(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
+
+        // Switch to transparent for grid content
+        bg.opacity = params.opacity;
+
+        // 2. Grid cells (semi-transparent — glass shows through, grid font)
+        self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg);
+
+        // 3. Search bar overlay (at bottom of grid, UI font)
+        self.build_search_bar_overlay(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
+
+        // 4. Window border (opaque, Windows only — Linux WM draws its own)
+        bg.opacity = 1.0;
+        #[cfg(target_os = "windows")]
+        if !params.is_maximized {
+            let border_color = u32_to_rgba(WINDOW_BORDER_COLOR);
+            let bw = WINDOW_BORDER_WIDTH as f32 * params.scale;
+            bg.push_rect(0.0, 0.0, w, bw, border_color);
+            bg.push_rect(0.0, h - bw, w, bw, border_color);
+            bg.push_rect(0.0, 0.0, bw, h, border_color);
+            bg.push_rect(w - bw, 0.0, bw, h, border_color);
+        }
+
+        // 5. Overlay pass (drawn after main bg+fg — dragged tab + dropdown)
+        let mut overlay_bg_w = InstanceWriter::new();
+        let mut overlay_fg_w = InstanceWriter::new();
+        self.build_dragged_tab_overlay(
+            &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+        );
+        self.build_dropdown_overlay(
+            &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+        );
+
+        let bg_bytes = bg.as_bytes();
+        let fg_bytes = fg.as_bytes();
 
         if bg_bytes.is_empty() && fg_bytes.is_empty() {
-            return None;
+            self.cached_frame = None;
+            return;
         }
 
+        let bg_count = bg.count();
+        let fg_count = fg.count();
+        let overlay_bg_count = overlay_bg_w.count();
+        let overlay_fg_count = overlay_fg_w.count();
+        let has_overlay = !overlay_bg_w.as_bytes().is_empty() || !overlay_fg_w.as_bytes().is_empty();
+
+        // Create and upload GPU buffers
         let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bg_instances"),
             size: (bg_bytes.len() as u64).max(INSTANCE_STRIDE),
@@ -899,9 +850,8 @@ impl GpuRenderer {
             gpu.queue.write_buffer(&fg_buffer, 0, fg_bytes);
         }
 
-        // Upload overlay buffers (only when dropdown is open)
-        let overlay_bg_bytes = &overlay_bg_bytes_owned;
-        let overlay_fg_bytes = &overlay_fg_bytes_owned;
+        let overlay_bg_bytes = overlay_bg_w.as_bytes();
+        let overlay_fg_bytes = overlay_fg_w.as_bytes();
 
         let overlay_bg_buffer;
         let overlay_fg_buffer;
@@ -936,7 +886,7 @@ impl GpuRenderer {
             });
         }
 
-        Some(PreparedFrame {
+        self.cached_frame = Some(PreparedFrame {
             default_bg,
             opacity: params.opacity,
             bg_buffer, bg_count,
@@ -944,7 +894,7 @@ impl GpuRenderer {
             overlay_bg_buffer, overlay_bg_count,
             overlay_fg_buffer, overlay_fg_count,
             has_overlay,
-        })
+        });
     }
 
     /// Issue the render pass draw calls to the given texture view.

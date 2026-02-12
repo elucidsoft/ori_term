@@ -260,7 +260,9 @@ impl Grid {
         let count = count.min(bottom - top + 1);
 
         for _ in 0..count {
-            let scrolled_row = self.rows[top].clone();
+            // Remove the top row (shifts all higher indices down by 1 via memmove).
+            let scrolled_row = self.rows.remove(top);
+
             // Push to scrollback only if scrolling the full screen region at top
             if top == 0 {
                 if self.scrollback.len() >= self.max_scrollback {
@@ -277,12 +279,10 @@ impl Grid {
                 self.scrollback.push_back(scrolled_row);
             }
 
-            // Shift rows up
-            for r in top..bottom {
-                self.rows[r] = self.rows[r + 1].clone();
-            }
-            // Clear bottom row
-            self.rows[bottom] = Row::new(self.cols);
+            // Insert a fresh row at the bottom position (after remove, bottom is
+            // now at index `bottom - 1`, so inserting at `bottom` restores the
+            // original row count within the region).
+            self.rows.insert(bottom, Row::new(self.cols));
         }
     }
 
@@ -293,12 +293,9 @@ impl Grid {
         let count = count.min(bottom - top + 1);
 
         for _ in 0..count {
-            // Shift rows down
-            for r in (top + 1..=bottom).rev() {
-                self.rows[r] = self.rows[r - 1].clone();
-            }
-            // Clear top row
-            self.rows[top] = Row::new(self.cols);
+            // Remove the bottom row and insert a fresh one at top.
+            self.rows.remove(bottom);
+            self.rows.insert(top, Row::new(self.cols));
         }
     }
 

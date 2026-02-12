@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Icon, ResizeDirection, Window, WindowId};
 
@@ -97,6 +97,9 @@ pub struct App {
     tab_bar_dirty: bool,
     /// Previous cursor visibility state for dirty tracking.
     prev_cursor_visible: bool,
+    /// Deferred redraw requests: coalesces multiple PTY events into one
+    /// `request_redraw()` per window, drained in `about_to_wait`.
+    pending_redraw: HashSet<WindowId>,
 }
 
 impl App {
@@ -188,6 +191,7 @@ impl App {
             cursor_blink_reset: Instant::now(),
             tab_bar_dirty: true,
             prev_cursor_visible: true,
+            pending_redraw: HashSet::new(),
         };
 
         event_loop.run_app(&mut app)?;
@@ -918,20 +922,6 @@ impl App {
             }
         }
         self.tab_bar_dirty = false;
-
-        // Keep redrawing while bell badge pulse is animating.
-        if any_bell_badge {
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.request_redraw();
-            }
-        }
-
-        // Keep redrawing while cursor blink is enabled (toggles ~2/sec).
-        if self.config.terminal.cursor_blink {
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.request_redraw();
-            }
-        }
     }
 
     /// Detect if cursor is in the resize border zone. Returns the resize direction
@@ -2808,15 +2798,14 @@ impl ApplicationHandler<TermEvent> for App {
                 }
 
                 self.url_cache.invalidate();
-                // Redraw the window containing this tab
+                // Defer redraw — coalesced in about_to_wait()
                 if let Some(wid) = self.window_containing_tab(tab_id) {
                     if let Some(tw) = self.windows.get(&wid) {
-                        // Redraw if active tab, or if bell is active (for flash animation)
                         let bell_active = self.tabs.get(&tab_id)
                             .and_then(|t| t.bell_start)
                             .is_some();
                         if tw.active_tab_id() == Some(tab_id) || bell_active {
-                            tw.window.request_redraw();
+                            self.pending_redraw.insert(wid);
                         }
                     }
                 }
@@ -2824,6 +2813,41 @@ impl ApplicationHandler<TermEvent> for App {
             TermEvent::ConfigReload => {
                 self.apply_config_reload();
             }
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drain coalesced redraws: N PTY events → 1 request_redraw per window.
+        for wid in self.pending_redraw.drain() {
+            if let Some(tw) = self.windows.get(&wid) {
+                tw.window.request_redraw();
+            }
+        }
+
+        // Smart cursor blink / bell scheduling: instead of spinning at 60fps,
+        // sleep until the next blink transition or bell animation tick.
+        let has_bell_badge = self.tabs.values().any(|t| t.has_bell_badge);
+        if has_bell_badge {
+            // Bell badge is animating — need continuous redraws (~60fps).
+            for tw in self.windows.values() {
+                tw.window.request_redraw();
+            }
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else if self.config.terminal.cursor_blink {
+            // Schedule wake-up at the next blink transition.
+            let interval_ms = self.config.terminal.cursor_blink_interval_ms.max(1);
+            let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
+            let next_toggle_ms = ((elapsed_ms / interval_ms) + 1) * interval_ms;
+            let sleep_ms = next_toggle_ms.saturating_sub(elapsed_ms);
+            let deadline = Instant::now() + Duration::from_millis(sleep_ms);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            // Request redraw for all windows so the blink state updates.
+            for tw in self.windows.values() {
+                tw.window.request_redraw();
+            }
+        } else {
+            // Fully idle — sleep until next event.
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 

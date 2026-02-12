@@ -244,7 +244,7 @@ impl Tab {
         let tab_id = id;
         thread::spawn(move || {
             log(&format!("reader thread started for tab {:?}", tab_id));
-            let mut buf = [0u8; 4096];
+            let mut buf = vec![0u8; 65536];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {

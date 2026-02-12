@@ -81,6 +81,7 @@ pub const WINDOW_BORDER_WIDTH: usize = 1;
 
 // Grid inset from window edges
 pub const GRID_PADDING_LEFT: usize = 6;
+pub const GRID_PADDING_TOP: usize = 10;
 pub const GRID_PADDING_BOTTOM: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,17 +104,18 @@ pub struct TabBarLayout {
 }
 
 impl TabBarLayout {
-    pub fn compute(tab_count: usize, bar_width: usize) -> Self {
+    pub fn compute(tab_count: usize, bar_width: usize, scale: f64) -> Self {
+        let s = |v: usize| -> usize { (v as f64 * scale).round() as usize };
         // Reserve space for left margin, new-tab button, dropdown, and window controls
         let available = bar_width
-            .saturating_sub(TAB_LEFT_MARGIN)
-            .saturating_sub(NEW_TAB_BUTTON_WIDTH)
-            .saturating_sub(DROPDOWN_BUTTON_WIDTH)
-            .saturating_sub(CONTROLS_ZONE_WIDTH);
+            .saturating_sub(s(TAB_LEFT_MARGIN))
+            .saturating_sub(s(NEW_TAB_BUTTON_WIDTH))
+            .saturating_sub(s(DROPDOWN_BUTTON_WIDTH))
+            .saturating_sub(s(CONTROLS_ZONE_WIDTH));
         let tab_width = if tab_count == 0 {
-            TAB_MIN_WIDTH
+            s(TAB_MIN_WIDTH)
         } else {
-            (available / tab_count).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+            (available / tab_count).clamp(s(TAB_MIN_WIDTH), s(TAB_MAX_WIDTH))
         };
         Self {
             tab_width,
@@ -122,18 +124,20 @@ impl TabBarLayout {
         }
     }
 
-    pub fn hit_test(&self, x: usize, y: usize) -> TabBarHit {
-        if y >= TAB_BAR_HEIGHT {
+    pub fn hit_test(&self, x: usize, y: usize, scale: f64) -> TabBarHit {
+        let s = |v: usize| -> usize { (v as f64 * scale).round() as usize };
+
+        if y >= s(TAB_BAR_HEIGHT) {
             return TabBarHit::None;
         }
 
         // Check window controls zone (rightmost CONTROLS_ZONE_WIDTH pixels)
-        let controls_start = self.bar_width.saturating_sub(CONTROLS_ZONE_WIDTH);
+        let controls_start = self.bar_width.saturating_sub(s(CONTROLS_ZONE_WIDTH));
         if x >= controls_start {
             #[cfg(target_os = "windows")]
             {
                 let offset = x - controls_start;
-                let button_idx = offset / CONTROL_BUTTON_WIDTH;
+                let button_idx = offset / s(CONTROL_BUTTON_WIDTH);
                 return match button_idx {
                     0 => TabBarHit::Minimize,
                     1 => TabBarHit::Maximize,
@@ -143,12 +147,12 @@ impl TabBarLayout {
             #[cfg(not(target_os = "windows"))]
             {
                 // GNOME-style: circular hit-test for each button
-                let cy = TAB_BAR_HEIGHT / 2;
-                let r = CONTROL_BUTTON_DIAMETER / 2;
+                let cy = s(TAB_BAR_HEIGHT) / 2;
+                let r = s(CONTROL_BUTTON_DIAMETER) / 2;
                 let buttons = [
-                    (controls_start + CONTROL_BUTTON_MARGIN + r, TabBarHit::Minimize),
-                    (controls_start + CONTROL_BUTTON_MARGIN + CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING + r, TabBarHit::Maximize),
-                    (controls_start + CONTROL_BUTTON_MARGIN + 2 * (CONTROL_BUTTON_DIAMETER + CONTROL_BUTTON_SPACING) + r, TabBarHit::CloseWindow),
+                    (controls_start + s(CONTROL_BUTTON_MARGIN) + r, TabBarHit::Minimize),
+                    (controls_start + s(CONTROL_BUTTON_MARGIN) + s(CONTROL_BUTTON_DIAMETER) + s(CONTROL_BUTTON_SPACING) + r, TabBarHit::Maximize),
+                    (controls_start + s(CONTROL_BUTTON_MARGIN) + 2 * (s(CONTROL_BUTTON_DIAMETER) + s(CONTROL_BUTTON_SPACING)) + r, TabBarHit::CloseWindow),
                 ];
                 for &(cx, hit) in &buttons {
                     let dx = x as isize - cx as isize;
@@ -163,28 +167,31 @@ impl TabBarLayout {
         }
 
         // Tabs start after the left margin
-        let tab_x = x.saturating_sub(TAB_LEFT_MARGIN);
-        let tabs_end = TAB_LEFT_MARGIN + self.tab_count * self.tab_width;
+        let left_margin = s(TAB_LEFT_MARGIN);
+        let tab_x = x.saturating_sub(left_margin);
+        let tabs_end = left_margin + self.tab_count * self.tab_width;
 
         // Check new tab button (at the end of all tabs)
-        if x >= tabs_end && x < tabs_end + NEW_TAB_BUTTON_WIDTH {
+        let new_tab_w = s(NEW_TAB_BUTTON_WIDTH);
+        if x >= tabs_end && x < tabs_end + new_tab_w {
             return TabBarHit::NewTab;
         }
 
         // Check dropdown button (right after new-tab button)
-        let dropdown_x = tabs_end + NEW_TAB_BUTTON_WIDTH;
-        if x >= dropdown_x && x < dropdown_x + DROPDOWN_BUTTON_WIDTH {
+        let dropdown_w = s(DROPDOWN_BUTTON_WIDTH);
+        let dropdown_x = tabs_end + new_tab_w;
+        if x >= dropdown_x && x < dropdown_x + dropdown_w {
             return TabBarHit::DropdownButton;
         }
 
         // Check which tab
-        if x >= TAB_LEFT_MARGIN && x < tabs_end {
+        if x >= left_margin && x < tabs_end {
             let tab_idx = tab_x / self.tab_width;
             if tab_idx < self.tab_count {
                 // Check close button (inset from right edge of tab)
                 let tab_right = (tab_idx + 1) * self.tab_width;
-                let close_start = tab_right.saturating_sub(CLOSE_BUTTON_WIDTH + CLOSE_BUTTON_RIGHT_PAD);
-                if tab_x >= close_start && tab_x < tab_right.saturating_sub(CLOSE_BUTTON_RIGHT_PAD) {
+                let close_start = tab_right.saturating_sub(s(CLOSE_BUTTON_WIDTH) + s(CLOSE_BUTTON_RIGHT_PAD));
+                if tab_x >= close_start && tab_x < tab_right.saturating_sub(s(CLOSE_BUTTON_RIGHT_PAD)) {
                     return TabBarHit::CloseTab(tab_idx);
                 }
                 return TabBarHit::Tab(tab_idx);
@@ -213,7 +220,7 @@ pub fn render_tab_bar(
         }
     }
 
-    let layout = TabBarLayout::compute(tabs.len(), buf_w);
+    let layout = TabBarLayout::compute(tabs.len(), buf_w, 1.0);
     let tab_w = layout.tab_width;
 
     for (i, (_id, title)) in tabs.iter().enumerate() {

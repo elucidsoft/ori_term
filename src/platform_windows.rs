@@ -8,7 +8,7 @@
 //! This is the standard approach used by Chrome, `WezTerm`, and Windows Terminal.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LRESULT, RECT};
@@ -37,6 +37,11 @@ struct SnapData {
     /// When true, `WM_DPICHANGED` is suppressed to prevent resize oscillation
     /// during manual window positioning (tab tear-off drag).
     dragging: AtomicBool,
+    /// DPI from the most recent `WM_DPICHANGED` message.  Since we eat
+    /// `WM_DPICHANGED` (don't pass it to `DefSubclassProc`), winit never fires
+    /// `ScaleFactorChanged`.  The app reads this in `handle_resize` to update
+    /// `self.scale_factor`.  0 means no DPI change has been received yet.
+    last_dpi: AtomicU32,
 }
 
 /// Global map from HWND (as usize) → `SnapData` pointer so `set_client_rects` can
@@ -112,6 +117,7 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
             caption_height,
             client_rects: Mutex::new(Vec::new()),
             dragging: AtomicBool::new(false),
+            last_dpi: AtomicU32::new(0),
         });
         let data_ptr = Box::into_raw(data);
         SetWindowSubclass(
@@ -180,6 +186,28 @@ pub fn set_dragging(window: &winit::window::Window, dragging: bool) {
     #[allow(unsafe_code)]
     let data = unsafe { &*(ptr as *const SnapData) };
     data.dragging.store(dragging, Ordering::Relaxed);
+}
+
+/// Read the DPI stored by the last `WM_DPICHANGED` message.
+///
+/// Returns the scale factor (DPI / 96.0), or `None` if no DPI change has been
+/// received since `enable_snap` was called.
+pub fn get_current_dpi(window: &winit::window::Window) -> Option<f64> {
+    let hwnd = hwnd_from_window(window)?;
+    let ptr = {
+        let map = snap_ptrs().lock().ok()?;
+        *map.get(&(hwnd as usize))?
+    };
+    // SAFETY: The pointer was created by Box::into_raw in enable_snap and remains
+    // valid until WM_NCDESTROY. AtomicU32 is safe to access from any thread.
+    #[allow(unsafe_code)]
+    let data = unsafe { &*(ptr as *const SnapData) };
+    let dpi = data.last_dpi.load(Ordering::Relaxed);
+    if dpi == 0 {
+        None
+    } else {
+        Some(dpi as f64 / 96.0)
+    }
 }
 
 /// `WndProc` subclass callback — handles `WM_NCCALCSIZE`, `WM_NCHITTEST`, `WM_NCDESTROY`.
@@ -297,6 +325,19 @@ unsafe extern "system" fn subclass_proc(
             }
 
             WM_DPICHANGED => {
+                let data = &*(ref_data as *const SnapData);
+
+                if data.dragging.load(Ordering::Relaxed) {
+                    // During tab tear-off drag, suppress all DPI handling to
+                    // prevent resize oscillation at per-monitor boundaries.
+                    return 0;
+                }
+
+                // Store the new DPI so the app can pick it up in handle_resize.
+                // HIWORD(wParam) = new Y-axis DPI (X and Y are always equal).
+                let new_dpi = ((wparam >> 16) & 0xFFFF) as u32;
+                data.last_dpi.store(new_dpi, Ordering::Relaxed);
+
                 // Apply the suggested rect from Windows (lParam → RECT*).
                 // Windows calculates this rect to prevent DPI oscillation.
                 // We handle it ourselves instead of letting winit do its own
