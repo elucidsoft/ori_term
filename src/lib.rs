@@ -26,6 +26,8 @@ pub mod gpu;
 pub mod shell_integration;
 pub mod tab;
 pub mod tab_bar;
+pub mod context_menu;
+pub mod icons;
 pub mod drag;
 pub mod window;
 pub mod app;

@@ -11,6 +11,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Icon, ResizeDirection, Window, WindowId};
 
 use crate::clipboard;
+use crate::context_menu::{self, ContextAction, MenuOverlay};
 use crate::search::SearchState;
 use crate::url_detect::{UrlDetectCache, UrlSegment};
 use crate::config::{self, Config};
@@ -76,8 +77,8 @@ pub struct App {
     // Implicit URL detection
     url_cache: UrlDetectCache,
     hover_url_range: Option<Vec<UrlSegment>>,
-    // Dropdown menu & settings
-    dropdown_open: Option<WindowId>,
+    // Context menus & settings
+    context_menu: Option<MenuOverlay>,
     settings_window: Option<WindowId>,
     active_scheme: &'static str,
     _config_monitor: Option<ConfigMonitor>,
@@ -96,6 +97,9 @@ pub struct App {
     cursor_blink_reset: Instant,
     /// True when the tab bar needs to be rebuilt (hover, tab add/remove, etc.).
     tab_bar_dirty: bool,
+    /// Chrome-style tab width lock: after closing a tab via close button,
+    /// tabs keep their current width until the mouse leaves the tab bar.
+    tab_width_lock: Option<(WindowId, usize)>,
     /// Previous cursor visibility state for dirty tracking.
     prev_cursor_visible: bool,
     /// Deferred redraw requests: coalesces multiple PTY events into one
@@ -199,7 +203,7 @@ impl App {
             hover_hyperlink: None,
             url_cache: UrlDetectCache::default(),
             hover_url_range: None,
-            dropdown_open: None,
+            context_menu: None,
             settings_window: None,
             active_scheme,
             _config_monitor: config_monitor,
@@ -211,6 +215,7 @@ impl App {
             drag_visual_x: None,
             cursor_blink_reset: Instant::now(),
             tab_bar_dirty: true,
+            tab_width_lock: None,
             prev_cursor_visible: true,
             pending_redraw: HashSet::new(),
             shell_integration_dir,
@@ -530,6 +535,16 @@ impl App {
                     }
                 }
             }
+            Action::DuplicateTab => {
+                if let Some(tw) = self.windows.get(&window_id) {
+                    self.duplicate_tab_at(tw.active_tab);
+                }
+            }
+            Action::MoveTabToNewWindow => {
+                if let Some(tw) = self.windows.get(&window_id) {
+                    self.move_tab_to_new_window(tw.active_tab, event_loop);
+                }
+            }
             Action::None => {
                 // Explicitly unbound — should not appear after merge, but
                 // consume the key if it does.
@@ -549,6 +564,7 @@ impl App {
         &mut self,
         event_loop: &ActiveEventLoop,
         saved_pos: Option<&config::WindowState>,
+        visible: bool,
     ) -> Option<WindowId> {
         let sf = self.scale_factor;
         let s = |v: usize| -> u32 { (v as f64 * sf).round() as u32 };
@@ -658,10 +674,12 @@ impl App {
         }
 
         // Now show the window with the dark frame already presented
-        window.set_visible(true);
+        if visible {
+            window.set_visible(true);
+        }
 
         self.windows.insert(id, tw);
-        log(&format!("window visible: {id:?} ({:.1}ms total create_window)", create_start.elapsed().as_secs_f64() * 1000.0));
+        log(&format!("window created: {id:?}, visible={visible} ({:.1}ms total create_window)", create_start.elapsed().as_secs_f64() * 1000.0));
         Some(id)
     }
 
@@ -716,6 +734,10 @@ impl App {
         }
 
         self.tab_bar_dirty = true;
+        // Clear width lock — adding a tab changes the count
+        if self.tab_width_lock.is_some_and(|(wid, _)| wid == window_id) {
+            self.tab_width_lock = None;
+        }
         if let Some(tw) = self.windows.get_mut(&window_id) {
             tw.add_tab(tab_id);
             tw.window.request_redraw();
@@ -860,7 +882,8 @@ impl App {
                 let sf = self.scale_factor;
                 let si = |v: usize| -> usize { (v as f64 * sf).round() as usize };
                 let bar_w = phys.width as usize;
-                let layout = TabBarLayout::compute(tab_info.len(), bar_w, sf);
+                let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
+                let layout = TabBarLayout::compute(tab_info.len(), bar_w, sf, twl);
                 let h = si(TAB_BAR_HEIGHT) as i32;
                 let left_margin = si(TAB_LEFT_MARGIN);
                 let mut rects = Vec::new();
@@ -889,7 +912,6 @@ impl App {
         }
 
         let hover = self.hover_hit.get(&window_id).copied().unwrap_or(TabBarHit::None);
-        let dropdown_open = self.dropdown_open == Some(window_id);
 
         // Drag visual: if this window has a dragged tab, pass its pixel X and
         // the current animation offsets.
@@ -966,7 +988,7 @@ impl App {
                 active_tab: active_idx,
                 hover_hit: hover,
                 is_maximized,
-                dropdown_open,
+                context_menu: self.context_menu.as_ref(),
                 opacity: self.config.window.effective_opacity(),
                 tab_bar_opacity: self.config.window.effective_tab_bar_opacity(),
                 hover_hyperlink: self.hover_hyperlink.as_ref()
@@ -983,6 +1005,10 @@ impl App {
                 cursor_visible,
                 grid_dirty,
                 tab_bar_dirty,
+                window_id,
+                tab_width_lock: self.tab_width_lock
+                    .filter(|(wid, _)| *wid == window_id)
+                    .map(|(_, w)| w),
             });
 
         let Some(frame_params) = frame_params else {
@@ -1078,6 +1104,11 @@ impl App {
                     self.scale_factor = sf;
                 }
             }
+        }
+
+        // Clear width lock — window size changed, tab widths will be recalculated
+        if self.tab_width_lock.is_some_and(|(wid, _)| wid == window_id) {
+            self.tab_width_lock = None;
         }
 
         // Resize the wgpu surface
@@ -1316,6 +1347,41 @@ impl App {
         let x = pos.x as usize;
         let y = pos.y as usize;
 
+        // Context menu interaction: if a menu is open, handle clicks.
+        if self.context_menu.is_some() && state == ElementState::Pressed {
+            let menu = self.context_menu.as_ref().unwrap();
+            let clicked_item = menu.hit_test(pos.x as f32, pos.y as f32)
+                .and_then(|idx| {
+                    let entry = menu.entries.get(idx)?;
+                    match entry {
+                        context_menu::MenuEntry::Item { action, .. }
+                        | context_menu::MenuEntry::Check { action, .. } => {
+                            Some(action.clone())
+                        }
+                        context_menu::MenuEntry::Separator => None,
+                    }
+                });
+            let clicked_inside = self.context_menu.as_ref()
+                .is_some_and(|m| m.contains(pos.x as f32, pos.y as f32));
+
+            // Always close the menu
+            self.context_menu = None;
+            self.tab_bar_dirty = true;
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.request_redraw();
+            }
+
+            if let Some(action) = clicked_item {
+                self.dispatch_context_action(action, event_loop);
+                return;
+            }
+            if clicked_inside {
+                // Clicked on separator or non-actionable area — consume
+                return;
+            }
+            // Clicked outside the menu — fall through to process the click normally
+        }
+
         // Mouse reporting: if any mouse mode is active and Shift is NOT held,
         // report to PTY and skip normal handling (Shift overrides mouse reporting
         // so the user can still select text).
@@ -1347,33 +1413,61 @@ impl App {
             }
         }
 
-        // Right-click: copy if selection exists, paste if not
+        // Right-click handling
         if button == MouseButton::Right {
             if state == ElementState::Released {
-                let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
-                if let Some(tid) = tab_id {
-                    let has_selection = self.tabs.get(&tid)
-                        .is_some_and(|t| t.selection.is_some());
-                    if has_selection {
-                        // Right-click with selection: always copy (explicit action)
-                        if let Some(tab) = self.tabs.get(&tid) {
-                            if let Some(ref sel) = tab.selection {
-                                let text = selection::extract_text(tab.grid(), sel);
-                                if !text.is_empty() {
-                                    clipboard::set_text(&text);
+                let tab_bar_h = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
+                if y < tab_bar_h {
+                    // Right-click in tab bar → context menu overlay
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
+                        let layout = TabBarLayout::compute(
+                            tw.tabs.len(),
+                            tw.window.inner_size().width as usize,
+                            self.scale_factor,
+                            twl,
+                        );
+                        let hit = layout.hit_test(x, y, self.scale_factor);
+                        let s = self.scale_factor as f32;
+                        let menu_pos = (pos.x as f32, pos.y as f32);
+                        let mut menu = match hit {
+                            TabBarHit::Tab(idx) | TabBarHit::CloseTab(idx) => {
+                                context_menu::build_tab_menu(menu_pos, idx, s)
+                            }
+                            _ => {
+                                context_menu::build_tab_bar_menu(menu_pos, s)
+                            }
+                        };
+                        menu.layout(&mut self.ui_glyphs);
+                        self.context_menu = Some(menu);
+                        self.tab_bar_dirty = true;
+                        tw.window.request_redraw();
+                    }
+                } else {
+                    // Right-click in grid area → copy if selection, paste if not
+                    let tab_id = self.windows.get(&window_id).and_then(TermWindow::active_tab_id);
+                    if let Some(tid) = tab_id {
+                        let has_selection = self.tabs.get(&tid)
+                            .is_some_and(|t| t.selection.is_some());
+                        if has_selection {
+                            if let Some(tab) = self.tabs.get(&tid) {
+                                if let Some(ref sel) = tab.selection {
+                                    let text = selection::extract_text(tab.grid(), sel);
+                                    if !text.is_empty() {
+                                        clipboard::set_text(&text);
+                                    }
                                 }
                             }
+                            if let Some(tab) = self.tabs.get_mut(&tid) {
+                                tab.selection = None;
+                                tab.grid_dirty = true;
+                            }
+                            if let Some(tw) = self.windows.get(&window_id) {
+                                tw.window.request_redraw();
+                            }
+                        } else {
+                            self.paste_from_clipboard(window_id);
                         }
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            tab.selection = None;
-                            tab.grid_dirty = true;
-                        }
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
-                    } else {
-                        // No selection — paste
-                        self.paste_from_clipboard(window_id);
                     }
                 }
             }
@@ -1392,11 +1486,6 @@ impl App {
                     return;
                 }
 
-                // If dropdown is open, handle menu click first
-                if self.dropdown_open.is_some() && self.handle_dropdown_click(window_id, x, y, event_loop) {
-                    return;
-                }
-
                 // Check resize borders first
                 if let Some(direction) = self.resize_direction_at(window_id, pos) {
                     if let Some(tw) = self.windows.get(&window_id) {
@@ -1411,7 +1500,8 @@ impl App {
                         Some(tw) => tw,
                         None => return,
                     };
-                    let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+                    let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
+                    let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor, twl);
                     let hit = layout.hit_test(x, y, self.scale_factor);
 
                     match hit {
@@ -1419,13 +1509,26 @@ impl App {
                             self.new_tab_in_window(window_id);
                         }
                         TabBarHit::DropdownButton => {
-                            if self.dropdown_open == Some(window_id) {
-                                self.dropdown_open = None;
-                            } else {
-                                self.dropdown_open = Some(window_id);
-                            }
-                            self.tab_bar_dirty = true;
+                            // Show dropdown menu overlay below the button
                             if let Some(tw) = self.windows.get(&window_id) {
+                                let sf = self.scale_factor;
+                                let s = sf as f32;
+                                let si = |v: usize| -> usize { (v as f64 * sf).round() as usize };
+                                let bar_w = tw.window.inner_size().width as usize;
+                                let tab_count = tw.tabs.len();
+                                let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
+                                let btn_layout = TabBarLayout::compute(tab_count, bar_w, sf, twl);
+                                let tabs_end = si(TAB_LEFT_MARGIN)
+                                    + tab_count * btn_layout.tab_width;
+                                let menu_x = (tabs_end + si(NEW_TAB_BUTTON_WIDTH)) as f32;
+                                let menu_y = si(TAB_BAR_HEIGHT) as f32;
+                                let scheme = self.active_scheme;
+                                let mut menu = context_menu::build_dropdown_menu(
+                                    (menu_x, menu_y), scheme, s,
+                                );
+                                menu.layout(&mut self.ui_glyphs);
+                                self.context_menu = Some(menu);
+                                self.tab_bar_dirty = true;
                                 tw.window.request_redraw();
                             }
                         }
@@ -1434,6 +1537,9 @@ impl App {
                                 Some(tw) => tw,
                                 None => return,
                             };
+                            // Chrome-style width lock: freeze tab width so close
+                            // buttons stay under cursor during rapid closes.
+                            self.tab_width_lock = Some((window_id, layout.tab_width));
                             if let Some(&tab_id) = tw.tabs.get(idx) {
                                 self.close_tab(tab_id, event_loop);
                             }
@@ -1484,10 +1590,12 @@ impl App {
                                 None => return,
                             };
                             if let Some(&tab_id) = tw.tabs.get(idx) {
+                                let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
                                 let layout = TabBarLayout::compute(
                                     tw.tabs.len(),
                                     tw.window.inner_size().width as usize,
                                     self.scale_factor,
+                                    twl,
                                 );
                                 let left_margin = (TAB_LEFT_MARGIN as f64 * self.scale_factor).round();
                                 let tab_left = left_margin
@@ -1568,9 +1676,10 @@ impl App {
                             // No preview — torn-off window stays as-is.
                         }
                         DragPhase::DraggingInBar | DragPhase::Pending => {
-                            // Clear drag visuals
+                            // Clear drag visuals and rebuild tab bar (show tab at slot again)
                             self.drag_visual_x = None;
                             self.tab_anim_offsets.remove(&drag.source_window);
+                            self.tab_bar_dirty = true;
                             if let Some(tw) = self.windows.get(&drag.source_window) {
                                 tw.window.request_redraw();
                             }
@@ -1805,6 +1914,18 @@ impl App {
     fn handle_cursor_moved(&mut self, window_id: WindowId, position: PhysicalPosition<f64>, event_loop: &ActiveEventLoop) {
         self.cursor_pos.insert(window_id, position);
 
+        // Context menu hover tracking
+        if let Some(ref mut menu) = self.context_menu {
+            let old = menu.hovered;
+            menu.hovered = menu.hit_test(position.x as f32, position.y as f32);
+            if menu.hovered != old {
+                self.tab_bar_dirty = true;
+                if let Some(tw) = self.windows.get(&window_id) {
+                    tw.window.request_redraw();
+                }
+            }
+        }
+
         // Update cursor icon for resize borders and hyperlink hover
         let cursor_icon = if let Some(dir) = self.resize_direction_at(window_id, position) {
             dir.into()
@@ -1998,7 +2119,8 @@ impl App {
         let tab_bar_h_hover = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
         if y < tab_bar_h_hover {
             if let Some(tw) = self.windows.get(&window_id) {
-                let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+                let twl = self.tab_width_lock.filter(|(wid, _)| *wid == window_id).map(|(_, w)| w);
+                let layout = TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor, twl);
                 let hit = layout.hit_test(x, y, self.scale_factor);
                 let prev = self.hover_hit.insert(window_id, hit);
                 if prev != Some(hit) {
@@ -2007,6 +2129,11 @@ impl App {
                 }
             }
         } else {
+            // Mouse left tab bar — release width lock so tabs expand naturally
+            if self.tab_width_lock.is_some_and(|(wid, _)| wid == window_id) {
+                self.tab_width_lock = None;
+                self.tab_bar_dirty = true;
+            }
             let prev = self.hover_hit.insert(window_id, TabBarHit::None);
             if prev != Some(TabBarHit::None) {
                 self.tab_bar_dirty = true;
@@ -2019,11 +2146,11 @@ impl App {
         // Handle drag — extract values to avoid borrow conflicts with self
         let drag_action = self.drag.as_ref().map(|drag| {
             (drag.phase, drag.tab_id, drag.source_window, drag.grab_offset,
-             drag.distance_from_origin(position), drag.vertical_distance(position),
+             drag.distance_from_origin(position),
              drag.mouse_offset_in_tab)
         });
 
-        if let Some((phase, tab_id, source_wid, grab_offset, dist, vert_dist, mouse_off)) = drag_action {
+        if let Some((phase, tab_id, source_wid, grab_offset, dist, mouse_off)) = drag_action {
             match phase {
                 DragPhase::Pending => {
                     if dist >= DRAG_START_THRESHOLD {
@@ -2049,12 +2176,29 @@ impl App {
                             if let Some(ref mut drag) = self.drag {
                                 drag.phase = DragPhase::DraggingInBar;
                             }
+                            // Full rebuild so tab bar hides the dragged tab's slot.
+                            // After this, position-only moves use the overlay fast path.
+                            self.tab_bar_dirty = true;
                             log("drag: pending -> dragging in bar");
                         }
                     }
                 }
                 DragPhase::DraggingInBar => {
-                    if vert_dist >= TEAR_OFF_THRESHOLD {
+                    // Chrome-style tear-off: cursor leaves the draggable area.
+                    // Y: above or below the tab bar by threshold.
+                    // X: past the window edges (left=0, right=controls start).
+                    let sf = self.scale_factor;
+                    let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round();
+                    let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f64 * sf;
+                    let window_w = self.windows.get(&source_wid)
+                        .map_or(0.0, |tw| tw.window.inner_size().width as f64);
+                    let x_max = window_w - controls_w;
+                    let y = position.y;
+                    let x = position.x;
+                    let outside_y = if y < 0.0 { -y } else { (y - tab_bar_h).max(0.0) };
+                    let outside_x = if x < 0.0 { -x } else { (x - x_max).max(0.0) };
+                    let outside = outside_y.max(outside_x);
+                    if outside >= TEAR_OFF_THRESHOLD {
                         log("drag: tearing off!");
                         self.tear_off_tab(tab_id, source_wid, position, event_loop);
                         if let Some(ref mut drag) = self.drag {
@@ -2067,9 +2211,13 @@ impl App {
                                 crate::platform_windows::set_dragging(&tw.window, true);
                             }
                         }
-                        // Clear drag visuals for the source window
+                        // Clear drag visuals and force full repaint of source window
                         self.drag_visual_x = None;
                         self.tab_anim_offsets.remove(&source_wid);
+                        self.tab_bar_dirty = true;
+                        if let Some(tw) = self.windows.get(&source_wid) {
+                            tw.window.request_redraw();
+                        }
                     } else {
                         self.update_drag_in_bar(window_id, position, tab_id, mouse_off);
                     }
@@ -2192,9 +2340,12 @@ impl App {
         cursor: PhysicalPosition<f64>,
         event_loop: &ActiveEventLoop,
     ) {
-        // Remove tab from source window
+        // Remove tab from source window and clear drag overlay so the source
+        // window doesn't render a ghost of the dragged tab.
         if let Some(tw) = self.windows.get_mut(&source_wid) {
             tw.remove_tab(tab_id);
+            self.tab_bar_dirty = true;
+            self.drag_visual_x = None;
             tw.window.request_redraw();
         }
 
@@ -2212,8 +2363,8 @@ impl App {
             .map_or(75.0, |d| d.mouse_offset_in_tab);
         let grab_y = TAB_BAR_HEIGHT as f64 * self.scale_factor / 2.0;
 
-        // Create new frameless window at cursor position
-        if let Some(new_wid) = self.create_window(event_loop, None) {
+        // Create new frameless window at cursor position (hidden until first frame)
+        if let Some(new_wid) = self.create_window(event_loop, None, false) {
             if let Some(tw) = self.windows.get_mut(&new_wid) {
                 tw.add_tab(tab_id);
                 // Position so cursor is at grab_offset within the client area.
@@ -2225,7 +2376,13 @@ impl App {
                         .set_outer_position(PhysicalPosition::new(win_x, win_y));
                 }
             }
-            // Render before showing to avoid flash
+            // Render both windows before showing the new one:
+            // 1. Source window first — its tab bar lost a tab and must rebuild.
+            // 2. New window second — renders the torn-off tab, then becomes visible.
+            // We render source inline because request_redraw may never fire on
+            // Windows if the source window is obscured by the new one.
+            self.render_window(source_wid);
+            self.tab_bar_dirty = true;
             self.render_window(new_wid);
             if let Some(tw) = self.windows.get(&new_wid) {
                 tw.window.set_visible(true);
@@ -2252,6 +2409,52 @@ impl App {
         }
     }
 
+    /// Decay tab animation offsets (time-based exponential decay).
+    /// Returns `true` if any animation is still active and needs further ticks.
+    fn decay_tab_animations(&mut self) -> bool {
+        if self.tab_anim_offsets.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_anim_time).as_secs_f32();
+        self.last_anim_time = now;
+        let decay = (-dt * 15.0_f32).exp(); // ~67ms time constant
+
+        let mut any_active = false;
+        let mut finished = Vec::new();
+
+        for (wid, offsets) in &mut self.tab_anim_offsets {
+            let mut all_zero = true;
+            for offset in offsets.iter_mut() {
+                *offset *= decay;
+                if offset.abs() < 0.5 {
+                    *offset = 0.0;
+                } else {
+                    all_zero = false;
+                }
+            }
+            if all_zero {
+                finished.push(*wid);
+            } else {
+                any_active = true;
+            }
+        }
+
+        for wid in finished {
+            self.tab_anim_offsets.remove(&wid);
+        }
+
+        // Offsets changed — mark tab bar dirty so renderer rebuilds with new positions
+        if any_active {
+            self.tab_bar_dirty = true;
+            for tw in self.windows.values() {
+                tw.window.request_redraw();
+            }
+        }
+
+        any_active
+    }
+
     fn update_drag_in_bar(
         &mut self,
         window_id: WindowId,
@@ -2267,6 +2470,7 @@ impl App {
                     tw.tabs.len(),
                     tw.window.inner_size().width as usize,
                     sf,
+                    None, // no lock during drag
                 );
                 (tw.tabs.len(), layout.tab_width)
             }
@@ -2276,90 +2480,46 @@ impl App {
         let tab_wf = tab_w as f64;
 
         // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
-        // Clamp to tab zone: can't go past the last tab slot (don't overlap + button)
-        let max_x = (left_margin + (tab_count - 1) as f64 * tab_wf) as f32;
+        // Allow free movement up to the window controls area.
+        let window_w = self.windows.get(&window_id)
+            .map_or(0.0, |tw| tw.window.inner_size().width as f32);
+        let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f32 * sf as f32;
+        let max_x = window_w - controls_w - tab_wf as f32;
         let dragged_x = ((position.x - mouse_offset_in_tab) as f32)
-            .clamp(left_margin as f32, max_x);
+            .clamp(0.0, max_x);
 
         // 2. Compute insertion index from cursor center
         let cursor_center = dragged_x as f64 + tab_wf / 2.0;
         let new_idx = ((cursor_center - left_margin) / tab_wf)
             .clamp(0.0, (tab_count - 1) as f64) as usize;
 
-        // 3. If index changed, swap tab and set animation offsets
+        // 3. If index changed, swap tab in the model.
+        // Chrome-style: displaced tabs snap to new positions immediately during
+        // drag (no dodge animation). Animation only applies on drag-end.
+        let mut swapped = false;
         if let Some(tw) = self.windows.get_mut(&window_id) {
             if let Some(current_idx) = tw.tab_index(tab_id) {
                 if current_idx != new_idx {
-                    // Compute old positions
-                    let lm = left_margin as usize;
-                    let old_positions: Vec<f32> = (0..tab_count)
-                        .map(|i| (lm + i * tab_w) as f32)
-                        .collect();
-
-                    // Swap
                     tw.tabs.remove(current_idx);
                     tw.tabs.insert(new_idx, tab_id);
                     tw.active_tab = new_idx;
-
-                    // Compute new positions and set animation offsets
-                    let offsets = self.tab_anim_offsets
-                        .entry(window_id)
-                        .or_insert_with(|| vec![0.0; tab_count]);
-                    offsets.resize(tab_count, 0.0);
-
-                    // For each tab that moved, offset = old_pos - new_pos
-                    // Only tabs between current_idx and new_idx are affected
-                    let lo = current_idx.min(new_idx);
-                    let hi = current_idx.max(new_idx);
-                    #[allow(clippy::needless_range_loop)]
-                    for i in lo..=hi {
-                        if i == new_idx {
-                            continue; // dragged tab — rendered at cursor, not at index
-                        }
-                        let new_pos = (lm + i * tab_w) as f32;
-                        // Find where this tab was before the swap
-                        let old_i = if current_idx < new_idx {
-                            // Tab moved right → tabs in [current+1..=new] shifted left by 1
-                            i + 1
-                        } else {
-                            // Tab moved left → tabs in [new..current-1] shifted right by 1
-                            i - 1
-                        };
-                        if old_i < old_positions.len() {
-                            offsets[i] += old_positions[old_i] - new_pos;
-                        }
-                    }
+                    self.tab_anim_offsets.remove(&window_id);
+                    swapped = true;
                 }
             }
         }
 
-        // 4. Decay existing animation offsets (time-based)
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_anim_time).as_secs_f32();
-        self.last_anim_time = now;
-        let decay = (-dt * 15.0_f32).exp(); // ~67ms time constant
-        if let Some(offsets) = self.tab_anim_offsets.get_mut(&window_id) {
-            for offset in offsets.iter_mut() {
-                *offset *= decay;
-                if offset.abs() < 0.5 {
-                    *offset = 0.0;
-                }
-            }
-        }
-
-        // 5. Store dragged_x for FrameParams
+        // 4. Store dragged_x for FrameParams
         self.drag_visual_x = Some((window_id, dragged_x));
 
-        // 6. Request redraw; keep animating if offsets are nonzero
+        // 5. Request redraw. Only mark tab bar dirty on actual tab swap (full
+        // rebuild needed for new slot positions). Position-only moves use the
+        // renderer's overlay-only fast path — skips grid + tab bar rebuild.
+        if swapped {
+            self.tab_bar_dirty = true;
+        }
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.request_redraw();
-        }
-        if let Some(offsets) = self.tab_anim_offsets.get(&window_id) {
-            if offsets.iter().any(|o| o.abs() > 0.5) {
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
-            }
         }
     }
 
@@ -2389,9 +2549,11 @@ impl App {
             let size = tw.window.inner_size();
             let wx = pos.x as f64;
             let wy = pos.y as f64;
-            let tab_bar_h = TAB_BAR_HEIGHT as f64 * self.scale_factor;
+            let sf = self.scale_factor;
+            let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
+            let controls_w = crate::tab_bar::CONTROLS_ZONE_WIDTH as f64 * sf;
             if screen_x >= wx
-                && screen_x < wx + size.width as f64
+                && screen_x < wx + size.width as f64 - controls_w
                 && screen_y >= wy
                 && screen_y < wy + tab_bar_h
             {
@@ -2413,7 +2575,7 @@ impl App {
             .unwrap_or(0.0);
         let local_x = (screen_x - target_x) as usize;
         let layout =
-            TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor);
+            TabBarLayout::compute(tw.tabs.len(), tw.window.inner_size().width as usize, self.scale_factor, None);
         let left_margin = (TAB_LEFT_MARGIN as f64 * self.scale_factor).round() as usize;
         let tab_x = local_x.saturating_sub(left_margin);
         let raw = (tab_x + layout.tab_width / 2) / layout.tab_width.max(1);
@@ -2556,68 +2718,113 @@ impl App {
         }
     }
 
-    // --- Dropdown menu helpers ---
+    // --- Context menu actions ---
 
-    /// Compute the dropdown menu rectangle (x, y, w, h) in the given window.
-    fn dropdown_menu_rect(&self, window_id: WindowId) -> Option<(usize, usize, usize, usize)> {
-        let sf = self.scale_factor;
-        let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
-        let tw = self.windows.get(&window_id)?;
-        let tab_count = tw.tabs.len();
-        let bar_w = tw.window.inner_size().width as usize;
-        let layout = TabBarLayout::compute(tab_count, bar_w, sf);
-        let tabs_end = s(TAB_LEFT_MARGIN) + tab_count * layout.tab_width;
-        let dropdown_x = tabs_end + s(NEW_TAB_BUTTON_WIDTH);
-        let menu_w: usize = (140.0 * sf).round() as usize;
-        let menu_h: usize = (32.0 * sf).round() as usize;
-        let menu_x = dropdown_x;
-        let menu_y = s(TAB_BAR_HEIGHT);
-        Some((menu_x, menu_y, menu_w, menu_h))
+    fn dispatch_context_action(&mut self, action: ContextAction, event_loop: &ActiveEventLoop) {
+        log(&format!("menu action: {action:?}"));
+        match action {
+            ContextAction::CloseTab(idx) => {
+                let tab_id = self.windows.values()
+                    .find_map(|tw| tw.tabs.get(idx).copied());
+                if let Some(tid) = tab_id {
+                    self.close_tab(tid, event_loop);
+                }
+            }
+            ContextAction::DuplicateTab(idx) => {
+                self.duplicate_tab_at(idx);
+            }
+            ContextAction::MoveTabToNewWindow(idx) => {
+                self.move_tab_to_new_window(idx, event_loop);
+            }
+            ContextAction::NewTab => {
+                if let Some(&wid) = self.windows.keys().next() {
+                    self.new_tab_in_window(wid);
+                }
+            }
+            ContextAction::OpenSettings => {
+                self.open_settings_window(event_loop);
+            }
+            ContextAction::SelectScheme(name) => {
+                if let Some(scheme) = palette::find_scheme(&name) {
+                    self.apply_scheme_to_all_tabs(scheme);
+                }
+            }
+        }
     }
 
-    /// Handle a click when the dropdown menu is open.
-    /// Returns true if the click was consumed (inside menu or dismiss).
-    fn handle_dropdown_click(
-        &mut self,
-        window_id: WindowId,
-        x: usize,
-        y: usize,
-        event_loop: &ActiveEventLoop,
-    ) -> bool {
-        let dropdown_wid = match self.dropdown_open {
-            Some(wid) => wid,
-            None => return false,
+    /// Duplicate tab at `tab_index` — spawns a new tab with the same CWD.
+    fn duplicate_tab_at(&mut self, tab_index: usize) {
+        let info = self.windows.iter()
+            .find_map(|(&wid, tw)| tw.tabs.get(tab_index).map(|&tid| (wid, tid)));
+        let Some((window_id, source_tab_id)) = info else { return };
+        let cwd = self.tabs.get(&source_tab_id).and_then(|t| t.cwd.clone());
+
+        let default_cols = self.config.window.columns;
+        let default_rows = self.config.window.rows;
+        let (cols, rows) = self.windows.get(&window_id)
+            .map_or((default_cols, default_rows), |tw| {
+                let size = tw.window.inner_size();
+                self.grid_dims_for_size(size.width, size.height)
+            });
+
+        let tab_id = self.alloc_tab_id();
+        let cursor_shape = config::parse_cursor_style(&self.config.terminal.cursor_style);
+        let tab = match Tab::spawn(
+            tab_id, cols, rows,
+            self.proxy.clone(),
+            self.config.terminal.shell.as_deref(),
+            self.config.terminal.scrollback,
+            cursor_shape,
+            self.shell_integration_dir.as_deref(),
+            cwd.as_deref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                log(&format!("duplicate_tab: failed to spawn: {e}"));
+                return;
+            }
         };
-
-        // Only handle clicks in the window that has the dropdown open
-        if window_id != dropdown_wid {
-            self.dropdown_open = None;
-            if let Some(tw) = self.windows.get(&dropdown_wid) {
-                tw.window.request_redraw();
-            }
-            return false;
-        }
-
-        if let Some((mx, my, mw, mh)) = self.dropdown_menu_rect(window_id) {
-            if x >= mx && x < mx + mw && y >= my && y < my + mh {
-                // Clicked on "Settings" menu item
-                self.dropdown_open = None;
-                self.open_settings_window(event_loop);
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
-                return true;
+        self.tabs.insert(tab_id, tab);
+        if let Some(t) = self.tabs.get_mut(&tab_id) {
+            if let Some(scheme) = palette::find_scheme(self.active_scheme) {
+                t.palette.set_scheme(scheme);
             }
         }
-
-        // Clicked outside menu — dismiss
-        self.dropdown_open = None;
-        if let Some(tw) = self.windows.get(&window_id) {
+        if let Some(tw) = self.windows.get_mut(&window_id) {
+            tw.add_tab(tab_id);
+            self.tab_bar_dirty = true;
             tw.window.request_redraw();
         }
-        // Don't consume if the click is on tab bar buttons — let it propagate
-        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * self.scale_factor).round() as usize;
-        y >= tab_bar_h
+    }
+
+    /// Move the tab at `tab_index` into a brand-new window.
+    fn move_tab_to_new_window(&mut self, tab_index: usize, event_loop: &ActiveEventLoop) {
+        let info = self.windows.iter()
+            .find_map(|(&wid, tw)| {
+                tw.tabs.get(tab_index).map(|&tid| (wid, tid))
+            });
+        let Some((src_wid, tab_id)) = info else { return };
+
+        // Don't move if it's the last tab in the window
+        if self.windows.get(&src_wid).is_some_and(|tw| tw.tabs.len() <= 1) {
+            return;
+        }
+
+        // Remove from source window
+        if let Some(tw) = self.windows.get_mut(&src_wid) {
+            tw.remove_tab(tab_id);
+            self.tab_bar_dirty = true;
+            tw.window.request_redraw();
+        }
+
+        // Create a new window and add the tab
+        if let Some(new_wid) = self.create_window(event_loop, None, true) {
+            if let Some(tw) = self.windows.get_mut(&new_wid) {
+                tw.add_tab(tab_id);
+                self.tab_bar_dirty = true;
+                tw.window.request_redraw();
+            }
+        }
     }
 
     // --- Settings window ---
@@ -2851,7 +3058,7 @@ impl ApplicationHandler<TermEvent> for App {
         // moving a visible window).
         let saved_pos = config::WindowState::load();
 
-        if let Some(wid) = self.create_window(event_loop, saved_pos.as_ref()) {
+        if let Some(wid) = self.create_window(event_loop, saved_pos.as_ref(), true) {
             // Query actual DPI scale factor and reload fonts if needed
             if let Some(tw) = self.windows.get(&wid) {
                 let sf = tw.window.scale_factor();
@@ -2925,15 +3132,24 @@ impl ApplicationHandler<TermEvent> for App {
             }
         }
 
+        // Tick tab drag/reorder animations (time-based decay, independent of mouse events)
+        let anim_active = self.decay_tab_animations();
+
         // Smart cursor blink / bell scheduling: instead of spinning at 60fps,
         // sleep until the next blink transition or bell animation tick.
+        // NOTE: dragging does NOT use Poll — CursorMoved events drive redraws
+        // directly. Polling would present stale frames between mouse events,
+        // each blocking on vsync and adding latency (Chrome doesn't poll either).
         let has_bell_badge = self.tabs.values().any(|t| t.has_bell_badge);
-        if has_bell_badge {
-            // Bell badge is animating — need continuous redraws (~60fps).
+        if has_bell_badge || anim_active {
+            // Bell badge or tab animation is active — schedule ~60fps redraws.
+            // Use WaitUntil instead of Poll to avoid spinning the event loop,
+            // which would block CursorMoved events behind vsync presents.
             for tw in self.windows.values() {
                 tw.window.request_redraw();
             }
-            event_loop.set_control_flow(ControlFlow::Poll);
+            let deadline = Instant::now() + Duration::from_millis(16);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         } else if self.config.terminal.cursor_blink {
             // Schedule wake-up at the next blink transition.
             let interval_ms = self.config.terminal.cursor_blink_interval_ms.max(1);
@@ -3016,25 +3232,24 @@ impl ApplicationHandler<TermEvent> for App {
                     return;
                 }
 
+                // Context menu: Escape dismisses it, all other keys ignored
+                if self.context_menu.is_some() {
+                    if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+                        self.context_menu = None;
+                        self.tab_bar_dirty = true;
+                        if let Some(tw) = self.windows.get(&window_id) {
+                            tw.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+
                 // Search mode: intercept all keys when search is active
                 if self.search_active == Some(window_id) {
                     if is_pressed {
                         self.handle_search_key(window_id, &event);
                     }
                     return;
-                }
-
-                // Escape: close dropdown if open
-                if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                    if self.dropdown_open.is_some() {
-                        let wid = self.dropdown_open.take();
-                        if let Some(wid) = wid {
-                            if let Some(tw) = self.windows.get(&wid) {
-                                tw.window.request_redraw();
-                            }
-                        }
-                        return;
-                    }
                 }
 
                 // Handle Escape during drag
@@ -3142,6 +3357,14 @@ impl ApplicationHandler<TermEvent> for App {
             }
 
             WindowEvent::Focused(focused) => {
+                // Dismiss context menu on focus loss
+                if !focused && self.context_menu.is_some() {
+                    self.context_menu = None;
+                    self.tab_bar_dirty = true;
+                    if let Some(tw) = self.windows.get(&window_id) {
+                        tw.window.request_redraw();
+                    }
+                }
                 // Skip settings window — no PTY to send to
                 if self.is_settings_window(window_id) {
                     return;

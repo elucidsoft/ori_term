@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::icons::Icon;
 use crate::render::{FontSet, FontStyle};
 
 /// Cache key includes font size (tenths of a point) so the same atlas
@@ -41,6 +42,7 @@ pub struct GlyphAtlas {
     row_y: u32,
     row_tallest: u32,
     entries: HashMap<GlyphKey, AtlasEntry>,
+    icon_entries: HashMap<(Icon, u16), AtlasEntry>,
 }
 
 impl GlyphAtlas {
@@ -74,13 +76,14 @@ impl GlyphAtlas {
             row_y: 0,
             row_tallest: 0,
             entries: HashMap::new(),
+            icon_entries: HashMap::new(),
         }
     }
 
     /// Look up a glyph in the atlas, inserting it if missing.
     ///
     /// Rasterizes the glyph via `FontSet` and uploads the bitmap to the GPU texture.
-    #[allow(clippy::map_entry)] // self.insert() borrows &mut self for row packing
+    #[allow(clippy::map_entry)] // self.upload_bitmap() borrows &mut self for row packing
     pub fn get_or_insert(
         &mut self,
         ch: char,
@@ -99,7 +102,8 @@ impl GlyphAtlas {
                     ymin: metrics.ymin,
                     advance_width: metrics.advance_width,
                 };
-                self.insert(key, &glyph_metrics, bitmap, queue);
+                let entry = self.upload_bitmap(&glyph_metrics, bitmap, queue);
+                self.entries.insert(key, entry);
             } else {
                 // No glyph available — insert a zero-size entry
                 self.entries.insert(
@@ -119,6 +123,30 @@ impl GlyphAtlas {
             }
         }
         self.entries.get(&key).expect("glyph entry just inserted")
+    }
+
+    /// Look up an icon in the atlas, rasterizing and inserting it if missing.
+    #[allow(clippy::map_entry)]
+    pub fn get_or_insert_icon(
+        &mut self,
+        icon: Icon,
+        size_px: u16,
+        queue: &wgpu::Queue,
+    ) -> &AtlasEntry {
+        let key = (icon, size_px);
+        if !self.icon_entries.contains_key(&key) {
+            let bmp = icon.rasterize(u32::from(size_px));
+            let metrics = GlyphMetrics {
+                width: bmp.width as usize,
+                height: bmp.height as usize,
+                xmin: 0,
+                ymin: 0,
+                advance_width: bmp.width as f32,
+            };
+            let entry = self.upload_bitmap(&metrics, &bmp.data, queue);
+            self.icon_entries.insert(key, entry);
+        }
+        self.icon_entries.get(&key).expect("icon entry just inserted")
     }
 
     /// Get a glyph entry if it already exists in the atlas.
@@ -141,32 +169,29 @@ impl GlyphAtlas {
     /// Call this when font size changes (atlas needs to be rebuilt).
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.icon_entries.clear();
         self.row_x = 0;
         self.row_y = 0;
         self.row_tallest = 0;
     }
 
-    fn insert(
+    /// Allocate atlas space, upload bitmap, and return the entry.
+    fn upload_bitmap(
         &mut self,
-        key: GlyphKey,
         metrics: &GlyphMetrics,
         bitmap: &[u8],
         queue: &wgpu::Queue,
-    ) {
+    ) -> AtlasEntry {
         let gw = metrics.width as u32;
         let gh = metrics.height as u32;
 
-        // Zero-size glyph (e.g. space) — store entry with no UV region
+        // Zero-size bitmap (e.g. space) — return entry with no UV region
         if gw == 0 || gh == 0 {
-            self.entries.insert(
-                key,
-                AtlasEntry {
-                    uv_pos: [0.0, 0.0],
-                    uv_size: [0.0, 0.0],
-                    metrics: *metrics,
-                },
-            );
-            return;
+            return AtlasEntry {
+                uv_pos: [0.0, 0.0],
+                uv_size: [0.0, 0.0],
+                metrics: *metrics,
+            };
         }
 
         // Row packing: check if glyph fits in current row
@@ -179,19 +204,15 @@ impl GlyphAtlas {
 
         // Check if atlas is full
         if self.row_y + gh > self.height {
-            crate::log("glyph atlas full — glyph not inserted");
-            self.entries.insert(
-                key,
-                AtlasEntry {
-                    uv_pos: [0.0, 0.0],
-                    uv_size: [0.0, 0.0],
-                    metrics: *metrics,
-                },
-            );
-            return;
+            crate::log("glyph atlas full — entry not inserted");
+            return AtlasEntry {
+                uv_pos: [0.0, 0.0],
+                uv_size: [0.0, 0.0],
+                metrics: *metrics,
+            };
         }
 
-        // Upload glyph bitmap to the atlas texture
+        // Upload bitmap to the atlas texture
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -225,16 +246,13 @@ impl GlyphAtlas {
             gh as f32 / self.height as f32,
         ];
 
-        self.entries.insert(
-            key,
-            AtlasEntry {
-                uv_pos,
-                uv_size,
-                metrics: *metrics,
-            },
-        );
-
-        self.row_x += gw + 1; // 1px gap between glyphs
+        self.row_x += gw + 1; // 1px gap between entries
         self.row_tallest = self.row_tallest.max(gh);
+
+        AtlasEntry {
+            uv_pos,
+            uv_size,
+            metrics: *metrics,
+        }
     }
 }

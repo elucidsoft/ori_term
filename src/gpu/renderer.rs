@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use winit::window::Window;
+use winit::window::{Window, WindowId};
 
 use vte::ansi::CursorShape;
 
@@ -27,11 +27,19 @@ use super::pipeline::{self, INSTANCE_STRIDE};
 const CONTROL_CLOSE_HOVER_BG: [f32; 4] = rgb_const(0xc4, 0x2b, 0x1c);
 const CONTROL_CLOSE_HOVER_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
+// Default UI colors (non-themed) — used for context menus, popups, panels.
+// All values in linear space (compile-time sRGB→linear via rgb_const).
+const UI_BG: [f32; 4] = rgb_const(0x29, 0x29, 0x29);
+const UI_BG_HOVER: [f32; 4] = rgb_const(0x3D, 0x3D, 0x3D);
+const UI_SEPARATOR: [f32; 4] = rgb_const(0x3D, 0x3F, 0x43);
+const UI_TEXT: [f32; 4] = rgb_const(0xE8, 0xEB, 0xED);
+const UI_TEXT_DIM: [f32; 4] = rgb_const(0xA6, 0xA8, 0xAB);
+
 /// Tab bar colors derived dynamically from the palette.
 ///
-/// Chrome-style: the bar is dark, inactive tabs are slightly lighter (solid,
-/// fully opaque), the active tab matches the content area exactly.  All colors
-/// are alpha 1.0 — no transparency anywhere in the tab bar.
+/// The bar is dark, inactive tabs are slightly lighter (solid, fully opaque),
+/// the active tab matches the content area exactly.  All colors are alpha 1.0 —
+/// no transparency anywhere in the tab bar.
 struct TabBarColors {
     bar_bg: [f32; 4],
     active_bg: [f32; 4],
@@ -223,7 +231,7 @@ pub struct FrameParams<'a> {
     pub active_tab: usize,
     pub hover_hit: TabBarHit,
     pub is_maximized: bool,
-    pub dropdown_open: bool,
+    pub context_menu: Option<&'a crate::context_menu::MenuOverlay>,
     pub opacity: f32,
     pub tab_bar_opacity: f32,
     pub hover_hyperlink: Option<&'a str>,
@@ -246,6 +254,10 @@ pub struct FrameParams<'a> {
     pub grid_dirty: bool,
     /// True when tab bar changed and instances need rebuild.
     pub tab_bar_dirty: bool,
+    /// Window being rendered — used for per-window cache invalidation.
+    pub window_id: WindowId,
+    /// Chrome-style locked tab width (after close, tabs keep width until mouse leaves bar).
+    pub tab_width_lock: Option<usize>,
 }
 
 /// GPU state shared across all windows.
@@ -549,6 +561,8 @@ pub struct GpuRenderer {
     // Damage tracking: cached prepared frame with GPU buffers from previous render.
     // When nothing changed, we skip instance building AND buffer creation entirely.
     cached_frame: Option<PreparedFrame>,
+    /// Tracks which window was last rendered; invalidates cache on window switch.
+    last_rendered_window: Option<WindowId>,
 }
 
 impl GpuRenderer {
@@ -625,6 +639,7 @@ impl GpuRenderer {
             sampler,
             render_format: format,
             cached_frame: None,
+            last_rendered_window: None,
         }
     }
 
@@ -751,6 +766,13 @@ impl GpuRenderer {
         glyphs: &mut FontSet,
         ui_glyphs: &mut FontSet,
     ) {
+        // Invalidate cached frame when switching between windows — a single
+        // cache shared across windows would cause stale tab bars.
+        if self.last_rendered_window != Some(params.window_id) {
+            self.cached_frame = None;
+            self.last_rendered_window = Some(params.window_id);
+        }
+
         let w = params.width as f32;
         let h = params.height as f32;
 
@@ -768,7 +790,57 @@ impl GpuRenderer {
         let needs_rebuild = params.grid_dirty || params.tab_bar_dirty || self.cached_frame.is_none();
 
         if !needs_rebuild {
-            // Cached frame already holds the right GPU buffers — nothing to do.
+            // Main frame cached. But dragged-tab overlay may need updating
+            // (cursor moved during drag). Overlay is tiny (~10 instances) so
+            // rebuilding it is cheap; the expensive part (grid + tab bar +
+            // buffer creation) is skipped entirely.
+            let needs_overlay = params.dragged_tab.is_some()
+                || self.cached_frame.as_ref().is_some_and(|f| f.has_overlay);
+            if needs_overlay {
+                // Build overlay instances (borrows &mut self for atlas access)
+                let mut overlay_bg_w = InstanceWriter::new();
+                let mut overlay_fg_w = InstanceWriter::new();
+                self.build_dragged_tab_overlay(
+                    &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+                );
+                self.build_context_menu_overlay(
+                    &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
+                );
+
+                let overlay_bg_bytes = overlay_bg_w.as_bytes();
+                let overlay_fg_bytes = overlay_fg_w.as_bytes();
+                let overlay_bg_count = overlay_bg_w.count();
+                let overlay_fg_count = overlay_fg_w.count();
+                let has_overlay = !overlay_bg_bytes.is_empty() || !overlay_fg_bytes.is_empty();
+
+                if let Some(ref mut cached) = self.cached_frame {
+                    if has_overlay {
+                        let new_bg = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("overlay_bg"),
+                            size: (overlay_bg_bytes.len() as u64).max(INSTANCE_STRIDE),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        if !overlay_bg_bytes.is_empty() {
+                            gpu.queue.write_buffer(&new_bg, 0, overlay_bg_bytes);
+                        }
+                        let new_fg = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("overlay_fg"),
+                            size: (overlay_fg_bytes.len() as u64).max(INSTANCE_STRIDE),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        if !overlay_fg_bytes.is_empty() {
+                            gpu.queue.write_buffer(&new_fg, 0, overlay_fg_bytes);
+                        }
+                        cached.overlay_bg_buffer = new_bg;
+                        cached.overlay_fg_buffer = new_fg;
+                    }
+                    cached.overlay_bg_count = overlay_bg_count;
+                    cached.overlay_fg_count = overlay_fg_count;
+                    cached.has_overlay = has_overlay;
+                }
+            }
             return;
         }
 
@@ -811,7 +883,7 @@ impl GpuRenderer {
         self.build_dragged_tab_overlay(
             &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
         );
-        self.build_dropdown_overlay(
+        self.build_context_menu_overlay(
             &mut overlay_bg_w, &mut overlay_fg_w, params, ui_glyphs, &gpu.queue,
         );
 
@@ -980,7 +1052,7 @@ impl GpuRenderer {
         bg.push_rect(0.0, 0.0, w, tab_bar_h, tc.bar_bg);
 
         let tab_count = params.tab_info.len();
-        let layout = TabBarLayout::compute(tab_count, params.width as usize, s as f64);
+        let layout = TabBarLayout::compute(tab_count, params.width as usize, s as f64, params.tab_width_lock);
         let tab_w = layout.tab_width;
 
         let cell_h = glyphs.cell_height;
@@ -1055,27 +1127,23 @@ impl GpuRenderer {
         let plus_hovered = params.hover_hit == TabBarHit::NewTab;
         let plus_bg = if plus_hovered { tc.button_hover_bg } else { tc.bar_bg };
         bg.push_rect(plus_x, top, new_tab_w, tab_h, plus_bg);
-        let plus_glyph_w = glyphs.char_advance('+');
-        let plus_text_x = plus_x + (new_tab_w - plus_glyph_w) / 2.0;
-        let plus_text_y = top + (tab_h - cell_h as f32) / 2.0;
-        self.push_text_instances(fg, "+", plus_text_x, plus_text_y, tc.text_fg, glyphs, queue);
+        let plus_cx = plus_x + new_tab_w / 2.0;
+        let plus_cy = top + tab_h / 2.0;
+        self.push_icon(fg, crate::icons::Icon::Plus, plus_cx, plus_cy, 10.0, s, tc.text_fg, queue);
 
-        // Dropdown "▾" button
+        // Dropdown button — vector chevron icon
         let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * s;
         let dropdown_x = plus_x + new_tab_w;
         let dropdown_hovered = params.hover_hit == TabBarHit::DropdownButton;
-        let dropdown_bg = if dropdown_hovered || params.dropdown_open {
+        let dropdown_bg = if dropdown_hovered || params.context_menu.is_some() {
             tc.button_hover_bg
         } else {
             tc.bar_bg
         };
         bg.push_rect(dropdown_x, top, dropdown_w, tab_h, dropdown_bg);
-        let dd_glyph_w = glyphs.char_advance('\u{25BE}');
-        let dd_text_x = dropdown_x + (dropdown_w - dd_glyph_w) / 2.0;
-        let dd_text_y = top + (tab_h - cell_h as f32) / 2.0;
-        self.push_text_instances(
-            fg, "\u{25BE}", dd_text_x, dd_text_y, tc.text_fg, glyphs, queue,
-        );
+        let dd_cx = dropdown_x + dropdown_w / 2.0;
+        let dd_cy = top + tab_h / 2.0;
+        self.push_icon(fg, crate::icons::Icon::ChevronDown, dd_cx, dd_cy, 10.0, s, tc.text_fg, queue);
 
         // Window control buttons
         let controls_zone_w = (CONTROLS_ZONE_WIDTH as f32 * s) as usize;
@@ -1114,7 +1182,7 @@ impl GpuRenderer {
         let text_y = top + (tab_h - cell_h as f32) / 2.0;
         self.push_text_instances(fg, &display_title, text_x, text_y, text_fg, glyphs, queue);
 
-        // Close button "×"
+        // Close button — vector icon
         let close_btn_wf = close_btn_w as f32;
         let close_right_pad = CLOSE_BUTTON_RIGHT_PAD as f32 * s;
         let close_x = x0 + tab_w as f32 - close_btn_wf - close_right_pad;
@@ -1128,12 +1196,9 @@ impl GpuRenderer {
             );
         }
         let close_fg = if close_hovered { tc.text_fg } else { tc.close_fg };
-        let close_glyph_w = glyphs.char_advance('\u{00D7}');
-        let close_text_x = close_x + (close_btn_wf - close_glyph_w) / 2.0;
-        let close_text_y = top + (tab_h - cell_h as f32) / 2.0;
-        self.push_text_instances(
-            fg, "\u{00D7}", close_text_x, close_text_y, close_fg, glyphs, queue,
-        );
+        let icon_cx = close_x + close_btn_wf / 2.0;
+        let icon_cy = top + tab_h / 2.0;
+        self.push_icon(fg, crate::icons::Icon::Close, icon_cx, icon_cy, 10.0, s, close_fg, queue);
     }
 
     #[cfg(target_os = "windows")]
@@ -1340,7 +1405,7 @@ impl GpuRenderer {
 
         let s = params.scale;
         let tc = TabBarColors::from_palette(params.palette);
-        let layout = TabBarLayout::compute(params.tab_info.len(), params.width as usize, s as f64);
+        let layout = TabBarLayout::compute(params.tab_info.len(), params.width as usize, s as f64, params.tab_width_lock);
         let tab_w = layout.tab_width;
         let tab_wf = tab_w as f32;
         let cell_h = glyphs.cell_height;
@@ -1361,7 +1426,7 @@ impl GpuRenderer {
 
     // --- Instance building: Dropdown overlay (rendered AFTER grid so it's on top) ---
 
-    fn build_dropdown_overlay(
+    fn build_context_menu_overlay(
         &mut self,
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
@@ -1369,44 +1434,100 @@ impl GpuRenderer {
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) {
-        if !params.dropdown_open {
-            return;
-        }
+        use crate::context_menu::MenuEntry;
 
-        let s = params.scale;
-        let tc = TabBarColors::from_palette(params.palette);
-        let tab_count = params.tab_info.len();
-        let layout = TabBarLayout::compute(tab_count, params.width as usize, s as f64);
-        let left_margin = (TAB_LEFT_MARGIN as f32 * s) as usize;
-        let new_tab_w = (NEW_TAB_BUTTON_WIDTH as f32 * s) as usize;
-        let tabs_end = left_margin + tab_count * layout.tab_width;
-        let dropdown_x = (tabs_end + new_tab_w) as f32;
-        let tab_bar_h = TAB_BAR_HEIGHT as f32 * s;
-        let cell_h = glyphs.cell_height;
+        let menu = match params.context_menu {
+            Some(m) => m,
+            None => return,
+        };
 
-        let menu_x = dropdown_x;
-        let menu_y = tab_bar_h;
-        let menu_w: f32 = 140.0 * s;
-        let menu_h: f32 = 32.0 * s;
-        let border_t = 1.0 * s;
+        let (mx, my) = menu.position;
+        let mw = menu.width;
+        let mh = menu.height;
+        let cell_h = glyphs.cell_height as f32;
 
-        // Menu background (opaque)
-        let menu_bg = lighten(tc.bar_bg, 0.10);
-        bg.push_rect(menu_x, menu_y, menu_w, menu_h, menu_bg);
+        let menu_bg = UI_BG;
+        let hover_bg = UI_BG_HOVER;
+        let separator_color = UI_SEPARATOR;
+        let text_color = UI_TEXT;
+        let text_dim = UI_TEXT_DIM;
+        let check_color = text_color;
 
-        // 1px border
-        let border_c = lighten(tc.bar_bg, 0.25);
-        bg.push_rect(menu_x, menu_y, menu_w, border_t, border_c);
-        bg.push_rect(menu_x, menu_y + menu_h - border_t, menu_w, border_t, border_c);
-        bg.push_rect(menu_x, menu_y, border_t, menu_h, border_c);
-        bg.push_rect(menu_x + menu_w - border_t, menu_y, border_t, menu_h, border_c);
-
-        // "Settings" text
-        let item_x = menu_x + 12.0 * s;
-        let item_y = menu_y + (menu_h - cell_h as f32) / 2.0;
-        self.push_text_instances(
-            fg, "Settings", item_x, item_y, tc.text_fg, glyphs, queue,
+        // 1. Shadow (offset down-right, all corners rounded)
+        let shadow_offset = 2.0 * menu.scale;
+        let shadow_color = [0.0, 0.0, 0.0, 0.35];
+        bg.push_all_rounded_rect(
+            mx + shadow_offset, my + shadow_offset,
+            mw, mh, shadow_color, menu.menu_radius(),
         );
+
+        // 2. Menu background with all corners rounded
+        bg.push_all_rounded_rect(mx, my, mw, mh, menu_bg, menu.menu_radius());
+
+        // 3. Iterate entries and draw items
+        let mut y = my + menu.menu_padding_y();
+        for (i, entry) in menu.entries.iter().enumerate() {
+            let item_h = entry.height() * menu.scale;
+
+            match entry {
+                MenuEntry::Item { label, .. } => {
+                    // Hover highlight
+                    if menu.hovered == Some(i) {
+                        let inset = menu.item_hover_inset();
+                        bg.push_all_rounded_rect(
+                            mx + inset, y,
+                            mw - inset * 2.0, item_h,
+                            hover_bg, menu.item_hover_radius(),
+                        );
+                    }
+                    // Text
+                    let tx = mx + menu.item_padding_x();
+                    let ty = y + (item_h - cell_h) / 2.0;
+                    self.push_text_instances(fg, label, tx, ty, text_color, glyphs, queue);
+                }
+                MenuEntry::Check { label, checked, .. } => {
+                    // Hover highlight
+                    if menu.hovered == Some(i) {
+                        let inset = menu.item_hover_inset();
+                        bg.push_all_rounded_rect(
+                            mx + inset, y,
+                            mw - inset * 2.0, item_h,
+                            hover_bg, menu.item_hover_radius(),
+                        );
+                    }
+                    let tx = mx + menu.item_padding_x();
+                    let ty = y + (item_h - cell_h) / 2.0;
+
+                    // Checkmark (vector icon — no font fallback needed)
+                    let icon_sz = crate::context_menu::CHECKMARK_ICON_SIZE * menu.scale;
+                    let gap = crate::context_menu::CHECKMARK_GAP * menu.scale;
+                    if *checked {
+                        let icon_cx = tx + icon_sz / 2.0;
+                        let icon_cy = y + item_h / 2.0;
+                        self.push_icon(
+                            fg, crate::icons::Icon::Checkmark,
+                            icon_cx, icon_cy,
+                            crate::context_menu::CHECKMARK_ICON_SIZE,
+                            menu.scale, check_color, queue,
+                        );
+                    }
+                    // Label (indented past checkmark space)
+                    let label_x = tx + icon_sz + gap;
+                    let color = if *checked { text_color } else { text_dim };
+                    self.push_text_instances(fg, label, label_x, ty, color, glyphs, queue);
+                }
+                MenuEntry::Separator => {
+                    let sep_y = y + (item_h - menu.separator_thickness()) / 2.0;
+                    let sep_mx = menu.separator_margin_x();
+                    bg.push_rect(
+                        mx + sep_mx, sep_y,
+                        mw - sep_mx * 2.0, menu.separator_thickness(),
+                        separator_color,
+                    );
+                }
+            }
+            y += item_h;
+        }
     }
 
     // --- Instance building: Search bar ---
@@ -1834,13 +1955,10 @@ impl GpuRenderer {
             &mut fg, "Theme", 16.0, title_y, title_fg, glyphs, &gpu.queue,
         );
 
-        // Close button "×" in top-right
-        let close_glyph_w = glyphs.char_advance('\u{00D7}');
-        let close_x = w - 30.0 + (30.0 - close_glyph_w) / 2.0;
-        let close_y = (30.0 - cell_h as f32) / 2.0;
-        self.push_text_instances(
-            &mut fg, "\u{00D7}", close_x, close_y, row_fg, glyphs, &gpu.queue,
-        );
+        // Close button — vector icon
+        let close_cx = w - 30.0 + 15.0;
+        let close_cy = 15.0;
+        self.push_icon(&mut fg, crate::icons::Icon::Close, close_cx, close_cy, 10.0, 1.0, row_fg, &gpu.queue);
 
         // Scheme rows
         let title_h: f32 = 50.0;
@@ -1877,13 +1995,11 @@ impl GpuRenderer {
                 &mut fg, scheme.name, text_x, text_y, name_color, glyphs, &gpu.queue,
             );
 
-            // Active indicator: checkmark
+            // Active indicator: checkmark icon
             if is_active {
-                let check_x = w - 30.0;
-                let check_y = y0 + (row_h - cell_h as f32) / 2.0;
-                self.push_text_instances(
-                    &mut fg, "\u{2713}", check_x, check_y, title_fg, glyphs, &gpu.queue,
-                );
+                let check_cx = w - 30.0 + 5.0;
+                let check_cy = y0 + row_h / 2.0;
+                self.push_icon(&mut fg, crate::icons::Icon::Checkmark, check_cx, check_cy, 10.0, 1.0, title_fg, &gpu.queue);
             }
         }
 
@@ -2023,6 +2139,32 @@ impl GpuRenderer {
             }
 
             cx += advance;
+        }
+    }
+
+    /// Push a vector icon centered at (cx, cy). `size` is in logical pixels.
+    fn push_icon(
+        &mut self,
+        fg: &mut InstanceWriter,
+        icon: crate::icons::Icon,
+        cx: f32,
+        cy: f32,
+        size: f32,
+        scale: f32,
+        color: [f32; 4],
+        queue: &wgpu::Queue,
+    ) {
+        let px_size = (size * scale).round() as u16;
+        if px_size == 0 {
+            return;
+        }
+        let entry = self.atlas.get_or_insert_icon(icon, px_size, queue);
+        if entry.metrics.width > 0 && entry.metrics.height > 0 {
+            let w = entry.metrics.width as f32;
+            let h = entry.metrics.height as f32;
+            let x = (cx - w / 2.0).round();
+            let y = (cy - h / 2.0).round();
+            fg.push_glyph(x, y, w, h, entry.uv_pos, entry.uv_size, color, [0.0; 4]);
         }
     }
 }
@@ -2287,6 +2429,39 @@ impl InstanceWriter {
             color,
             0,
             radius,
+        );
+    }
+
+    /// Push a colored rectangle with all four corners rounded.
+    fn push_all_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        bg_color: [f32; 4],
+        radius: f32,
+    ) {
+        let color = if self.opacity < 1.0 {
+            [
+                bg_color[0] * self.opacity,
+                bg_color[1] * self.opacity,
+                bg_color[2] * self.opacity,
+                bg_color[3] * self.opacity,
+            ]
+        } else {
+            bg_color
+        };
+        // Negative radius signals the shader to round all 4 corners.
+        self.push_raw(
+            [x, y],
+            [w, h],
+            [0.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            color,
+            0,
+            -radius,
         );
     }
 

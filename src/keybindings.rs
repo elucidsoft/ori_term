@@ -37,6 +37,10 @@ pub enum Action {
     PreviousPrompt,
     /// Navigate to next prompt mark (OSC 133;A).
     NextPrompt,
+    /// Duplicate the current tab (spawn new tab with same CWD).
+    DuplicateTab,
+    /// Move the current tab into a new window.
+    MoveTabToNewWindow,
     /// Send literal bytes to the PTY.
     SendText(String),
     /// Explicitly unbinds a default binding.
@@ -273,6 +277,8 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "ReloadConfig" => Action::ReloadConfig,
         "PreviousPrompt" => Action::PreviousPrompt,
         "NextPrompt" => Action::NextPrompt,
+        "DuplicateTab" => Action::DuplicateTab,
+        "MoveTabToNewWindow" => Action::MoveTabToNewWindow,
         "None" => Action::None,
         _ => return None,
     })

@@ -5,7 +5,7 @@ use crate::tab::TabId;
 
 /// Chrome-style thresholds from `tab_drag_controller.cc`
 pub const DRAG_START_THRESHOLD: f64 = 10.0;
-pub const TEAR_OFF_THRESHOLD: f64 = 15.0;
+pub const TEAR_OFF_THRESHOLD: f64 = 40.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragPhase {

@@ -104,7 +104,7 @@ pub struct TabBarLayout {
 }
 
 impl TabBarLayout {
-    pub fn compute(tab_count: usize, bar_width: usize, scale: f64) -> Self {
+    pub fn compute(tab_count: usize, bar_width: usize, scale: f64, max_tab_width: Option<usize>) -> Self {
         let s = |v: usize| -> usize { (v as f64 * scale).round() as usize };
         // Reserve space for left margin, new-tab button, dropdown, and window controls
         let available = bar_width
@@ -112,10 +112,11 @@ impl TabBarLayout {
             .saturating_sub(s(NEW_TAB_BUTTON_WIDTH))
             .saturating_sub(s(DROPDOWN_BUTTON_WIDTH))
             .saturating_sub(s(CONTROLS_ZONE_WIDTH));
+        let upper = max_tab_width.unwrap_or_else(|| s(TAB_MAX_WIDTH));
         let tab_width = if tab_count == 0 {
             s(TAB_MIN_WIDTH)
         } else {
-            (available / tab_count).clamp(s(TAB_MIN_WIDTH), s(TAB_MAX_WIDTH))
+            (available / tab_count).clamp(s(TAB_MIN_WIDTH), upper)
         };
         Self {
             tab_width,
@@ -220,7 +221,7 @@ pub fn render_tab_bar(
         }
     }
 
-    let layout = TabBarLayout::compute(tabs.len(), buf_w, 1.0);
+    let layout = TabBarLayout::compute(tabs.len(), buf_w, 1.0, None);
     let tab_w = layout.tab_width;
 
     for (i, (_id, title)) in tabs.iter().enumerate() {

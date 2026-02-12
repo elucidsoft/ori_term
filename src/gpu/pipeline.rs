@@ -122,7 +122,7 @@ fn sd_rounded_box(p: vec2<f32>, b: vec2<f32>, r: vec4<f32>) -> f32 {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    if (input.radius <= 0.0) {
+    if (input.radius == 0.0) {
         return input.bg_color;
     }
 
@@ -134,9 +134,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         half.y - input.local_pos.y,
     );
 
-    // Top corners rounded, bottom corners sharp (Chrome-style)
-    // r = (topRight, bottomRight, topLeft, bottomLeft)
-    let r = vec4<f32>(input.radius, 0.0, input.radius, 0.0);
+    // Positive radius = top corners only (Chrome-style tabs).
+    // Negative radius = all four corners (context menus, popups).
+    let abs_r = abs(input.radius);
+    var r: vec4<f32>;
+    if (input.radius < 0.0) {
+        r = vec4<f32>(abs_r, abs_r, abs_r, abs_r);
+    } else {
+        r = vec4<f32>(abs_r, 0.0, abs_r, 0.0);
+    }
     let d = sd_rounded_box(p, half, r);
     let aa = 1.0 - smoothstep(-0.5, 0.5, d);
 

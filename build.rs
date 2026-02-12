@@ -17,7 +17,7 @@ fn main() {
         };
 
         let status = Command::new(windres)
-            .args([rc_path, "-O", "coff", "-o", &res_path])
+            .args(["--include-dir", "assets", rc_path, "-O", "coff", "-o", &res_path])
             .status();
 
         match status {
@@ -25,6 +25,7 @@ fn main() {
                 println!("cargo:rustc-link-arg-bins={res_path}");
                 println!("cargo:rerun-if-changed={rc_path}");
                 println!("cargo:rerun-if-changed=assets/icon.ico");
+                println!("cargo:rerun-if-changed=assets/oriterm.manifest");
             }
             Ok(s) => {
                 eprintln!("warning: windres exited with {s}, exe will have no icon");
