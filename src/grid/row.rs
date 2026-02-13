@@ -70,6 +70,12 @@ impl Row {
         }
     }
 
+    /// Recalculates `occ` by scanning from the right. Call after operations
+    /// that may reduce the occupied width (erase, delete).
+    pub(crate) fn recalc_occ(&mut self) {
+        self.occ = self.content_len();
+    }
+
     /// Returns the rightmost non-blank column index + 1 (content length).
     /// A blank cell is one with char ' ' or '\0' and no flags of interest.
     pub fn content_len(&self) -> usize {

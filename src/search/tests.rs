@@ -1,9 +1,14 @@
 //! Tests for search functionality.
 
-use crate::grid::Grid;
+use crate::grid::{Grid, StableRowIndex};
 
 use super::find::find_matches;
 use super::*;
+
+/// Helper to create a `StableRowIndex` from a raw value for tests.
+fn sri(n: u64) -> StableRowIndex {
+    StableRowIndex(n)
+}
 
 #[test]
 fn search_basic() {
@@ -21,10 +26,10 @@ fn search_basic() {
     assert_eq!(matches.len(), 2);
     assert_eq!(matches[0].start_col, 0);
     assert_eq!(matches[0].end_col, 4);
-    assert_eq!(matches[0].start_row, 0);
+    assert_eq!(matches[0].start_row, sri(0));
     assert_eq!(matches[1].start_col, 4);
     assert_eq!(matches[1].end_col, 8);
-    assert_eq!(matches[1].start_row, 1);
+    assert_eq!(matches[1].start_row, sri(1));
 }
 
 #[test]
@@ -89,21 +94,21 @@ fn search_next_prev() {
     let mut state = SearchState::new();
     state.matches = vec![
         SearchMatch {
-            start_row: 0,
+            start_row: sri(0),
             start_col: 0,
-            end_row: 0,
+            end_row: sri(0),
             end_col: 2,
         },
         SearchMatch {
-            start_row: 1,
+            start_row: sri(1),
             start_col: 0,
-            end_row: 1,
+            end_row: sri(1),
             end_col: 2,
         },
         SearchMatch {
-            start_row: 2,
+            start_row: sri(2),
             start_col: 0,
-            end_row: 2,
+            end_row: sri(2),
             end_col: 2,
         },
     ];
@@ -127,24 +132,24 @@ fn cell_match_type_check() {
     let mut state = SearchState::new();
     state.matches = vec![
         SearchMatch {
-            start_row: 0,
+            start_row: sri(0),
             start_col: 5,
-            end_row: 0,
+            end_row: sri(0),
             end_col: 9,
         },
         SearchMatch {
-            start_row: 2,
+            start_row: sri(2),
             start_col: 0,
-            end_row: 2,
+            end_row: sri(2),
             end_col: 3,
         },
     ];
     state.focused = 0;
 
-    assert_eq!(state.cell_match_type(0, 5), MatchType::FocusedMatch);
-    assert_eq!(state.cell_match_type(0, 7), MatchType::FocusedMatch);
-    assert_eq!(state.cell_match_type(0, 4), MatchType::None);
-    assert_eq!(state.cell_match_type(0, 10), MatchType::None);
-    assert_eq!(state.cell_match_type(2, 1), MatchType::Match);
-    assert_eq!(state.cell_match_type(1, 0), MatchType::None);
+    assert_eq!(state.cell_match_type(sri(0), 5), MatchType::FocusedMatch);
+    assert_eq!(state.cell_match_type(sri(0), 7), MatchType::FocusedMatch);
+    assert_eq!(state.cell_match_type(sri(0), 4), MatchType::None);
+    assert_eq!(state.cell_match_type(sri(0), 10), MatchType::None);
+    assert_eq!(state.cell_match_type(sri(2), 1), MatchType::Match);
+    assert_eq!(state.cell_match_type(sri(1), 0), MatchType::None);
 }

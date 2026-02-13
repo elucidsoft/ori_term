@@ -11,28 +11,36 @@ pub fn extract_text(grid: &Grid, selection: &Selection) -> String {
     let (start, end) = selection.ordered();
     let mut result = String::new();
 
+    // Convert stable indices to absolute for iteration.
+    let Some(start_abs) = start.row.to_absolute(grid) else {
+        return result;
+    };
+    let Some(end_abs) = end.row.to_absolute(grid) else {
+        return result;
+    };
+
     if selection.mode == SelectionMode::Block {
         let min_col = start.col.min(end.col);
         let max_col = start.col.max(end.col);
 
-        for abs_row in start.row..=end.row {
+        for abs_row in start_abs..=end_abs {
             if let Some(row) = grid.absolute_row(abs_row) {
                 let line = cells_to_text(row, min_col, max_col);
                 result.push_str(line.trim_end());
             }
-            if abs_row < end.row {
+            if abs_row < end_abs {
                 result.push('\n');
             }
         }
     } else {
-        for abs_row in start.row..=end.row {
+        for abs_row in start_abs..=end_abs {
             if let Some(row) = grid.absolute_row(abs_row) {
-                let row_start = if abs_row == start.row {
+                let row_start = if abs_row == start_abs {
                     start.effective_start_col()
                 } else {
                     0
                 };
-                let row_end = if abs_row == end.row {
+                let row_end = if abs_row == end_abs {
                     end.effective_end_col()
                 } else {
                     row.len().saturating_sub(1)
@@ -44,11 +52,11 @@ pub fn extract_text(grid: &Grid, selection: &Selection) -> String {
                 let is_wrapped =
                     !row.is_empty() && row[row.len() - 1].flags.contains(CellFlags::WRAPLINE);
 
-                if is_wrapped && abs_row < end.row {
+                if is_wrapped && abs_row < end_abs {
                     result.push_str(&line);
                 } else {
                     result.push_str(line.trim_end());
-                    if abs_row < end.row {
+                    if abs_row < end_abs {
                         result.push('\n');
                     }
                 }

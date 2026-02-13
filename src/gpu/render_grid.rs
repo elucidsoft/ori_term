@@ -3,7 +3,7 @@
 use vte::ansi::CursorShape;
 
 use crate::cell::CellFlags;
-use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP};
+use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP, StableRowIndex};
 use crate::render::{FontSet, FontStyle};
 use crate::search::MatchType;
 use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -51,12 +51,12 @@ impl GpuRenderer {
                 let mut fg_rgb = palette.resolve_fg(cell.fg, cell.bg, cell.flags);
                 let mut bg_rgb = palette.resolve_bg(cell.fg, cell.bg, cell.flags);
 
-                // Compute absolute row for search/selection
-                let abs_row = grid.scrollback.len().saturating_sub(grid.display_offset) + line;
+                // Compute stable row index for search/selection
+                let stable_row = StableRowIndex::from_visible(grid, line);
 
                 // Search match highlighting
                 if let Some(search) = params.search {
-                    match search.cell_match_type(abs_row, col) {
+                    match search.cell_match_type(stable_row, col) {
                         MatchType::FocusedMatch => {
                             bg_rgb = vte::ansi::Rgb {
                                 r: 200,
@@ -79,7 +79,7 @@ impl GpuRenderer {
                 // Selection highlight
                 let is_selected = params
                     .selection
-                    .is_some_and(|sel| sel.contains(abs_row, col));
+                    .is_some_and(|sel| sel.contains(stable_row, col));
                 if is_selected {
                     let (sel_fg, sel_bg) = palette.selection_colors(fg_rgb, bg_rgb);
                     fg_rgb = sel_fg;
@@ -131,6 +131,7 @@ impl GpuRenderer {
                 }
 
                 // Underline and hyperlink decorations
+                let abs_row = grid.viewport_to_absolute(line);
                 draw_underlines(
                     bg, cell, x0, y0, ch, cell_w, fg_rgba,
                     palette, params, abs_row, col,

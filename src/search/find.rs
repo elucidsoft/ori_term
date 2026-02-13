@@ -1,6 +1,6 @@
 //! Search algorithm — find all matches in the grid.
 
-use crate::grid::Grid;
+use crate::grid::{Grid, StableRowIndex};
 
 use super::SearchMatch;
 use super::text::{byte_span_to_cols, extract_row_text};
@@ -33,12 +33,13 @@ pub(super) fn find_matches(
         for abs_row in 0..total_rows {
             if let Some(row) = grid.absolute_row(abs_row) {
                 let (text, col_map) = extract_row_text(row);
+                let stable = StableRowIndex::from_absolute(grid, abs_row);
                 for m in re.find_iter(&text) {
                     if let Some(span) = byte_span_to_cols(&text, &col_map, m.start(), m.end()) {
                         matches.push(SearchMatch {
-                            start_row: abs_row,
+                            start_row: stable,
                             start_col: span.0,
-                            end_row: abs_row,
+                            end_row: stable,
                             end_col: span.1,
                         });
                     }
@@ -58,6 +59,7 @@ pub(super) fn find_matches(
         for abs_row in 0..total_rows {
             if let Some(row) = grid.absolute_row(abs_row) {
                 let (text, col_map) = extract_row_text(row);
+                let stable = StableRowIndex::from_absolute(grid, abs_row);
                 let search_text;
                 let haystack = if case_sensitive {
                     &text
@@ -72,9 +74,9 @@ pub(super) fn find_matches(
                     let byte_end = byte_start + search_query.len();
                     if let Some(span) = byte_span_to_cols(&text, &col_map, byte_start, byte_end) {
                         matches.push(SearchMatch {
-                            start_row: abs_row,
+                            start_row: stable,
                             start_col: span.0,
-                            end_row: abs_row,
+                            end_row: stable,
                             end_col: span.1,
                         });
                     }

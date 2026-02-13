@@ -53,32 +53,47 @@ impl Grid {
         }
         let count = count.min(bottom - top + 1);
 
-        for _ in 0..count {
-            // Remove the top row (shifts all higher indices down by 1 via memmove).
-            let scrolled_row = self.rows.remove(top);
+        // Full-screen scroll with top == 0: use ring rotation (O(1) per row).
+        if top == 0 && bottom == self.lines.saturating_sub(1) {
+            for _ in 0..count {
+                // Rotate gives us the old top row (now at logical bottom).
+                let old_top = self.viewport.rotate_up();
+                let scrolled = std::mem::replace(old_top, Row::new(self.cols));
 
-            // Push to scrollback only if scrolling the full screen region at top
-            if top == 0 {
                 if self.scrollback.len() >= self.max_scrollback {
                     self.scrollback.pop_front();
                     self.total_evicted += 1;
-                    // If we evicted from scrollback while user is scrolled up,
-                    // reduce offset so they don't drift past the top
                     if self.display_offset > 0 {
                         self.display_offset = self.display_offset.saturating_sub(1);
                     }
                 } else if self.display_offset > 0 {
-                    // Scrollback grew — bump offset to keep viewport anchored
+                    self.display_offset += 1;
+                }
+                self.scrollback.push_back(scrolled);
+            }
+            self.dirty.mark_all();
+            return;
+        }
+
+        // Scroll region or top > 0: use remove/insert on the ring (O(region)).
+        for _ in 0..count {
+            // Clone the top row of the region for scrollback.
+            if top == 0 {
+                let scrolled_row = self.viewport[0].clone();
+                if self.scrollback.len() >= self.max_scrollback {
+                    self.scrollback.pop_front();
+                    self.total_evicted += 1;
+                    if self.display_offset > 0 {
+                        self.display_offset = self.display_offset.saturating_sub(1);
+                    }
+                } else if self.display_offset > 0 {
                     self.display_offset += 1;
                 }
                 self.scrollback.push_back(scrolled_row);
             }
-
-            // Insert a fresh row at the bottom position (after remove, bottom is
-            // now at index `bottom - 1`, so inserting at `bottom` restores the
-            // original row count within the region).
-            self.rows.insert(bottom, Row::new(self.cols));
+            self.viewport.remove_insert(top, bottom, self.cols);
         }
+        self.dirty.mark_range(top, bottom);
     }
 
     pub(super) fn scroll_down_in_region(&mut self, top: usize, bottom: usize, count: usize) {
@@ -88,9 +103,8 @@ impl Grid {
         let count = count.min(bottom - top + 1);
 
         for _ in 0..count {
-            // Remove the bottom row and insert a fresh one at top.
-            self.rows.remove(bottom);
-            self.rows.insert(top, Row::new(self.cols));
+            self.viewport.remove_insert(bottom, top, self.cols);
         }
+        self.dirty.mark_range(top, bottom);
     }
 }

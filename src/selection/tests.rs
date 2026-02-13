@@ -1,23 +1,28 @@
 //! Tests for selection types, boundaries, and text extraction.
 
-use crate::grid::Grid;
+use crate::grid::{Grid, StableRowIndex};
 
 use super::*;
+
+/// Helper to create a `StableRowIndex` from a raw value for tests.
+fn sri(n: u64) -> StableRowIndex {
+    StableRowIndex(n)
+}
 
 #[test]
 fn selection_point_ordering() {
     let a = SelectionPoint {
-        row: 0,
+        row: sri(0),
         col: 5,
         side: Side::Left,
     };
     let b = SelectionPoint {
-        row: 0,
+        row: sri(0),
         col: 5,
         side: Side::Right,
     };
     let c = SelectionPoint {
-        row: 1,
+        row: sri(1),
         col: 0,
         side: Side::Left,
     };
@@ -31,28 +36,28 @@ fn selection_contains_single_row() {
     let sel = Selection {
         mode: SelectionMode::Char,
         anchor: SelectionPoint {
-            row: 5,
+            row: sri(5),
             col: 2,
             side: Side::Left,
         },
         pivot: SelectionPoint {
-            row: 5,
+            row: sri(5),
             col: 2,
             side: Side::Left,
         },
         end: SelectionPoint {
-            row: 5,
+            row: sri(5),
             col: 8,
             side: Side::Right,
         },
     };
-    assert!(!sel.contains(5, 1));
-    assert!(sel.contains(5, 2));
-    assert!(sel.contains(5, 5));
-    assert!(sel.contains(5, 8));
-    assert!(!sel.contains(5, 9));
-    assert!(!sel.contains(4, 5));
-    assert!(!sel.contains(6, 5));
+    assert!(!sel.contains(sri(5), 1));
+    assert!(sel.contains(sri(5), 2));
+    assert!(sel.contains(sri(5), 5));
+    assert!(sel.contains(sri(5), 8));
+    assert!(!sel.contains(sri(5), 9));
+    assert!(!sel.contains(sri(4), 5));
+    assert!(!sel.contains(sri(6), 5));
 }
 
 #[test]
@@ -60,40 +65,40 @@ fn selection_contains_multi_row() {
     let sel = Selection {
         mode: SelectionMode::Char,
         anchor: SelectionPoint {
-            row: 2,
+            row: sri(2),
             col: 5,
             side: Side::Left,
         },
         pivot: SelectionPoint {
-            row: 2,
+            row: sri(2),
             col: 5,
             side: Side::Left,
         },
         end: SelectionPoint {
-            row: 4,
+            row: sri(4),
             col: 3,
             side: Side::Right,
         },
     };
     // Row 2: col >= 5
-    assert!(!sel.contains(2, 4));
-    assert!(sel.contains(2, 5));
-    assert!(sel.contains(2, 100));
+    assert!(!sel.contains(sri(2), 4));
+    assert!(sel.contains(sri(2), 5));
+    assert!(sel.contains(sri(2), 100));
     // Row 3: fully selected
-    assert!(sel.contains(3, 0));
-    assert!(sel.contains(3, 100));
+    assert!(sel.contains(sri(3), 0));
+    assert!(sel.contains(sri(3), 100));
     // Row 4: col <= 3
-    assert!(sel.contains(4, 0));
-    assert!(sel.contains(4, 3));
-    assert!(!sel.contains(4, 4));
+    assert!(sel.contains(sri(4), 0));
+    assert!(sel.contains(sri(4), 3));
+    assert!(!sel.contains(sri(4), 4));
 }
 
 #[test]
 fn selection_empty() {
-    let sel = Selection::new_char(5, 10, Side::Left);
+    let sel = Selection::new_char(sri(5), 10, Side::Left);
     assert!(sel.is_empty());
 
-    let mut sel2 = Selection::new_char(5, 10, Side::Left);
+    let mut sel2 = Selection::new_char(sri(5), 10, Side::Left);
     sel2.end.col = 12;
     assert!(!sel2.is_empty());
 }
@@ -103,26 +108,26 @@ fn block_selection_contains() {
     let sel = Selection {
         mode: SelectionMode::Block,
         anchor: SelectionPoint {
-            row: 2,
+            row: sri(2),
             col: 3,
             side: Side::Left,
         },
         pivot: SelectionPoint {
-            row: 2,
+            row: sri(2),
             col: 3,
             side: Side::Left,
         },
         end: SelectionPoint {
-            row: 5,
+            row: sri(5),
             col: 7,
             side: Side::Right,
         },
     };
-    assert!(sel.contains(3, 5));
-    assert!(!sel.contains(3, 2));
-    assert!(!sel.contains(3, 8));
-    assert!(!sel.contains(1, 5));
-    assert!(!sel.contains(6, 5));
+    assert!(sel.contains(sri(3), 5));
+    assert!(!sel.contains(sri(3), 2));
+    assert!(!sel.contains(sri(3), 8));
+    assert!(!sel.contains(sri(1), 5));
+    assert!(!sel.contains(sri(6), 5));
 }
 
 #[test]
@@ -200,17 +205,17 @@ fn extract_text_with_zerowidth() {
     let sel = Selection {
         mode: SelectionMode::Char,
         anchor: SelectionPoint {
-            row: 0,
+            row: sri(0),
             col: 0,
             side: Side::Left,
         },
         pivot: SelectionPoint {
-            row: 0,
+            row: sri(0),
             col: 0,
             side: Side::Left,
         },
         end: SelectionPoint {
-            row: 0,
+            row: sri(0),
             col: 1,
             side: Side::Right,
         },
@@ -234,17 +239,17 @@ fn extract_text_simple() {
     let sel = Selection {
         mode: SelectionMode::Char,
         anchor: SelectionPoint {
-            row: 0,
+            row: sri(0),
             col: 0,
             side: Side::Left,
         },
         pivot: SelectionPoint {
-            row: 0,
+            row: sri(0),
             col: 0,
             side: Side::Left,
         },
         end: SelectionPoint {
-            row: 1,
+            row: sri(1),
             col: 4,
             side: Side::Right,
         },

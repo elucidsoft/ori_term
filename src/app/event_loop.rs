@@ -9,8 +9,6 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId;
 
 use crate::config;
-#[cfg(target_os = "windows")]
-use crate::drag::DragPhase;
 use crate::key_encoding::{self, KeyEventType};
 use crate::keybindings;
 use crate::log;
@@ -101,6 +99,10 @@ impl ApplicationHandler<TermEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Check if a torn-off tab's OS drag ended and merge if over a target.
+        #[cfg(target_os = "windows")]
+        self.check_torn_off_merge();
+
         // Drain coalesced redraws: N PTY events → 1 request_redraw per window.
         for wid in self.pending_redraw.drain() {
             if let Some(tw) = self.windows.get(&wid) {
@@ -226,38 +228,11 @@ impl ApplicationHandler<TermEvent> for App {
 
                 // Handle Escape during drag
                 if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                    if self.drag.is_some() {
-                        // Undo preview if active
-                        if let Some((target_wid, _)) = self.drop_preview.take() {
-                            self.tab_anim_offsets.remove(&target_wid);
-                            if let Some(drag) = &self.drag {
-                                let tab_id = drag.tab_id;
-                                let torn_wid = drag.source_window;
-                                if let Some(tw) = self.windows.get_mut(&target_wid) {
-                                    tw.remove_tab(tab_id);
-                                }
-                                if let Some(tw) = self.windows.get_mut(&torn_wid) {
-                                    tw.add_tab(tab_id);
-                                }
-                                if let Some(tw) = self.windows.get(&torn_wid) {
-                                    tw.window.set_visible(true);
-                                }
-                            }
-                        }
+                    if let Some(drag) = self.drag.take() {
                         // Clear drag visuals and animation state
-                        if let Some(drag) = &self.drag {
-                            self.tab_anim_offsets.remove(&drag.source_window);
-                            // Re-enable DPI handling
-                            #[cfg(target_os = "windows")]
-                            if drag.phase == DragPhase::TornOff {
-                                if let Some(tw) = self.windows.get(&drag.source_window) {
-                                    crate::platform_windows::set_dragging(&tw.window, false);
-                                }
-                            }
-                        }
+                        self.tab_anim_offsets.remove(&drag.source_window);
                         self.drag_visual_x = None;
-                        // Cancel drag — revert to original state
-                        self.drag = None;
+                        self.tab_bar_dirty = true;
                         // Redraw all windows
                         for tw in self.windows.values() {
                             tw.window.request_redraw();

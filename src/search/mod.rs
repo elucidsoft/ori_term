@@ -5,7 +5,7 @@ mod find;
 mod tests;
 mod text;
 
-use crate::grid::Grid;
+use crate::grid::{Grid, StableRowIndex};
 
 pub(crate) use text::extract_row_text;
 
@@ -17,12 +17,12 @@ pub enum MatchType {
     FocusedMatch,
 }
 
-/// A single search match span in absolute grid coordinates.
+/// A single search match span in stable grid coordinates.
 #[derive(Debug, Clone)]
 pub struct SearchMatch {
-    pub start_row: usize,
+    pub start_row: StableRowIndex,
     pub start_col: usize,
-    pub end_row: usize,
+    pub end_row: StableRowIndex,
     pub end_col: usize,
 }
 
@@ -81,18 +81,18 @@ impl SearchState {
         self.matches.get(self.focused)
     }
 
-    /// Check whether a cell at (`abs_row`, `col`) is inside any match.
+    /// Check whether a cell at (`stable_row`, `col`) is inside any match.
     /// Uses binary search for efficient lookup on sorted matches.
-    pub fn cell_match_type(&self, abs_row: usize, col: usize) -> MatchType {
-        // Binary search: find the first match whose end_row >= abs_row
-        let idx = self
-            .matches
-            .partition_point(|m| m.end_row < abs_row || (m.end_row == abs_row && m.end_col < col));
+    pub fn cell_match_type(&self, stable_row: StableRowIndex, col: usize) -> MatchType {
+        // Binary search: find the first match whose end_row >= stable_row
+        let idx = self.matches.partition_point(|m| {
+            m.end_row < stable_row || (m.end_row == stable_row && m.end_col < col)
+        });
 
         // Check a small window of matches near the found index
         for i in idx.saturating_sub(1)..self.matches.len().min(idx + 2) {
             let m = &self.matches[i];
-            if cell_in_match(m, abs_row, col) {
+            if cell_in_match(m, stable_row, col) {
                 return if i == self.focused {
                     MatchType::FocusedMatch
                 } else {
@@ -104,18 +104,18 @@ impl SearchState {
     }
 }
 
-/// Check whether (`abs_row`, `col`) falls within a match span.
-fn cell_in_match(m: &SearchMatch, abs_row: usize, col: usize) -> bool {
-    if abs_row < m.start_row || abs_row > m.end_row {
+/// Check whether (`stable_row`, `col`) falls within a match span.
+fn cell_in_match(m: &SearchMatch, stable_row: StableRowIndex, col: usize) -> bool {
+    if stable_row < m.start_row || stable_row > m.end_row {
         return false;
     }
     if m.start_row == m.end_row {
         return col >= m.start_col && col <= m.end_col;
     }
-    if abs_row == m.start_row {
+    if stable_row == m.start_row {
         return col >= m.start_col;
     }
-    if abs_row == m.end_row {
+    if stable_row == m.end_row {
         return col <= m.end_col;
     }
     // Middle rows are fully matched

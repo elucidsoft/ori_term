@@ -8,6 +8,8 @@ mod text;
 pub use boundaries::{logical_line_end, logical_line_start, word_boundaries};
 pub use text::extract_text;
 
+use crate::grid::StableRowIndex;
+
 /// Sub-cell precision for selection boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -15,10 +17,12 @@ pub enum Side {
     Right,
 }
 
-/// A point in absolute grid coordinates (scrollback row 0 = oldest).
+/// A point in stable grid coordinates.
+///
+/// Uses `StableRowIndex` so row identity survives scrollback eviction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SelectionPoint {
-    pub row: usize,
+    pub row: StableRowIndex,
     pub col: usize,
     pub side: Side,
 }
@@ -91,7 +95,7 @@ pub struct Selection {
 
 impl Selection {
     /// Create a new character-mode selection at a single point.
-    pub fn new_char(row: usize, col: usize, side: Side) -> Self {
+    pub fn new_char(row: StableRowIndex, col: usize, side: Side) -> Self {
         let point = SelectionPoint { row, col, side };
         Self {
             mode: SelectionMode::Char,
@@ -128,24 +132,27 @@ impl Selection {
         (points[0], points[2])
     }
 
-    /// Test whether a cell at (`abs_row`, `col`) is within the selection.
-    pub fn contains(&self, abs_row: usize, col: usize) -> bool {
+    /// Test whether a cell at (`stable_row`, `col`) is within the selection.
+    pub fn contains(&self, stable_row: StableRowIndex, col: usize) -> bool {
         let (start, end) = self.ordered();
 
         if self.mode == SelectionMode::Block {
             let min_col = start.col.min(end.col);
             let max_col = start.col.max(end.col);
-            abs_row >= start.row && abs_row <= end.row && col >= min_col && col <= max_col
+            stable_row >= start.row
+                && stable_row <= end.row
+                && col >= min_col
+                && col <= max_col
         } else {
-            if abs_row < start.row || abs_row > end.row {
+            if stable_row < start.row || stable_row > end.row {
                 return false;
             }
-            let first = if abs_row == start.row {
+            let first = if stable_row == start.row {
                 start.effective_start_col()
             } else {
                 0
             };
-            let last = if abs_row == end.row {
+            let last = if stable_row == end.row {
                 end.effective_end_col()
             } else {
                 usize::MAX

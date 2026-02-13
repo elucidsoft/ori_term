@@ -1,13 +1,17 @@
 //! Terminal grid with scrollback, cursor, and reflow support.
 
 pub mod cursor;
+pub mod dirty;
 mod editing;
 mod navigation;
 mod reflow;
+pub mod ring;
 pub mod row;
 mod scroll;
+pub mod stable_index;
 
 pub use navigation::WrapDetection;
+pub use stable_index::StableRowIndex;
 
 #[cfg(test)]
 mod tests;
@@ -16,6 +20,8 @@ use std::collections::VecDeque;
 
 use crate::cell::{Cell, CellFlags};
 use cursor::Cursor;
+use dirty::DirtyTracker;
+use ring::ViewportRing;
 use row::Row;
 
 const DEFAULT_TAB_INTERVAL: usize = 8;
@@ -27,7 +33,7 @@ pub const GRID_PADDING_BOTTOM: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct Grid {
-    rows: Vec<Row>,
+    viewport: ViewportRing,
     pub cols: usize,
     pub lines: usize,
     pub cursor: Cursor,
@@ -40,6 +46,8 @@ pub struct Grid {
     pub display_offset: usize,
     /// Total number of rows evicted from scrollback (for absolute row tracking).
     total_evicted: usize,
+    /// Row-level dirty tracking for incremental GPU updates.
+    pub dirty: DirtyTracker,
 }
 
 impl Grid {
@@ -48,11 +56,10 @@ impl Grid {
     }
 
     pub fn with_max_scrollback(cols: usize, lines: usize, max_scrollback: usize) -> Self {
-        let rows = (0..lines).map(|_| Row::new(cols)).collect();
         let tab_stops = Self::build_tab_stops(cols);
 
         Self {
-            rows,
+            viewport: ViewportRing::new(cols, lines),
             cols,
             lines,
             cursor: Cursor::default(),
@@ -64,6 +71,7 @@ impl Grid {
             max_scrollback,
             display_offset: 0,
             total_evicted: 0,
+            dirty: DirtyTracker::new(lines),
         }
     }
 
@@ -76,16 +84,16 @@ impl Grid {
     }
 
     pub fn row(&self, line: usize) -> &Row {
-        &self.rows[line]
+        &self.viewport[line]
     }
 
     pub fn row_mut(&mut self, line: usize) -> &mut Row {
-        &mut self.rows[line]
+        &mut self.viewport[line]
     }
 
     pub fn visible_row(&self, line: usize) -> &Row {
         if self.display_offset == 0 {
-            return &self.rows[line];
+            return &self.viewport[line];
         }
         let scrollback_len = self.scrollback.len();
         let offset_line = line as isize - self.display_offset as isize;
@@ -98,9 +106,9 @@ impl Grid {
             if !self.scrollback.is_empty() {
                 return &self.scrollback[0];
             }
-            return &self.rows[0];
+            return &self.viewport[0];
         }
-        &self.rows[offset_line as usize]
+        &self.viewport[offset_line as usize]
     }
 
     /// Convert a viewport line to an absolute row index.
@@ -117,29 +125,41 @@ impl Grid {
         if abs_row < sb_len {
             Some(&self.scrollback[abs_row])
         } else {
-            self.rows.get(abs_row - sb_len)
+            let line = abs_row - sb_len;
+            if line < self.lines {
+                Some(&self.viewport[line])
+            } else {
+                None
+            }
         }
+    }
+
+    /// Total number of rows evicted from scrollback.
+    pub fn total_evicted(&self) -> usize {
+        self.total_evicted
     }
 
     pub fn clear_all(&mut self) {
         let template = Cell::default();
         for r in 0..self.lines {
-            self.rows[r].reset(&template);
+            self.viewport[r].reset(&template);
         }
         self.cursor.col = 0;
         self.cursor.row = 0;
         self.cursor.input_needs_wrap = false;
+        self.dirty.mark_all();
     }
 
     pub fn decaln(&mut self) {
         let default = Cell::default();
         for r in 0..self.lines {
             for c in 0..self.cols {
-                self.rows[r][c].c = 'E';
-                self.rows[r][c].fg = default.fg;
-                self.rows[r][c].bg = default.bg;
-                self.rows[r][c].flags = CellFlags::empty();
+                self.viewport[r][c].c = 'E';
+                self.viewport[r][c].fg = default.fg;
+                self.viewport[r][c].bg = default.bg;
+                self.viewport[r][c].flags = CellFlags::empty();
             }
         }
+        self.dirty.mark_all();
     }
 }

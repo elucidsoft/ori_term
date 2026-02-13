@@ -21,31 +21,33 @@ impl Grid {
 
         // Clear wide char spacer if we're overwriting the first cell of a wide char
         if col > 0
-            && self.rows[row][col]
+            && self.viewport[row][col]
                 .flags
                 .contains(CellFlags::WIDE_CHAR_SPACER)
         {
-            self.rows[row][col - 1].c = ' ';
-            self.rows[row][col - 1].flags.remove(CellFlags::WIDE_CHAR);
+            self.viewport[row][col - 1].c = ' ';
+            self.viewport[row][col - 1].flags.remove(CellFlags::WIDE_CHAR);
         }
         // Clear wide char if we're overwriting the wide char itself
-        if self.rows[row][col].flags.contains(CellFlags::WIDE_CHAR) && col + 1 < self.cols {
-            self.rows[row][col + 1].c = ' ';
-            self.rows[row][col + 1]
+        if self.viewport[row][col].flags.contains(CellFlags::WIDE_CHAR) && col + 1 < self.cols {
+            self.viewport[row][col + 1].c = ' ';
+            self.viewport[row][col + 1]
                 .flags
                 .remove(CellFlags::WIDE_CHAR_SPACER);
         }
 
-        let cell = &mut self.rows[row][col];
+        let cell = &mut self.viewport[row][col];
         cell.c = c;
         cell.fg = self.cursor.template.fg;
         cell.bg = self.cursor.template.bg;
         cell.flags = self.cursor.template.flags;
         cell.extra = None;
 
-        if col >= self.rows[row].occ {
-            self.rows[row].occ = col + 1;
+        if col >= self.viewport[row].occ {
+            self.viewport[row].occ = col + 1;
         }
+
+        self.dirty.mark_row(row);
 
         self.cursor.col += 1;
         if self.cursor.col >= self.cols {
@@ -64,9 +66,9 @@ impl Grid {
             // Put a spacer at the current position and wrap
             let col = self.cursor.col;
             let row = self.cursor.row;
-            self.rows[row][col].c = ' ';
-            self.rows[row][col].flags = CellFlags::LEADING_WIDE_CHAR_SPACER;
-            self.rows[row].occ = col + 1;
+            self.viewport[row][col].c = ' ';
+            self.viewport[row][col].flags = CellFlags::LEADING_WIDE_CHAR_SPACER;
+            self.viewport[row].occ = col + 1;
             self.wrap_cursor();
         }
 
@@ -74,7 +76,7 @@ impl Grid {
         let row = self.cursor.row;
 
         // Write the wide char
-        let cell = &mut self.rows[row][col];
+        let cell = &mut self.viewport[row][col];
         cell.c = c;
         cell.fg = self.cursor.template.fg;
         cell.bg = self.cursor.template.bg;
@@ -82,16 +84,18 @@ impl Grid {
         cell.extra = None;
 
         // Write spacer in next column
-        let spacer = &mut self.rows[row][col + 1];
+        let spacer = &mut self.viewport[row][col + 1];
         spacer.c = ' ';
         spacer.fg = self.cursor.template.fg;
         spacer.bg = self.cursor.template.bg;
         spacer.flags = CellFlags::WIDE_CHAR_SPACER;
         spacer.extra = None;
 
-        if col + 1 >= self.rows[row].occ {
-            self.rows[row].occ = col + 2;
+        if col + 1 >= self.viewport[row].occ {
+            self.viewport[row].occ = col + 2;
         }
+
+        self.dirty.mark_row(row);
 
         self.cursor.col += 2;
         if self.cursor.col >= self.cols {
@@ -104,7 +108,7 @@ impl Grid {
         // Set WRAPLINE flag on current row
         let row = self.cursor.row;
         if self.cols > 0 {
-            self.rows[row][self.cols - 1]
+            self.viewport[row][self.cols - 1]
                 .flags
                 .insert(CellFlags::WRAPLINE);
         }
@@ -124,36 +128,37 @@ impl Grid {
         let template = &self.cursor.template;
         match mode {
             ClearMode::Below => {
-                // Clear from cursor to end of line
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 for c in col..self.cols {
-                    self.rows[row][c].reset(template);
+                    self.viewport[row][c].reset(template);
                 }
-                // Clear all rows below
                 for r in (row + 1)..self.lines {
-                    self.rows[r].reset(template);
+                    self.viewport[r].reset(template);
                 }
+                self.dirty.mark_range(row, self.lines.saturating_sub(1));
             }
             ClearMode::Above => {
-                // Clear from start to cursor
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 for r in 0..row {
-                    self.rows[r].reset(template);
+                    self.viewport[r].reset(template);
                 }
                 for c in 0..=col.min(self.cols.saturating_sub(1)) {
-                    self.rows[row][c].reset(template);
+                    self.viewport[row][c].reset(template);
                 }
+                self.dirty.mark_range(0, row);
             }
             ClearMode::All => {
                 for r in 0..self.lines {
-                    self.rows[r].reset(template);
+                    self.viewport[r].reset(template);
                 }
+                self.dirty.mark_all();
             }
             ClearMode::Saved => {
                 self.scrollback.clear();
                 self.display_offset = 0;
+                self.dirty.mark_all();
             }
         }
     }
@@ -166,18 +171,22 @@ impl Grid {
         match mode {
             LineClearMode::Right => {
                 for c in col..self.cols {
-                    self.rows[row][c].reset(template);
+                    self.viewport[row][c].reset(template);
                 }
+                self.viewport[row].recalc_occ();
             }
             LineClearMode::Left => {
                 for c in 0..=col.min(self.cols.saturating_sub(1)) {
-                    self.rows[row][c].reset(template);
+                    self.viewport[row][c].reset(template);
                 }
+                self.viewport[row].recalc_occ();
             }
             LineClearMode::All => {
-                self.rows[row].reset(template);
+                self.viewport[row].reset(template);
+                // reset() already sets occ = 0
             }
         }
+        self.dirty.mark_row(row);
     }
 
     pub fn erase_chars(&mut self, count: usize) {
@@ -186,8 +195,10 @@ impl Grid {
         let template = self.cursor.template.clone();
         let end = (col + count).min(self.cols);
         for c in col..end {
-            self.rows[row][c].reset(&template);
+            self.viewport[row][c].reset(&template);
         }
+        self.viewport[row].recalc_occ();
+        self.dirty.mark_row(row);
     }
 
     pub fn insert_blank_chars(&mut self, count: usize) {
@@ -197,13 +208,14 @@ impl Grid {
 
         // Shift cells right
         for c in (col + count..self.cols).rev() {
-            self.rows[row][c] = self.rows[row][c - count].clone();
+            self.viewport[row][c] = self.viewport[row][c - count].clone();
         }
         // Clear inserted cells
         let template = self.cursor.template.clone();
         for c in col..(col + count).min(self.cols) {
-            self.rows[row][c].reset(&template);
+            self.viewport[row][c].reset(&template);
         }
+        self.dirty.mark_row(row);
     }
 
     pub fn delete_chars(&mut self, count: usize) {
@@ -213,13 +225,15 @@ impl Grid {
 
         // Shift cells left
         for c in col..(self.cols - count) {
-            self.rows[row][c] = self.rows[row][c + count].clone();
+            self.viewport[row][c] = self.viewport[row][c + count].clone();
         }
         // Clear trailing cells
         let template = self.cursor.template.clone();
         for c in (self.cols - count)..self.cols {
-            self.rows[row][c].reset(&template);
+            self.viewport[row][c].reset(&template);
         }
+        self.viewport[row].recalc_occ();
+        self.dirty.mark_row(row);
     }
 
     pub fn insert_lines(&mut self, count: usize) {

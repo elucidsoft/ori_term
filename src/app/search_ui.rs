@@ -98,13 +98,13 @@ impl App {
     }
 
     pub(super) fn scroll_to_search_match(&mut self, tab_id: TabId) {
-        // Read the focused match position first
-        let match_row = self
-            .tabs
-            .get(&tab_id)
-            .and_then(|tab| tab.search.as_ref()?.focused_match().map(|m| m.start_row));
+        // Read the focused match stable row, then convert to absolute.
+        let match_abs_row = self.tabs.get(&tab_id).and_then(|tab| {
+            let stable = tab.search.as_ref()?.focused_match()?.start_row;
+            stable.to_absolute(tab.grid())
+        });
 
-        if let Some(target_row) = match_row {
+        if let Some(target_row) = match_abs_row {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 let grid = tab.grid_mut();
                 let sb_len = grid.scrollback.len();

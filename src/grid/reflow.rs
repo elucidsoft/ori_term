@@ -3,6 +3,7 @@
 use crate::cell::{Cell, CellFlags};
 
 use super::Grid;
+use super::ring::ViewportRing;
 use super::row::Row;
 
 impl Grid {
@@ -38,9 +39,7 @@ impl Grid {
             self.resize_rows(new_lines);
 
             if new_cols != self.cols {
-                for row in &mut self.rows {
-                    row.resize(new_cols);
-                }
+                self.viewport.resize_cols(new_cols);
                 for row in &mut self.scrollback {
                     row.resize(new_cols);
                 }
@@ -62,6 +61,9 @@ impl Grid {
 
         // Clamp display offset
         self.display_offset = self.display_offset.min(self.scrollback.len());
+
+        // Resize dirty tracker to match new viewport dimensions.
+        self.dirty.resize(self.lines);
     }
 
     pub(super) fn resize_rows(&mut self, new_lines: usize) {
@@ -69,31 +71,43 @@ impl Grid {
             std::cmp::Ordering::Less => {
                 // Shrinking: prefer trimming trailing blank rows first
                 let to_remove = self.lines - new_lines;
-                let trimmed = self.trim_trailing_blank_rows(to_remove);
+                let trimmed = self.count_trailing_blank_rows(to_remove);
                 let remaining = to_remove - trimmed;
 
+                // Drain viewport to Vec for manipulation.
+                let mut rows = self.viewport.drain_logical();
+
+                // Drop the trailing blanks we counted.
+                rows.truncate(rows.len() - trimmed);
+
+                // Move top rows into scrollback.
                 for _ in 0..remaining {
-                    if !self.rows.is_empty() {
-                        let row = self.rows.remove(0);
-                        if self.scrollback.len() >= self.max_scrollback {
-                            self.scrollback.pop_front();
-                        }
-                        self.scrollback.push_back(row);
-                        self.cursor.row = self.cursor.row.saturating_sub(1);
+                    if rows.is_empty() {
+                        break;
                     }
+                    let row = rows.remove(0);
+                    if self.scrollback.len() >= self.max_scrollback {
+                        self.scrollback.pop_front();
+                    }
+                    self.scrollback.push_back(row);
+                    self.cursor.row = self.cursor.row.saturating_sub(1);
                 }
 
-                self.rows.truncate(new_lines);
-                while self.rows.len() < new_lines {
-                    self.rows.push(Row::new(self.cols));
+                rows.truncate(new_lines);
+                while rows.len() < new_lines {
+                    rows.push(Row::new(self.cols));
                 }
+
+                self.viewport = ViewportRing::from_vec(rows);
             }
             std::cmp::Ordering::Greater => {
                 let delta = new_lines - self.lines;
 
+                let mut rows = self.viewport.drain_logical();
+
                 if self.cursor.row < self.lines.saturating_sub(1) {
                     for _ in 0..delta {
-                        self.rows.push(Row::new(self.cols));
+                        rows.push(Row::new(self.cols));
                     }
                 } else {
                     let from_scrollback = delta.min(self.scrollback.len());
@@ -105,16 +119,19 @@ impl Grid {
                     self.cursor.row += from_scrollback;
 
                     let mut new_rows = prepend;
-                    new_rows.append(&mut self.rows);
+                    new_rows.append(&mut rows);
                     while new_rows.len() < new_lines {
                         new_rows.push(Row::new(self.cols));
                     }
-                    self.rows = new_rows;
+                    rows = new_rows;
                 }
+
+                self.viewport = ViewportRing::from_vec(rows);
             }
             std::cmp::Ordering::Equal => {}
         }
         self.lines = new_lines;
+        self.dirty.resize(new_lines);
     }
 
     /// Reflow content to fit new column width using cell-by-cell rewriting.
@@ -133,7 +150,8 @@ impl Grid {
         // Collect all rows: scrollback first, then visible
         let mut all_rows: Vec<Row> = self.scrollback.drain(..).collect();
         let visible_start = all_rows.len();
-        all_rows.append(&mut self.rows);
+        let visible_rows = self.viewport.drain_logical();
+        all_rows.extend(visible_rows);
 
         // Cursor position in the unified list
         let cursor_abs = visible_start + self.cursor.row;
@@ -265,12 +283,10 @@ impl Grid {
         if total > self.lines {
             let sb_count = total - self.lines;
             self.scrollback = result.drain(..sb_count).collect();
-            self.rows = result;
         } else {
             self.scrollback.clear();
-            self.rows = result;
-            while self.rows.len() < self.lines {
-                self.rows.push(Row::new(new_cols));
+            while result.len() < self.lines {
+                result.push(Row::new(new_cols));
             }
         }
 
@@ -278,9 +294,11 @@ impl Grid {
         for row in &mut self.scrollback {
             row.resize(new_cols);
         }
-        for row in &mut self.rows {
+        for row in &mut result {
             row.resize(new_cols);
         }
+
+        self.viewport = ViewportRing::from_vec(result);
 
         // Update cursor
         let sb_len = self.scrollback.len();
@@ -292,26 +310,25 @@ impl Grid {
         self.cursor.col = new_cursor_col.min(new_cols.saturating_sub(1));
     }
 
-    /// Trim up to `max` trailing blank rows from the bottom of the active area.
-    /// Returns how many were actually trimmed. Does not trim rows at or above the cursor.
-    pub(super) fn trim_trailing_blank_rows(&mut self, max: usize) -> usize {
-        let mut trimmed = 0;
-        while trimmed < max && self.rows.len() > 1 {
-            let last_idx = self.rows.len() - 1;
-            // Don't trim the row the cursor is on or above
-            if last_idx <= self.cursor.row {
+    /// Count trailing blank rows from the bottom of the viewport (read-only).
+    ///
+    /// Returns how many of the last `max` rows are blank and below the cursor.
+    fn count_trailing_blank_rows(&self, max: usize) -> usize {
+        let len = self.viewport.len();
+        let mut count = 0;
+        while count < max && len > count + 1 {
+            let idx = len - 1 - count;
+            if idx <= self.cursor.row {
                 break;
             }
-            // Check if the last row is blank
-            let is_blank = self.rows[last_idx]
+            let is_blank = self.viewport[idx]
                 .iter()
                 .all(|c| c.c == ' ' || c.c == '\0');
             if !is_blank {
                 break;
             }
-            self.rows.pop();
-            trimmed += 1;
+            count += 1;
         }
-        trimmed
+        count
     }
 }

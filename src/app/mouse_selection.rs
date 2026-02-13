@@ -5,6 +5,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
+use crate::grid::StableRowIndex;
 use crate::selection::{self, Selection, SelectionMode, SelectionPoint, Side};
 
 use super::{App, DOUBLE_CLICK_MS};
@@ -102,12 +103,18 @@ impl App {
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
 
+        // Compute stable row index for selection points.
+        let stable_row = {
+            let tab = self.tabs.get(&tab_id).expect("tab lookup just succeeded");
+            StableRowIndex::from_absolute(tab.grid(), abs_row)
+        };
+
         // Shift+click: extend existing selection
         if shift {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 if tab.selection.is_some() {
                     tab.update_selection_end(SelectionPoint {
-                        row: abs_row,
+                        row: stable_row,
                         col,
                         side,
                     });
@@ -128,12 +135,12 @@ impl App {
                     let (word_start, word_end) =
                         selection::word_boundaries(tab.grid(), abs_row, col);
                     let anchor = SelectionPoint {
-                        row: abs_row,
+                        row: stable_row,
                         col: word_start,
                         side: Side::Left,
                     };
                     let pivot = SelectionPoint {
-                        row: abs_row,
+                        row: stable_row,
                         col: word_end,
                         side: Side::Right,
                     };
@@ -145,15 +152,16 @@ impl App {
             3 => {
                 // Triple-click: line selection
                 if let Some(tab) = self.tabs.get(&tab_id) {
-                    let line_start_row = selection::logical_line_start(tab.grid(), abs_row);
-                    let line_end_row = selection::logical_line_end(tab.grid(), abs_row);
+                    let grid = tab.grid();
+                    let line_start_abs = selection::logical_line_start(grid, abs_row);
+                    let line_end_abs = selection::logical_line_end(grid, abs_row);
                     let anchor = SelectionPoint {
-                        row: line_start_row,
+                        row: StableRowIndex::from_absolute(grid, line_start_abs),
                         col: 0,
                         side: Side::Left,
                     };
                     let pivot = SelectionPoint {
-                        row: line_end_row,
+                        row: StableRowIndex::from_absolute(grid, line_end_abs),
                         col: grid_cols.saturating_sub(1),
                         side: Side::Right,
                     };
@@ -164,7 +172,7 @@ impl App {
             }
             _ => {
                 // Single click: char selection (or block if Alt held)
-                let mut sel = Selection::new_char(abs_row, col, side);
+                let mut sel = Selection::new_char(stable_row, col, side);
                 if alt {
                     sel.mode = SelectionMode::Block;
                 }
@@ -203,6 +211,7 @@ impl App {
                     let col = col.min(grid_cols.saturating_sub(1));
                     let line = line.min(grid_lines.saturating_sub(1));
                     let abs_row = tab.grid().viewport_to_absolute(line);
+                    let stable_row = StableRowIndex::from_absolute(tab.grid(), abs_row);
 
                     // Compute new end point based on selection mode.
                     // Pre-compute boundary data from grid before mutating selection.
@@ -214,12 +223,12 @@ impl App {
                                 selection::word_boundaries(tab.grid(), abs_row, col);
                             let anchor = tab.selection.as_ref().map(|s| s.anchor);
                             let start_pt = SelectionPoint {
-                                row: abs_row,
+                                row: stable_row,
                                 col: w_start,
                                 side: Side::Left,
                             };
                             let end_pt = SelectionPoint {
-                                row: abs_row,
+                                row: stable_row,
                                 col: w_end,
                                 side: Side::Right,
                             };
@@ -230,26 +239,27 @@ impl App {
                             }
                         }
                         Some(SelectionMode::Line) => {
+                            let grid = tab.grid();
                             let drag_line_start =
-                                selection::logical_line_start(tab.grid(), abs_row);
+                                selection::logical_line_start(grid, abs_row);
                             let drag_line_end =
-                                selection::logical_line_end(tab.grid(), abs_row);
-                            if sel_anchor_row.is_some_and(|ar| abs_row < ar) {
+                                selection::logical_line_end(grid, abs_row);
+                            if sel_anchor_row.is_some_and(|ar| stable_row < ar) {
                                 Some(SelectionPoint {
-                                    row: drag_line_start,
+                                    row: StableRowIndex::from_absolute(grid, drag_line_start),
                                     col: 0,
                                     side: Side::Left,
                                 })
                             } else {
                                 Some(SelectionPoint {
-                                    row: drag_line_end,
+                                    row: StableRowIndex::from_absolute(grid, drag_line_end),
                                     col: grid_cols.saturating_sub(1),
                                     side: Side::Right,
                                 })
                             }
                         }
                         Some(_) => Some(SelectionPoint {
-                            row: abs_row,
+                            row: stable_row,
                             col,
                             side,
                         }),

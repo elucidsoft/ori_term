@@ -1,4 +1,4 @@
-//! Chrome-style tab drag — tear-off, animations, drop preview.
+//! Chrome-style tab drag — tear-off, animations, OS drag merge.
 
 use std::time::Instant;
 
@@ -88,11 +88,10 @@ impl App {
             // release handler uses the correct window id.
             if let Some(ref mut drag) = self.drag {
                 drag.source_window = new_wid;
-                drag.grab_offset = PhysicalPosition::new(grab_x, grab_y);
             }
 
-            // The drag continues via CursorMoved (DragPhase::TornOff)
-            // until mouse release.
+            // The OS drag loop takes over from here. Merge check
+            // happens in check_torn_off_merge() after WM_EXITSIZEMOVE.
         }
 
         // If source window is empty, close it
@@ -102,6 +101,24 @@ impl App {
             .is_some_and(|tw| tw.tabs.is_empty());
         if source_empty {
             self.windows.remove(&source_wid);
+        }
+    }
+
+    /// Move a tab from one window to another at the given index.
+    #[cfg(target_os = "windows")]
+    pub(super) fn relocate_tab(
+        &mut self,
+        tab_id: TabId,
+        from_wid: WindowId,
+        to_wid: WindowId,
+        idx: usize,
+    ) {
+        if let Some(tw) = self.windows.get_mut(&from_wid) {
+            tw.remove_tab(tab_id);
+        }
+        if let Some(tw) = self.windows.get_mut(&to_wid) {
+            tw.insert_tab_at(tab_id, idx);
+            tw.window.request_redraw();
         }
     }
 
@@ -214,6 +231,36 @@ impl App {
         }
     }
 
+    /// Populate merge candidate rects and mark the window as torn-off for live
+    /// merge detection during the OS drag loop.
+    ///
+    /// Collects tab bar rects (DWM visible bounds) from all other windows and
+    /// stores them in the dragged window's `SnapData`. The `WM_MOVING` handler
+    /// checks these during the OS move loop and ends the loop early when the
+    /// dragged window's tab bar overlaps a candidate.
+    #[cfg(target_os = "windows")]
+    pub(super) fn setup_merge_detection(&self, drag_wid: WindowId) {
+        let sf = self.scale_factor;
+        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round() as i32;
+
+        let mut rects = Vec::new();
+        for (&wid, tw) in &self.windows {
+            if wid == drag_wid {
+                continue;
+            }
+            if let Some((l, t, r, _b)) =
+                crate::platform_windows::visible_frame_bounds(&tw.window)
+            {
+                rects.push([l, t, r, t + tab_bar_h]);
+            }
+        }
+
+        if let Some(tw) = self.windows.get(&drag_wid) {
+            crate::platform_windows::set_torn_off(&tw.window, true);
+            crate::platform_windows::set_merge_rects(&tw.window, rects);
+        }
+    }
+
     pub(super) fn window_containing_tab(&self, tab_id: TabId) -> Option<WindowId> {
         self.windows
             .iter()
@@ -221,47 +268,19 @@ impl App {
             .map(|(&wid, _)| wid)
     }
 
-    pub(super) fn find_window_at_cursor(
-        &self,
-        exclude: WindowId,
-        screen_x: f64,
-        screen_y: f64,
-    ) -> Option<(WindowId, f64)> {
-        for (&wid, tw) in &self.windows {
-            if wid == exclude {
-                continue;
-            }
-            let pos = match tw.window.outer_position() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-            let size = tw.window.inner_size();
-            let wx = pos.x as f64;
-            let wy = pos.y as f64;
-            let sf = self.scale_factor;
-            let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
-            let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
-            if screen_x >= wx
-                && screen_x < wx + size.width as f64 - controls_w
-                && screen_y >= wy
-                && screen_y < wy + tab_bar_h
-            {
-                return Some((wid, screen_x));
-            }
-        }
-        None
-    }
-
+    #[cfg(target_os = "windows")]
     pub(super) fn compute_drop_index(&self, target_wid: WindowId, screen_x: f64) -> usize {
         let tw = match self.windows.get(&target_wid) {
             Some(tw) => tw,
             None => return 0,
         };
-        let target_x = tw
-            .window
-            .outer_position()
-            .map(|p| p.x as f64)
-            .unwrap_or(0.0);
+        // Use visible frame bounds to get accurate X offset.
+        let target_x =
+            crate::platform_windows::visible_frame_bounds(&tw.window)
+                .map_or_else(
+                    || tw.window.outer_position().map(|p| p.x as f64).unwrap_or(0.0),
+                    |(l, _, _, _)| l as f64,
+                );
         let local_x = (screen_x - target_x) as usize;
         let layout = TabBarLayout::compute(
             tw.tabs.len(),
@@ -275,32 +294,227 @@ impl App {
         raw.min(tw.tabs.len())
     }
 
-    /// Set pixel-tracking visual for a preview tab being dragged into a target window.
-    pub(super) fn set_preview_visual(
-        &mut self,
-        target_wid: WindowId,
-        screen_x: f64,
-        mouse_off: f64,
-    ) {
-        let sf = self.scale_factor as f32;
-        let target_x = self
+    /// Check if a torn-off tab's OS drag ended and merge into a target window.
+    ///
+    /// Called from `about_to_wait()` each event loop iteration. When the OS move
+    /// loop (`drag_window()`) ends, `WM_EXITSIZEMOVE` captures the cursor position.
+    /// If the torn-off window's tab bar overlaps another window's tab bar, merge
+    /// the tab into that window. Otherwise the window stays where the OS placed it.
+    ///
+    /// Uses window-to-window tab bar overlap rather than cursor position because
+    /// the cursor is at the grab offset within the torn-off window, not necessarily
+    /// inside the target's narrow tab bar zone.
+    #[cfg(target_os = "windows")]
+    pub(super) fn check_torn_off_merge(&mut self) {
+        use crate::log;
+
+        let Some((torn_wid, tab_id)) = self.torn_off_pending else {
+            return;
+        };
+        let Some(tw) = self.windows.get(&torn_wid) else {
+            log("merge-check: torn window gone, clearing pending");
+            self.torn_off_pending = None;
+            return;
+        };
+        let Some((cx, cy)) = crate::platform_windows::take_drag_ended(&tw.window) else {
+            return;
+        };
+        self.torn_off_pending = None;
+        log(&format!("merge-check: drag ended at cursor ({cx}, {cy})"));
+
+        // Check if WM_MOVING detected overlap during the drag. If so, use
+        // the proposed window rect captured at that moment — the window has
+        // since snapped back after ReleaseCapture, making current positions
+        // unreliable.
+        let merge_proposed = self
             .windows
-            .get(&target_wid)
-            .and_then(|tw| tw.window.outer_position().ok())
-            .map_or(0.0, |p| p.x as f64);
-        let local_x = screen_x - target_x;
-        let dragged_x = (local_x - mouse_off) as f32;
-        let left_margin = TAB_LEFT_MARGIN as f32 * sf;
-        let tab_wf = self.windows.get(&target_wid).map_or(0.0, |tw| {
-            let layout = TabBarLayout::compute(
-                tw.tabs.len(),
-                tw.window.inner_size().width as usize,
-                sf as f64,
-                None,
-            );
-            layout.tab_width as f32
+            .get(&torn_wid)
+            .and_then(|tw| crate::platform_windows::take_merge_detected(&tw.window));
+
+        let sf = self.scale_factor;
+        let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
+        let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
+
+        let target = if let Some((pl, pt, pr, _pb)) = merge_proposed {
+            // WM_MOVING detected overlap — find target using the proposed rect
+            // (the position the OS was about to place the window).
+            log(&format!(
+                "merge-check: WM_MOVING triggered, proposed=({pl},{pt},{pr})"
+            ));
+            self.find_merge_target_by_proposed_rect(
+                torn_wid, pl, pt, pr, tab_bar_h, controls_w,
+            )
+        } else {
+            // Normal drag end — use window-to-window tab bar overlap.
+            self.find_merge_target_by_overlap(torn_wid, tab_bar_h, controls_w)
+        };
+
+        if let Some((target_wid, screen_x)) = target {
+            let idx = self.compute_drop_index(target_wid, screen_x);
+            self.relocate_tab(tab_id, torn_wid, target_wid, idx);
+            log(&format!(
+                "merge: tab {tab_id:?} into window {target_wid:?} at index {idx}"
+            ));
+
+            // Resize tab to fit the target window.
+            if let Some(ttw) = self.windows.get(&target_wid) {
+                let size = ttw.window.inner_size();
+                let (cols, rows) = self.grid_dims_for_size(size.width, size.height);
+                if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                    tab.resize(cols, rows, size.width as u16, size.height as u16);
+                    tab.grid_dirty = true;
+                }
+            }
+
+            // Close the now-empty torn-off window.
+            self.windows.remove(&torn_wid);
+            self.tab_bar_dirty = true;
+
+            // Activate the target window (Chrome: `attached_context_->GetWidget()->Activate()`)
+            // so the merged tab is visible to the user, not hidden behind other windows.
+            if let Some(ttw) = self.windows.get(&target_wid) {
+                ttw.window.focus_window();
+            }
+            self.render_window(target_wid);
+        } else {
+            // No merge target found — ensure the torn-off window is visible.
+            // WM_MOVING may have hidden it via raw Win32 ShowWindow(SW_HIDE),
+            // so we must use raw ShowWindow(SW_SHOW) to undo it (winit's
+            // set_visible may not know the window was hidden).
+            if let Some(tw) = self.windows.get(&torn_wid) {
+                crate::platform_windows::show_window(&tw.window);
+                tw.window.request_redraw();
+            }
+            log("merge-check: no target window found, keeping torn-off");
+        }
+    }
+
+    /// Find a merge target using the proposed window rect from `WM_MOVING`.
+    ///
+    /// The proposed rect is where the OS was about to place the torn-off window
+    /// at the moment `WM_MOVING` detected overlap. Uses rect-to-rect tab bar
+    /// overlap — the same logic as `find_merge_target_by_overlap` but with the
+    /// proposed position instead of the current (snapped-back) position.
+    #[cfg(target_os = "windows")]
+    fn find_merge_target_by_proposed_rect(
+        &self,
+        exclude: WindowId,
+        prop_left: i32,
+        prop_top: i32,
+        prop_right: i32,
+        tab_bar_h: f64,
+        controls_w: f64,
+    ) -> Option<(WindowId, f64)> {
+        use crate::log;
+
+        let torn_bar_top = prop_top as f64;
+        let torn_bar_bot = prop_top as f64 + tab_bar_h;
+
+        for (&wid, tw) in &self.windows {
+            if wid == exclude {
+                continue;
+            }
+            let (wx, wy, wr) = if let Some((l, t, r, _)) =
+                crate::platform_windows::visible_frame_bounds(&tw.window)
+            {
+                (l as f64, t as f64, r as f64)
+            } else {
+                let p = match tw.window.outer_position() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let s = tw.window.inner_size();
+                (p.x as f64, p.y as f64, p.x as f64 + s.width as f64)
+            };
+
+            let tgt_bar_top = wy;
+            let tgt_bar_bot = wy + tab_bar_h;
+            let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
+
+            let tgt_right = wr - controls_w;
+            let x_overlap = (prop_right as f64) > wx && (prop_left as f64) < tgt_right;
+
+            log(&format!(
+                "merge-check(proposed): candidate {wid:?} visible=({},{},{}), \
+                 y_overlap={y_overlap} x_overlap={x_overlap}",
+                wx as i32, wy as i32, wr as i32,
+            ));
+
+            if y_overlap && x_overlap {
+                let ol = (prop_left as f64).max(wx);
+                let or_ = (prop_right as f64).min(tgt_right);
+                let center_x = f64::midpoint(ol, or_);
+                return Some((wid, center_x));
+            }
+        }
+        None
+    }
+
+    /// Find a merge target using window-to-window tab bar overlap.
+    ///
+    /// Used when the drag ended normally (user released mouse) without
+    /// `WM_MOVING` triggering. Checks if the torn-off window's tab bar
+    /// overlaps any other window's tab bar.
+    #[cfg(target_os = "windows")]
+    fn find_merge_target_by_overlap(
+        &self,
+        torn_wid: WindowId,
+        tab_bar_h: f64,
+        controls_w: f64,
+    ) -> Option<(WindowId, f64)> {
+        use crate::log;
+
+        let torn_bounds = self.windows.get(&torn_wid).and_then(|tw| {
+            crate::platform_windows::visible_frame_bounds(&tw.window).or_else(|| {
+                let p = tw.window.outer_position().ok()?;
+                let s = tw.window.inner_size();
+                Some((p.x, p.y, p.x + s.width as i32, p.y + s.height as i32))
+            })
         });
-        let max_x = self.drag_max_x(target_wid, tab_wf);
-        self.drag_visual_x = Some((target_wid, dragged_x.clamp(left_margin, max_x)));
+        let (tl, tt, tr, _tb) = torn_bounds?;
+        log(&format!(
+            "merge-check(overlap): torn window visible=({tl},{tt},{tr})"
+        ));
+
+        for (&wid, tw) in &self.windows {
+            if wid == torn_wid {
+                continue;
+            }
+            let (wx, wy, wr) = if let Some((l, t, r, _)) =
+                crate::platform_windows::visible_frame_bounds(&tw.window)
+            {
+                (l as f64, t as f64, r as f64)
+            } else {
+                let p = match tw.window.outer_position() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                let s = tw.window.inner_size();
+                (p.x as f64, p.y as f64, p.x as f64 + s.width as f64)
+            };
+
+            let torn_bar_top = tt as f64;
+            let torn_bar_bot = tt as f64 + tab_bar_h;
+            let tgt_bar_top = wy;
+            let tgt_bar_bot = wy + tab_bar_h;
+            let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
+
+            let tgt_right = wr - controls_w;
+            let x_overlap = (tr as f64) > wx && (tl as f64) < tgt_right;
+
+            log(&format!(
+                "merge-check(overlap): candidate {wid:?} visible=({},{},{}), \
+                 y_overlap={y_overlap} x_overlap={x_overlap}",
+                wx as i32, wy as i32, wr as i32,
+            ));
+
+            if y_overlap && x_overlap {
+                let ol = (tl as f64).max(wx);
+                let or_ = (tr as f64).min(tgt_right);
+                let center_x = f64::midpoint(ol, or_);
+                return Some((wid, center_x));
+            }
+        }
+        None
     }
 }

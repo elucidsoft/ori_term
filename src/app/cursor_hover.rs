@@ -204,7 +204,7 @@ impl App {
         }
     }
 
-    /// Advance the tab drag state machine (`Pending` → `DraggingInBar` → `TornOff`).
+    /// Advance the tab drag state machine (`Pending` → `DraggingInBar` → OS drag).
     fn update_drag_state(
         &mut self,
         window_id: WindowId,
@@ -216,13 +216,12 @@ impl App {
                 drag.phase,
                 drag.tab_id,
                 drag.source_window,
-                drag.grab_offset,
                 drag.distance_from_origin(position),
                 drag.mouse_offset_in_tab,
             )
         });
 
-        let Some((phase, tab_id, source_wid, grab_offset, dist, mouse_off)) = drag_action else {
+        let Some((phase, tab_id, source_wid, dist, mouse_off)) = drag_action else {
             return;
         };
 
@@ -234,15 +233,18 @@ impl App {
                         .get(&source_wid)
                         .is_some_and(|tw| tw.tabs.len() <= 1);
                     if is_single_tab {
-                        if let Some(ref mut drag) = self.drag {
-                            drag.phase = DragPhase::TornOff;
-                            drag.grab_offset = position;
-                        }
+                        // Single-tab window: hand off to OS-native drag so
+                        // Windows snap (Aero Snap, right-click snap menu) works.
                         #[cfg(target_os = "windows")]
-                        if let Some(tw) = self.windows.get(&source_wid) {
-                            crate::platform_windows::set_dragging(&tw.window, true);
+                        {
+                            self.setup_merge_detection(source_wid);
+                            self.torn_off_pending = Some((source_wid, tab_id));
                         }
-                        log("drag: pending -> torn off (single tab)");
+                        self.drag = None;
+                        self.start_window_drag(source_wid, position);
+                        log(&format!(
+                            "drag: single tab -> OS window drag, torn_off_pending={source_wid:?}"
+                        ));
                     } else {
                         if let Some(ref mut drag) = self.drag {
                             drag.phase = DragPhase::DraggingInBar;
@@ -273,141 +275,26 @@ impl App {
                 if outside >= TEAR_OFF_THRESHOLD {
                     log("drag: tearing off!");
                     self.tear_off_tab(tab_id, source_wid, position, event_loop);
-                    if let Some(ref mut drag) = self.drag {
-                        drag.phase = DragPhase::TornOff;
-                    }
-                    #[cfg(target_os = "windows")]
-                    if let Some(drag) = &self.drag {
-                        if let Some(tw) = self.windows.get(&drag.source_window) {
-                            crate::platform_windows::set_dragging(&tw.window, true);
-                        }
-                    }
+                    // Hand the new window to OS-native drag so Windows snap works.
+                    let new_wid = self.drag.as_ref().map(|d| d.source_window);
+                    self.drag = None;
                     self.drag_visual_x = None;
                     self.tab_anim_offsets.remove(&source_wid);
+                    if let Some(wid) = new_wid {
+                        #[cfg(target_os = "windows")]
+                        {
+                            self.setup_merge_detection(wid);
+                            self.torn_off_pending = Some((wid, tab_id));
+                        }
+                        self.start_window_drag(wid, position);
+                        log(&format!(
+                            "drag: tear-off -> OS window drag, torn_off_pending={wid:?}"
+                        ));
+                    }
                 } else {
                     self.update_drag_in_bar(window_id, position, tab_id, mouse_off);
                 }
             }
-            DragPhase::TornOff => {
-                let screen_cursor = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(|tw| tw.window.inner_position().ok())
-                    .map(|ip| (ip.x as f64 + position.x, ip.y as f64 + position.y));
-
-                if let Some(screen) = screen_cursor {
-                    self.handle_torn_off_drag(tab_id, source_wid, grab_offset, screen, mouse_off);
-                }
-            }
-        }
-    }
-
-    /// Handle positioning and drop preview for a torn-off tab.
-    fn handle_torn_off_drag(
-        &mut self,
-        tab_id: crate::tab::TabId,
-        torn_wid: WindowId,
-        grab_offset: PhysicalPosition<f64>,
-        screen: (f64, f64),
-        mouse_off: f64,
-    ) {
-        let (sx, sy) = screen;
-
-        // Position torn-off window (even when hidden).
-        if self.drop_preview.is_none() {
-            self.position_window_at(torn_wid, sx - grab_offset.x, sy - grab_offset.y);
-        }
-
-        // Check if cursor is over another window's tab bar.
-        let new_target = self
-            .find_window_at_cursor(torn_wid, sx, sy)
-            .map(|(twid, scr_x)| {
-                let idx = self.compute_drop_index(twid, scr_x);
-                (twid, idx)
-            });
-
-        let old_preview = self.drop_preview;
-        match (old_preview, new_target) {
-            (None, Some((target_wid, idx))) => {
-                // Entering target: move tab into target, hide torn-off window.
-                self.relocate_tab(tab_id, torn_wid, target_wid, idx);
-                if let Some(tw) = self.windows.get(&torn_wid) {
-                    tw.window.set_visible(false);
-                }
-                self.drop_preview = Some((target_wid, idx));
-                self.set_preview_visual(target_wid, sx, mouse_off);
-            }
-            (Some((old_twid, _)), Some((new_twid, new_idx))) => {
-                if old_twid == new_twid {
-                    // Same target: reorder tab within it.
-                    if let Some(tw) = self.windows.get_mut(&new_twid) {
-                        tw.remove_tab(tab_id);
-                    }
-                    let idx = self.compute_drop_index(new_twid, sx);
-                    if let Some(tw) = self.windows.get_mut(&new_twid) {
-                        tw.insert_tab_at(tab_id, idx);
-                        tw.window.request_redraw();
-                    }
-                    self.drop_preview = Some((new_twid, idx));
-                } else {
-                    // Switched to different target window.
-                    self.clear_preview_visuals(old_twid);
-                    self.relocate_tab(tab_id, old_twid, new_twid, new_idx);
-                    self.drop_preview = Some((new_twid, new_idx));
-                    self.tab_bar_dirty = true;
-                    self.render_window(old_twid);
-                }
-                self.set_preview_visual(new_twid, sx, mouse_off);
-            }
-            (Some((old_twid, _)), None) => {
-                // Left target: undo preview, show torn-off window at cursor.
-                self.clear_preview_visuals(old_twid);
-                if let Some(tw) = self.windows.get_mut(&old_twid) {
-                    tw.remove_tab(tab_id);
-                }
-                if let Some(tw) = self.windows.get_mut(&torn_wid) {
-                    tw.add_tab(tab_id);
-                }
-                self.position_window_at(torn_wid, sx - grab_offset.x, sy - grab_offset.y);
-                if let Some(tw) = self.windows.get(&torn_wid) {
-                    tw.window.set_visible(true);
-                }
-                self.drop_preview = None;
-                self.tab_bar_dirty = true;
-                self.render_window(old_twid);
-            }
-            (None, None) => {}
-        }
-    }
-
-    /// Move a tab from one window to another at the given index.
-    fn relocate_tab(
-        &mut self,
-        tab_id: crate::tab::TabId,
-        from_wid: WindowId,
-        to_wid: WindowId,
-        idx: usize,
-    ) {
-        if let Some(tw) = self.windows.get_mut(&from_wid) {
-            tw.remove_tab(tab_id);
-        }
-        if let Some(tw) = self.windows.get_mut(&to_wid) {
-            tw.insert_tab_at(tab_id, idx);
-            tw.window.request_redraw();
-        }
-    }
-
-    /// Clear drag animation state for a window.
-    fn clear_preview_visuals(&mut self, window_id: WindowId) {
-        self.drag_visual_x = None;
-        self.tab_anim_offsets.remove(&window_id);
-    }
-
-    /// Set a window's outer position to the given screen coordinates.
-    fn position_window_at(&self, window_id: WindowId, x: f64, y: f64) {
-        if let Some(tw) = self.windows.get(&window_id) {
-            tw.window
-                .set_outer_position(PhysicalPosition::new(x as i32, y as i32));
         }
     }
 }

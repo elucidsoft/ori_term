@@ -8,7 +8,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
 use crate::context_menu;
-use crate::drag::{DragPhase, DragState};
+use crate::drag::DragState;
 use crate::selection::Selection;
 use crate::tab_bar::{
     NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TabBarHit, TabBarLayout,
@@ -95,6 +95,12 @@ impl App {
                     return;
                 }
             }
+        }
+
+        // Suppress right-click while left button is held or dragging.
+        // Prevents context menus from interrupting drag operations.
+        if button == MouseButton::Right && (self.left_mouse_down || self.drag.is_some()) {
+            return;
         }
 
         // Right-click handling
@@ -262,7 +268,7 @@ impl App {
                                     self.tab_bar_dirty = true;
                                     tw.window.request_redraw();
                                 }
-                                let mut drag = DragState::new(tab_id, window_id, pos, idx);
+                                let mut drag = DragState::new(tab_id, window_id, pos);
                                 drag.mouse_offset_in_tab = offset_in_tab;
                                 self.drag = Some(drag);
                             }
@@ -297,49 +303,12 @@ impl App {
                 }
 
                 if let Some(drag) = self.drag.take() {
-                    // drag.source_window was updated to the torn-off window
-                    // during tear_off_tab — use it, not window_id
-                    let torn_wid = drag.source_window;
-                    // Re-enable DPI handling now that the drag is over
-                    #[cfg(target_os = "windows")]
-                    if drag.phase == DragPhase::TornOff {
-                        if let Some(tw) = self.windows.get(&torn_wid) {
-                            crate::platform_windows::set_dragging(&tw.window, false);
-                        }
-                    }
-                    match drag.phase {
-                        DragPhase::TornOff => {
-                            // Clear drag visuals for any target window
-                            self.drag_visual_x = None;
-                            if let Some((target_wid, _)) = self.drop_preview.take() {
-                                self.tab_anim_offsets.remove(&target_wid);
-                                // Preview active — tab is already in the
-                                // target window. Finalize: hide and close the
-                                // (empty) torn-off window, render target inline.
-                                if let Some(tw) = self.windows.get(&torn_wid) {
-                                    tw.window.set_visible(false);
-                                }
-                                let source_empty = self
-                                    .windows
-                                    .get(&torn_wid)
-                                    .is_some_and(|tw| tw.tabs.is_empty());
-                                if source_empty {
-                                    self.windows.remove(&torn_wid);
-                                }
-                                self.tab_bar_dirty = true;
-                                self.render_window(target_wid);
-                            }
-                            // No preview — torn-off window stays as-is.
-                        }
-                        DragPhase::DraggingInBar | DragPhase::Pending => {
-                            // Clear drag visuals and rebuild tab bar (show tab at slot again)
-                            self.drag_visual_x = None;
-                            self.tab_anim_offsets.remove(&drag.source_window);
-                            self.tab_bar_dirty = true;
-                            if let Some(tw) = self.windows.get(&drag.source_window) {
-                                tw.window.request_redraw();
-                            }
-                        }
+                    // Clear drag visuals and rebuild tab bar (show tab at slot again).
+                    self.drag_visual_x = None;
+                    self.tab_anim_offsets.remove(&drag.source_window);
+                    self.tab_bar_dirty = true;
+                    if let Some(tw) = self.windows.get(&drag.source_window) {
+                        tw.window.request_redraw();
                     }
                 }
             }

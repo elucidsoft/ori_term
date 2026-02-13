@@ -93,9 +93,6 @@ pub struct App {
     pub(super) _config_monitor: Option<ConfigMonitor>,
     pub(super) bindings: Vec<KeyBinding>,
     pub(super) scale_factor: f64,
-    /// Chrome-style preview: when a torn-off tab hovers over another window's
-    /// tab bar, the tab is temporarily inserted and the torn-off window hides.
-    pub(super) drop_preview: Option<(WindowId, usize)>,
     /// Per-tab X offsets for dodge animation, keyed by window.
     pub(super) tab_anim_offsets: HashMap<WindowId, Vec<f32>>,
     /// Last animation tick time (for time-based decay).
@@ -119,6 +116,9 @@ pub struct App {
     /// Cached tab bar data — rebuilt only when `tab_bar_dirty`.
     pub(super) cached_tab_info: Vec<(TabId, String)>,
     pub(super) cached_bell_badges: Vec<bool>,
+    /// Torn-off tab pending OS drag completion for post-drag merge check.
+    #[cfg(target_os = "windows")]
+    pub(super) torn_off_pending: Option<(WindowId, TabId)>,
 }
 
 impl App {
@@ -240,7 +240,6 @@ impl App {
             _config_monitor: config_monitor,
             bindings,
             scale_factor: 1.0,
-            drop_preview: None,
             tab_anim_offsets: HashMap::new(),
             last_anim_time: Instant::now(),
             drag_visual_x: None,
@@ -252,6 +251,8 @@ impl App {
             shell_integration_dir,
             cached_tab_info: Vec::new(),
             cached_bell_badges: Vec::new(),
+            #[cfg(target_os = "windows")]
+            torn_off_pending: None,
         };
 
         event_loop.run_app(&mut app)?;
