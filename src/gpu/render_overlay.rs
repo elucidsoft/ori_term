@@ -13,7 +13,8 @@ use crate::tab_bar::{
 use super::color_util::{
     lighten, TabBarColors, UI_BG, UI_BG_HOVER, UI_SEPARATOR, UI_TEXT, UI_TEXT_DIM,
 };
-use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
+use super::instance_writer::InstanceWriter;
+use super::renderer::{FrameParams, GpuRenderer};
 
 impl GpuRenderer {
     pub(super) fn build_dragged_tab_overlay(

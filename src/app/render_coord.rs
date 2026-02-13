@@ -5,11 +5,12 @@ use winit::window::WindowId;
 
 use super::App;
 use crate::context_menu::ContextAction;
-use crate::gpu::renderer::FrameParams;
+use crate::gpu::FrameParams;
 use crate::log;
 use crate::palette;
 use crate::tab::TabId;
-use crate::tab_bar::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
+use crate::grid::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP};
+use crate::tab_bar::TAB_BAR_HEIGHT;
 #[cfg(target_os = "windows")]
 use crate::tab_bar::{
     CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_LEFT_MARGIN,
@@ -20,13 +21,14 @@ use crate::tab_bar::TabBarHit;
 impl App {
     /// Computes grid dimensions (cols, rows) for a given window size in physical pixels.
     pub(super) fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
-        let sf = self.scale_factor;
-        let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
         let cw = self.glyphs.cell_width;
         let ch = self.glyphs.cell_height;
-        let grid_w = (width as usize).saturating_sub(s(GRID_PADDING_LEFT));
-        let grid_h = (height as usize)
-            .saturating_sub(s(TAB_BAR_HEIGHT) + s(GRID_PADDING_TOP) + s(GRID_PADDING_BOTTOM));
+        let grid_w = (width as usize).saturating_sub(self.scale_px(GRID_PADDING_LEFT));
+        let grid_h = (height as usize).saturating_sub(
+            self.scale_px(TAB_BAR_HEIGHT)
+                + self.scale_px(GRID_PADDING_TOP)
+                + self.scale_px(GRID_PADDING_BOTTOM),
+        );
         let cols = if cw > 0 {
             grid_w / cw
         } else {
@@ -104,15 +106,11 @@ impl App {
         {
             if let Some(tw) = self.windows.get(&window_id) {
                 let sf = self.scale_factor;
-                let si = |v: usize| -> usize { (v as f64 * sf).round() as usize };
                 let bar_w = phys.width as usize;
-                let twl = self
-                    .tab_width_lock
-                    .filter(|(wid, _)| *wid == window_id)
-                    .map(|(_, w)| w);
+                let twl = self.tab_width_lock_for(window_id);
                 let layout = TabBarLayout::compute(tab_info.len(), bar_w, sf, twl);
-                let h = si(TAB_BAR_HEIGHT) as i32;
-                let left_margin = si(TAB_LEFT_MARGIN);
+                let h = self.scale_px(TAB_BAR_HEIGHT) as i32;
+                let left_margin = self.scale_px(TAB_LEFT_MARGIN);
                 let mut rects = Vec::new();
                 // Individual tab rects
                 for i in 0..layout.tab_count {
@@ -121,15 +119,15 @@ impl App {
                     rects.push([left, 0, right, h]);
                 }
                 // New tab button
-                let new_tab_w = si(NEW_TAB_BUTTON_WIDTH);
+                let new_tab_w = self.scale_px(NEW_TAB_BUTTON_WIDTH);
                 let tabs_end = left_margin + layout.tab_count * layout.tab_width;
                 rects.push([tabs_end as i32, 0, (tabs_end + new_tab_w) as i32, h]);
                 // Dropdown button
-                let dropdown_w = si(DROPDOWN_BUTTON_WIDTH);
+                let dropdown_w = self.scale_px(DROPDOWN_BUTTON_WIDTH);
                 let dd_start = tabs_end + new_tab_w;
                 rects.push([dd_start as i32, 0, (dd_start + dropdown_w) as i32, h]);
                 // Window controls
-                let controls_w = si(CONTROLS_ZONE_WIDTH);
+                let controls_w = self.scale_px(CONTROLS_ZONE_WIDTH);
                 let controls_start = bar_w.saturating_sub(controls_w) as i32;
                 rects.push([controls_start, 0, bar_w as i32, h]);
                 crate::platform_windows::set_client_rects(&tw.window, rects);
@@ -189,6 +187,9 @@ impl App {
             || cursor_visible_changed;
         let tab_bar_dirty = self.tab_bar_dirty;
 
+        // Pre-compute before closure to avoid borrowing all of `self`.
+        let twl = self.tab_width_lock_for(window_id);
+
         // Build FrameParams — need the active tab's grid
         let frame_params = active_tab_id
             .and_then(|tab_id| self.tabs.get(&tab_id))
@@ -224,10 +225,7 @@ impl App {
                 grid_dirty,
                 tab_bar_dirty,
                 window_id,
-                tab_width_lock: self
-                    .tab_width_lock
-                    .filter(|(wid, _)| *wid == window_id)
-                    .map(|(_, w)| w),
+                tab_width_lock: twl,
             });
 
         let Some(frame_params) = frame_params else {

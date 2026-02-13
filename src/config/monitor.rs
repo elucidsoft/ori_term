@@ -8,7 +8,7 @@ use std::time::Duration;
 use notify::{RecursiveMode, Watcher};
 use winit::event_loop::EventLoopProxy;
 
-use crate::config::config_path;
+use super::config_path;
 use crate::log;
 use crate::tab::TermEvent;
 

@@ -1,13 +1,17 @@
 //! Tab state: grid, PTY, VTE parser, and shell integration.
 
+mod interceptor;
+mod types;
+
+pub use types::{CharsetState, Notification, PromptState, TabId, TermEvent};
+
 use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::thread;
 use std::time::Instant;
 
-use vte::Perform;
-use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
+use vte::ansi::{CursorShape, KeyboardModes};
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::ColorConfig;
@@ -20,174 +24,7 @@ use crate::shell_integration;
 use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TabId(pub u64);
-
-/// Charset state: 4 slots (G0-G3) and an active index.
-#[derive(Debug, Clone)]
-pub struct CharsetState {
-    pub charsets: [StandardCharset; 4],
-    pub active: CharsetIndex,
-}
-
-impl Default for CharsetState {
-    fn default() -> Self {
-        Self {
-            charsets: [StandardCharset::Ascii; 4],
-            active: CharsetIndex::G0,
-        }
-    }
-}
-
-impl CharsetState {
-    pub fn map(&self, c: char) -> char {
-        let idx = match self.active {
-            CharsetIndex::G0 => 0,
-            CharsetIndex::G1 => 1,
-            CharsetIndex::G2 => 2,
-            CharsetIndex::G3 => 3,
-        };
-        self.charsets[idx].map(c)
-    }
-}
-
-/// OSC 133 semantic prompt state.
-///
-/// Shell integration uses these markers to distinguish prompt, command input,
-/// and command output regions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PromptState {
-    /// No prompt markers received yet or after command output completes.
-    #[default]
-    None,
-    /// `OSC 133;A` — prompt has started (user sees the prompt).
-    PromptStart,
-    /// `OSC 133;B` — command input has started (user is typing).
-    CommandStart,
-    /// `OSC 133;C` — command output has started (command is running).
-    OutputStart,
-}
-
-/// A desktop notification from OSC 9, 99, or 777.
-pub struct Notification {
-    pub title: String,
-    pub body: String,
-}
-
-/// Raw VTE `Perform` implementation that intercepts sequences the high-level
-/// `vte::ansi::Processor` drops: OSC 7 (CWD), OSC 133 (prompt markers),
-/// OSC 9/99/777 (notifications), and XTVERSION (CSI > q).
-struct RawInterceptor<'a> {
-    pty_writer: &'a mut Option<Box<dyn Write + Send>>,
-    cwd: &'a mut Option<String>,
-    prompt_state: &'a mut PromptState,
-    pending_notifications: &'a mut Vec<Notification>,
-    prompt_mark_pending: &'a mut bool,
-    has_explicit_title: &'a mut bool,
-    suppress_title: &'a mut bool,
-}
-
-impl Perform for RawInterceptor<'_> {
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.is_empty() || params[0].is_empty() {
-            return;
-        }
-        match params[0] {
-            // OSC 7 — Current working directory.
-            // Format: OSC 7 ; file://hostname/path ST
-            b"7" => {
-                if params.len() >= 2 {
-                    let uri = std::str::from_utf8(params[1]).unwrap_or_default();
-                    // Strip file:// prefix and optional hostname to get the path.
-                    let path = uri.strip_prefix("file://").map_or(uri, |rest| {
-                        // Skip hostname (everything before the next /)
-                        if let Some(slash) = rest.find('/') {
-                            rest.split_at(slash).1
-                        } else {
-                            rest
-                        }
-                    });
-                    if !path.is_empty() {
-                        *self.cwd = Some(path.to_owned());
-                        // CWD-based title should override ConPTY's auto-generated
-                        // process title (e.g. C:\WINDOWS\system32\wsl.exe).
-                        *self.has_explicit_title = false;
-                        *self.suppress_title = false;
-                    }
-                }
-            }
-            // OSC 133 — Semantic prompt markers.
-            // Format: OSC 133 ; <type>[;extras] ST
-            b"133" => {
-                if params.len() >= 2 && !params[1].is_empty() {
-                    match params[1][0] {
-                        b'A' => {
-                            *self.prompt_state = PromptState::PromptStart;
-                            *self.prompt_mark_pending = true;
-                            *self.suppress_title = false;
-                        }
-                        b'B' => *self.prompt_state = PromptState::CommandStart,
-                        b'C' => *self.prompt_state = PromptState::OutputStart,
-                        b'D' => *self.prompt_state = PromptState::None,
-                        _ => {}
-                    }
-                }
-            }
-            // OSC 9 — iTerm2 simple notification: ESC]9;body ST
-            // OSC 99 — Kitty notification protocol: ESC]99;body ST
-            b"9" | b"99" => {
-                let body = if params.len() >= 2 {
-                    String::from_utf8_lossy(params[1]).into_owned()
-                } else {
-                    String::new()
-                };
-                self.pending_notifications.push(Notification {
-                    title: String::new(),
-                    body,
-                });
-            }
-            // OSC 777 — rxvt-unicode notification: ESC]777;notify;title;body ST
-            b"777" => {
-                if params.len() >= 2 {
-                    let action = std::str::from_utf8(params[1]).unwrap_or_default();
-                    if action == "notify" {
-                        let title = params
-                            .get(2)
-                            .map(|p| String::from_utf8_lossy(p).into_owned())
-                            .unwrap_or_default();
-                        let body = params
-                            .get(3)
-                            .map(|p| String::from_utf8_lossy(p).into_owned())
-                            .unwrap_or_default();
-                        self.pending_notifications
-                            .push(Notification { title, body });
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn csi_dispatch(
-        &mut self,
-        _params: &vte::Params,
-        intermediates: &[u8],
-        _ignore: bool,
-        action: char,
-    ) {
-        // XTVERSION: CSI > q — report terminal name and version.
-        if action == 'q' && intermediates == [b'>'] {
-            let version = env!("CARGO_PKG_VERSION");
-            let build = include_str!("../BUILD_NUMBER").trim();
-            // Response: DCS > | terminal-name(version) ST
-            let response = format!("\x1bP>|oriterm({version} build {build})\x1b\\");
-            if let Some(w) = self.pty_writer.as_mut() {
-                let _ = w.write_all(response.as_bytes());
-                let _ = w.flush();
-            }
-        }
-    }
-}
+use interceptor::RawInterceptor;
 
 #[allow(clippy::struct_excessive_bools, reason = "Tab state needs multiple flag fields")]
 pub struct Tab {
@@ -228,13 +65,6 @@ pub struct Tab {
     /// Suppress OSC 0/2 title changes until the shell sends CWD or prompt markers.
     /// Prevents `ConPTY`'s auto-generated process-path title from flashing.
     pub suppress_title: bool,
-}
-
-#[derive(Debug)]
-pub enum TermEvent {
-    PtyOutput(TabId, Vec<u8>),
-    PtyExited(TabId),
-    ConfigReload,
 }
 
 impl Tab {

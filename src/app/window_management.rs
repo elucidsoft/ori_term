@@ -8,13 +8,13 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Icon, Window, WindowId};
 
 use crate::config;
-use crate::gpu::GpuState;
-use crate::gpu::renderer::GpuRenderer;
+use crate::gpu::{GpuRenderer, GpuState};
 use crate::log;
 use crate::palette;
 use crate::render::FontSet;
 use crate::tab::TabId;
-use crate::tab_bar::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
+use crate::grid::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP};
+use crate::tab_bar::TAB_BAR_HEIGHT;
 use crate::window::TermWindow;
 #[cfg(target_os = "windows")]
 use super::RESIZE_BORDER;
@@ -98,14 +98,12 @@ impl App {
         saved_pos: Option<&config::WindowState>,
         visible: bool,
     ) -> Option<WindowId> {
-        let sf = self.scale_factor;
-        let s = |v: usize| -> u32 { (v as f64 * sf).round() as u32 };
-        let win_w =
-            (self.glyphs.cell_width * self.config.window.columns) as u32 + s(GRID_PADDING_LEFT);
+        let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32
+            + self.scale_px(GRID_PADDING_LEFT) as u32;
         let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32
-            + s(TAB_BAR_HEIGHT)
-            + s(GRID_PADDING_TOP)
-            + s(GRID_PADDING_BOTTOM);
+            + self.scale_px(TAB_BAR_HEIGHT) as u32
+            + self.scale_px(GRID_PADDING_TOP) as u32
+            + self.scale_px(GRID_PADDING_BOTTOM) as u32;
 
         let use_transparent = self.config.window.effective_opacity() < 1.0;
 
@@ -217,7 +215,7 @@ impl App {
         crate::platform_windows::enable_snap(
             &window,
             (RESIZE_BORDER * self.scale_factor) as i32,
-            (TAB_BAR_HEIGHT as f64 * self.scale_factor) as i32,
+            self.scale_px(TAB_BAR_HEIGHT) as i32,
         );
 
         // Restore saved position before showing — avoids gray flash from

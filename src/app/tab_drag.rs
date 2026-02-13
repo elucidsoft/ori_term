@@ -143,7 +143,7 @@ impl App {
         mouse_offset_in_tab: f64,
     ) {
         let sf = self.scale_factor;
-        let left_margin = (TAB_LEFT_MARGIN as f64 * sf).round();
+        let left_margin = self.scale_px(TAB_LEFT_MARGIN) as f64;
         let (tab_count, tab_w) = match self.windows.get(&window_id) {
             Some(tw) => {
                 let layout = TabBarLayout::compute(
@@ -264,7 +264,7 @@ impl App {
             self.scale_factor,
             None,
         );
-        let left_margin = (TAB_LEFT_MARGIN as f64 * self.scale_factor).round() as usize;
+        let left_margin = self.scale_px(TAB_LEFT_MARGIN);
         let tab_x = local_x.saturating_sub(left_margin);
         let raw = (tab_x + layout.tab_width / 2) / layout.tab_width.max(1);
         raw.min(tw.tabs.len())

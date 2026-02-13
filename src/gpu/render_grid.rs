@@ -5,10 +5,12 @@ use vte::ansi::CursorShape;
 use crate::cell::CellFlags;
 use crate::render::{FontSet, FontStyle};
 use crate::search::MatchType;
-use crate::tab_bar::{GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
+use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP};
+use crate::tab_bar::TAB_BAR_HEIGHT;
 use crate::term_mode::TermMode;
 use super::color_util::vte_rgb_to_rgba;
-use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
+use super::instance_writer::InstanceWriter;
+use super::renderer::{FrameParams, GpuRenderer};
 
 impl GpuRenderer {
     #[allow(clippy::too_many_lines)]

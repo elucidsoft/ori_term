@@ -2,6 +2,7 @@
 
 pub mod atlas;
 mod color_util;
+mod instance_writer;
 pub mod pipeline;
 mod render_grid;
 mod render_overlay;
@@ -11,4 +12,5 @@ pub mod renderer;
 pub mod state;
 
 pub(crate) use color_util::srgb_to_linear;
+pub use renderer::{FrameParams, GpuRenderer};
 pub use state::GpuState;

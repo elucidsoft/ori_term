@@ -3,8 +3,12 @@
 mod config_reload;
 mod cursor_hover;
 mod event_loop;
+mod hover_url;
 mod input_keyboard;
 mod input_mouse;
+mod mouse_coord;
+mod mouse_report;
+mod mouse_selection;
 mod render_coord;
 mod search_ui;
 mod settings_ui;
@@ -23,11 +27,10 @@ use winit::window::{Window, WindowId};
 
 use crate::clipboard;
 use crate::config::{self, Config};
-use crate::config_monitor::ConfigMonitor;
+use crate::config::monitor::ConfigMonitor;
 use crate::context_menu::MenuOverlay;
 use crate::drag::DragState;
-use crate::gpu::GpuState;
-use crate::gpu::renderer::GpuRenderer;
+use crate::gpu::{GpuRenderer, GpuState};
 use crate::key_encoding::Modifiers;
 use crate::keybindings::{self, KeyBinding};
 use crate::log;
@@ -252,6 +255,18 @@ impl App {
 
         event_loop.run_app(&mut app)?;
         Ok(())
+    }
+
+    /// Scale a logical pixel value by the current DPI scale factor.
+    pub(super) fn scale_px(&self, v: usize) -> usize {
+        (v as f64 * self.scale_factor).round() as usize
+    }
+
+    /// Returns the locked tab width for `window_id`, if active.
+    pub(super) fn tab_width_lock_for(&self, window_id: WindowId) -> Option<usize> {
+        self.tab_width_lock
+            .filter(|(wid, _)| *wid == window_id)
+            .map(|(_, w)| w)
     }
 
     pub(super) fn alloc_tab_id(&mut self) -> TabId {

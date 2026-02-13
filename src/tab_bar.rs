@@ -42,11 +42,6 @@ pub const WINDOW_BORDER_COLOR: u32 = 0x00585b70; // overlay0 accent border
 #[cfg(target_os = "windows")]
 pub const WINDOW_BORDER_WIDTH: usize = 1;
 
-// Grid inset from window edges
-pub const GRID_PADDING_LEFT: usize = 6;
-pub const GRID_PADDING_TOP: usize = 10;
-pub const GRID_PADDING_BOTTOM: usize = 4;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarHit {
     Tab(usize),

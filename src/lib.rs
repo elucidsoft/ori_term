@@ -4,7 +4,6 @@ pub mod app;
 pub mod cell;
 pub mod clipboard;
 pub mod config;
-pub mod config_monitor;
 pub mod context_menu;
 pub mod drag;
 pub mod gpu;

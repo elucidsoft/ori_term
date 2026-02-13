@@ -3,7 +3,8 @@
 use super::color_util::{
     lerp_color, lighten, TabBarColors, CONTROL_CLOSE_HOVER_BG, CONTROL_CLOSE_HOVER_FG,
 };
-use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
+use super::instance_writer::InstanceWriter;
+use super::renderer::{FrameParams, GpuRenderer};
 use crate::render::FontSet;
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH,
