@@ -319,6 +319,9 @@ impl GpuRenderer {
         glyphs: &mut FontSet,
         ui_glyphs: &mut FontSet,
     ) {
+        // Advance atlas frame counter for LRU page tracking.
+        self.atlas.begin_frame();
+
         // Invalidate cached frame when switching between windows — a single
         // cache shared across windows would cause stale tab bars.
         if self.last_rendered_window != Some(params.window_id) {
@@ -746,6 +749,7 @@ impl GpuRenderer {
                     entry.uv_size,
                     color,
                     [0.0, 0.0, 0.0, 0.0],
+                    entry.page,
                 );
             }
 
@@ -775,7 +779,7 @@ impl GpuRenderer {
             let h = entry.metrics.height as f32;
             let x = (cx - w / 2.0).round();
             let y = (cy - h / 2.0).round();
-            fg.push_glyph(x, y, w, h, entry.uv_pos, entry.uv_size, color, [0.0; 4]);
+            fg.push_glyph(x, y, w, h, entry.uv_pos, entry.uv_size, color, [0.0; 4], entry.page);
         }
     }
 }

@@ -130,11 +130,14 @@ impl InstanceWriter {
             color,
             0,
             corner_radius,
+            0,
         );
     }
 
     /// Push a textured glyph quad (alpha-blended).
+    ///
     /// `bg_color` is passed through to the shader for contrast/correction.
+    /// `atlas_page` is the texture array layer index from the atlas entry.
     pub(super) fn push_glyph(
         &mut self,
         x: f32,
@@ -145,11 +148,34 @@ impl InstanceWriter {
         uv_size: [f32; 2],
         fg_color: [f32; 4],
         bg_color: [f32; 4],
+        atlas_page: u32,
     ) {
-        self.push_raw([x, y], [w, h], uv_pos, uv_size, fg_color, bg_color, 1, 0.0);
+        self.push_raw(
+            [x, y],
+            [w, h],
+            uv_pos,
+            uv_size,
+            fg_color,
+            bg_color,
+            1,
+            0.0,
+            atlas_page,
+        );
     }
 
     /// Write a full 80-byte instance record.
+    ///
+    /// Layout:
+    ///   [0..8]   pos
+    ///   [8..16]  size
+    ///   [16..24] `uv_pos`
+    ///   [24..32] `uv_size`
+    ///   [32..48] `fg_color`
+    ///   [48..64] `bg_color`
+    ///   [64..68] flags
+    ///   [68..72] `corner_radius`
+    ///   [72..76] `atlas_page`
+    ///   [76..80] _pad
     #[expect(clippy::too_many_arguments, reason = "Maps 1:1 to the GPU instance struct layout")]
     fn push_raw(
         &mut self,
@@ -161,6 +187,7 @@ impl InstanceWriter {
         bg_color: [f32; 4],
         flags: u32,
         corner_radius: f32,
+        atlas_page: u32,
     ) {
         for &v in &pos {
             self.data.extend_from_slice(&v.to_ne_bytes());
@@ -182,8 +209,9 @@ impl InstanceWriter {
         }
         self.data.extend_from_slice(&flags.to_ne_bytes());
         self.data.extend_from_slice(&corner_radius.to_ne_bytes());
-        // 8 bytes padding to reach 80-byte stride
-        self.data.extend_from_slice(&[0u8; 8]);
+        self.data.extend_from_slice(&atlas_page.to_ne_bytes());
+        // 4 bytes padding to reach 80-byte stride.
+        self.data.extend_from_slice(&[0u8; 4]);
     }
 
     pub(super) fn count(&self) -> u32 {

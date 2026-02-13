@@ -1,6 +1,7 @@
 //! GPU rendering: wgpu state, atlas, pipelines, and domain-specific renderers.
 
 pub mod atlas;
+mod builtin_glyphs;
 mod color_util;
 mod instance_writer;
 pub mod pipeline;

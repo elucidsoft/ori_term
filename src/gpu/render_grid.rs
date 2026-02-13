@@ -8,6 +8,7 @@ use crate::render::{FontSet, FontStyle};
 use crate::search::MatchType;
 use crate::tab_bar::TAB_BAR_HEIGHT;
 use crate::term_mode::TermMode;
+use super::builtin_glyphs;
 use super::color_util::vte_rgb_to_rgba;
 use super::instance_writer::InstanceWriter;
 use super::renderer::{FrameParams, GpuRenderer};
@@ -148,8 +149,9 @@ impl GpuRenderer {
                     continue;
                 }
 
-                // Custom block character rendering (pixel-perfect, no font glyph)
-                if draw_block_char(cell.c, x0, y0, cell_w, ch as f32, fg_rgba, bg) {
+                // Built-in glyph rendering (pixel-perfect, no font glyph).
+                // Covers box drawing, block elements, braille, and Powerline.
+                if builtin_glyphs::draw_builtin_glyph(cell.c, x0, y0, cell_w, ch as f32, fg_rgba, bg) {
                     continue;
                 }
 
@@ -193,6 +195,7 @@ impl GpuRenderer {
                     entry.uv_size,
                     glyph_fg,
                     glyph_bg,
+                    entry.page,
                 );
 
                 // Synthetic bold: render glyph again 1px to the right
@@ -206,6 +209,7 @@ impl GpuRenderer {
                         entry.uv_size,
                         glyph_fg,
                         glyph_bg,
+                        entry.page,
                     );
                 }
 
@@ -228,6 +232,7 @@ impl GpuRenderer {
                         zw_entry.uv_size,
                         glyph_fg,
                         glyph_bg,
+                        zw_entry.page,
                     );
                 }
             }
@@ -320,94 +325,3 @@ fn draw_underlines(
     }
 }
 
-/// Draw a Unicode block element (U+2580-U+259F) as pixel-perfect rectangles.
-/// Returns `true` if the character was handled, `false` to fall through to the
-/// normal glyph path.
-#[expect(clippy::many_single_char_names, reason = "Geometric drawing with standard x/y/w/h/c names")]
-fn draw_block_char(
-    c: char,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    fg: [f32; 4],
-    bg: &mut InstanceWriter,
-) -> bool {
-    match c {
-        // Upper half block
-        '\u{2580}' => bg.push_rect(x, y, w, (h / 2.0).round(), fg),
-        // Lower N/8 blocks (U+2581-U+2587)
-        '\u{2581}'..='\u{2587}' => {
-            let eighths = (c as u32 - 0x2580) as f32;
-            let bh = (h * eighths / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Full block
-        '\u{2588}' => bg.push_rect(x, y, w, h, fg),
-        // Left N/8 blocks (U+2589-U+258F): 7/8 down to 1/8
-        '\u{2589}'..='\u{258F}' => {
-            let eighths = (0x2590 - c as u32) as f32;
-            bg.push_rect(x, y, (w * eighths / 8.0).round(), h, fg);
-        }
-        // Right half
-        '\u{2590}' => {
-            let hw = (w / 2.0).round();
-            bg.push_rect(x + w - hw, y, hw, h, fg);
-        }
-        // Shade blocks (25%, 50%, 75%)
-        '\u{2591}'..='\u{2593}' => {
-            let alpha = (c as u32 - 0x2590) as f32 * 0.25;
-            bg.push_rect(x, y, w, h, [fg[0], fg[1], fg[2], fg[3] * alpha]);
-        }
-        // Upper 1/8
-        '\u{2594}' => bg.push_rect(x, y, w, (h / 8.0).round(), fg),
-        // Right 1/8
-        '\u{2595}' => {
-            let bw = (w / 8.0).round();
-            bg.push_rect(x + w - bw, y, bw, h, fg);
-        }
-        // Quadrant block elements (U+2596-U+259F)
-        '\u{2596}'..='\u{259F}' => draw_quadrant(c, x, y, w, h, fg, bg),
-        _ => return false,
-    }
-    true
-}
-
-/// Draw a quadrant block element (U+2596-U+259F) from a bitmask.
-///
-/// Each quadrant char maps to a 4-bit mask: TL, TR, BL, BR.
-#[expect(clippy::many_single_char_names, reason = "Geometric drawing with standard x/y/w/h/c names")]
-fn draw_quadrant(
-    c: char,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    fg: [f32; 4],
-    bg: &mut InstanceWriter,
-) {
-    // Bitmask per quadrant: bit 3=TL, bit 2=TR, bit 1=BL, bit 0=BR
-    // Index 0 = U+2596, index 9 = U+259F
-    const QUADRANT_MASKS: [u8; 10] = [
-        0b0010, // U+2596: lower left
-        0b0001, // U+2597: lower right
-        0b1000, // U+2598: upper left
-        0b1011, // U+2599: upper left + lower left + lower right
-        0b1001, // U+259A: upper left + lower right
-        0b1110, // U+259B: upper left + upper right + lower left
-        0b1101, // U+259C: upper left + upper right + lower right
-        0b0100, // U+259D: upper right
-        0b0110, // U+259E: upper right + lower left
-        0b0111, // U+259F: upper right + lower left + lower right
-    ];
-
-    let idx = (c as u32 - 0x2596) as usize;
-    let mask = QUADRANT_MASKS[idx];
-    let hw = (w / 2.0).round();
-    let hh = (h / 2.0).round();
-
-    if mask & 0b1000 != 0 { bg.push_rect(x,      y,      hw,      hh,      fg); } // TL
-    if mask & 0b0100 != 0 { bg.push_rect(x + hw,  y,      w - hw,  hh,      fg); } // TR
-    if mask & 0b0010 != 0 { bg.push_rect(x,       y + hh, hw,      h - hh,  fg); } // BL
-    if mask & 0b0001 != 0 { bg.push_rect(x + hw,  y + hh, w - hw,  h - hh,  fg); } // BR
-}

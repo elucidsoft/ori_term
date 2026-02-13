@@ -3,19 +3,20 @@
 /// Instance data stride in bytes: 80 bytes per cell instance.
 ///
 /// Layout:
-///   [0..8]   pos:      vec2<f32>  (pixel position)
-///   [8..16]  size:     vec2<f32>  (pixel size)
-///   [16..24] `uv_pos`:   vec2<f32>  (atlas UV top-left)
-///   [24..32] `uv_size`:  vec2<f32>  (atlas UV size)
-///   [32..48] `fg_color`: vec4<f32>  (foreground RGBA)
-///   [48..64] `bg_color`: vec4<f32>  (background RGBA)
-///   [64..68] flags:    u32
-///   [68..72] `corner_radius`: f32  (0.0 = sharp rect)
-///   [72..80] _pad:     8 bytes
+///   [0..8]   pos:           vec2<f32>  (pixel position)
+///   [8..16]  size:          vec2<f32>  (pixel size)
+///   [16..24] `uv_pos`:      vec2<f32>  (atlas UV top-left)
+///   [24..32] `uv_size`:     vec2<f32>  (atlas UV size)
+///   [32..48] `fg_color`:    vec4<f32>  (foreground RGBA)
+///   [48..64] `bg_color`:    vec4<f32>  (background RGBA)
+///   [64..68] flags:         u32
+///   [68..72] `corner_radius`: f32      (0.0 = sharp rect)
+///   [72..76] `atlas_page`:  u32        (texture array layer index)
+///   [76..80] _pad:          4 bytes
 pub const INSTANCE_STRIDE: u64 = 80;
 
 /// Instance vertex attributes — shared by both bg and fg pipelines.
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 9] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x2,
         offset: 0,
@@ -56,6 +57,11 @@ const INSTANCE_ATTRS: [wgpu::VertexAttribute; 8] = [
         offset: 68,
         shader_location: 7,
     },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 72,
+        shader_location: 8,
+    },
 ];
 
 pub fn instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -85,6 +91,7 @@ struct CellInput {
     @location(5) bg_color: vec4<f32>,
     @location(6) flags: u32,
     @location(7) corner_radius: f32,
+    @location(8) atlas_page: u32,
 }
 
 struct VertexOutput {
@@ -163,7 +170,7 @@ struct Uniforms {
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-@group(1) @binding(0) var glyph_texture: texture_2d<f32>;
+@group(1) @binding(0) var glyph_texture: texture_2d_array<f32>;
 @group(1) @binding(1) var glyph_sampler: sampler;
 
 struct CellInput {
@@ -175,6 +182,7 @@ struct CellInput {
     @location(5) bg_color: vec4<f32>,
     @location(6) flags: u32,
     @location(7) corner_radius: f32,
+    @location(8) atlas_page: u32,
 }
 
 struct VertexOutput {
@@ -182,9 +190,10 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) fg_color: vec4<f32>,
     @location(2) @interpolate(flat) bg_color: vec4<f32>,
+    @location(3) @interpolate(flat) atlas_page: u32,
 }
 
-// sRGB → linear (exact IEC 61966-2-1 transfer)
+// sRGB -> linear (exact IEC 61966-2-1 transfer)
 fn linearize_scalar(v: f32) -> f32 {
     if (v <= 0.04045) {
         return v / 12.92;
@@ -192,7 +201,7 @@ fn linearize_scalar(v: f32) -> f32 {
     return pow((v + 0.055) / 1.055, 2.4);
 }
 
-// linear → sRGB (inverse transfer)
+// linear -> sRGB (inverse transfer)
 fn unlinearize_scalar(v: f32) -> f32 {
     if (v <= 0.0031308) {
         return v * 12.92;
@@ -265,7 +274,7 @@ fn contrasted_color(min_ratio: f32, fg: vec4<f32>, bg: vec4<f32>) -> vec4<f32> {
 
     // Pick the direction that achieves the ratio with less color shift
     if (white_ratio >= min_ratio && black_ratio >= min_ratio) {
-        // Both work — pick the one with less mix factor (closer to original)
+        // Both work -- pick the one with less mix factor (closer to original)
         if (hi_w <= hi_b) {
             return vec4<f32>(white_mix, fg.a);
         } else {
@@ -293,8 +302,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
     out.position = uniforms.projection * vec4<f32>(pixel_pos, 0.0, 1.0);
     out.uv = input.uv_pos + input.uv_size * corner;
     out.bg_color = input.bg_color;
+    out.atlas_page = input.atlas_page;
 
-    // Minimum contrast enforcement (per-vertex — cheap)
+    // Minimum contrast enforcement (per-vertex -- cheap)
     if (uniforms.min_contrast > 1.0) {
         out.fg_color = contrasted_color(uniforms.min_contrast, input.fg_color, input.bg_color);
     } else {
@@ -307,7 +317,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
 // sRGB render target handles gamma-correct blending automatically:
 // the GPU reads the framebuffer in linear, blends in linear, and writes
 // back sRGB.  fontdue's area-coverage is already linear, so raw coverage
-// is the correct alpha — no manual gamma correction needed.
+// is the correct alpha -- no manual gamma correction needed.
 //
 // When linear correction is enabled (flags bit 0), we adjust the alpha
 // value to compensate for perceptual luminance differences, producing
@@ -315,7 +325,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    var a = textureSample(glyph_texture, glyph_sampler, input.uv).r;
+    var a = textureSample(glyph_texture, glyph_sampler, input.uv, input.atlas_page).r;
     let color = input.fg_color;
 
     if ((uniforms.flags & 1u) != 0u) {
@@ -361,7 +371,7 @@ pub fn create_uniform_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGrou
     })
 }
 
-/// Atlas texture bind group layout: group(1) binding(0) = texture, binding(1) = sampler.
+/// Atlas texture bind group layout: group(1) binding(0) = texture array, binding(1) = sampler.
 pub fn create_atlas_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("atlas_bind_group_layout"),
@@ -371,7 +381,7 @@ pub fn create_atlas_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupL
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
                     multisampled: false,
                 },
                 count: None,

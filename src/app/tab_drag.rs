@@ -216,9 +216,7 @@ impl App {
         let decay = (-dt * 15.0_f32).exp(); // ~67ms time constant
 
         let mut any_active = false;
-        let mut finished = Vec::new();
-
-        for (wid, offsets) in &mut self.tab_anim_offsets {
+        self.tab_anim_offsets.retain(|_wid, offsets| {
             let mut all_zero = true;
             for offset in offsets.iter_mut() {
                 *offset *= decay;
@@ -228,16 +226,11 @@ impl App {
                     all_zero = false;
                 }
             }
-            if all_zero {
-                finished.push(*wid);
-            } else {
+            if !all_zero {
                 any_active = true;
             }
-        }
-
-        for wid in finished {
-            self.tab_anim_offsets.remove(&wid);
-        }
+            !all_zero
+        });
 
         // Offsets changed — mark tab bar dirty so renderer rebuilds with new positions
         if any_active {
@@ -388,7 +381,6 @@ impl App {
     /// where the OS placed it.
     #[cfg(target_os = "windows")]
     pub(super) fn check_torn_off_merge(&mut self) {
-        use crate::drag::{DragPhase, DragState};
         use crate::log;
 
         let Some((torn_wid, tab_id, mouse_offset)) = self.torn_off_pending else {
@@ -466,53 +458,9 @@ impl App {
             // DraggingInBar state so the user can continue dragging the tab
             // within the target window (or tear off again) without releasing.
             if is_live_merge {
-                let (cx, cy) = cursor;
-                // Convert screen cursor to target client coords.
-                let (tgt_left, tgt_top) =
-                    crate::platform_windows::visible_frame_bounds(
-                        &self.windows[&target_wid].window,
-                    )
-                    .map_or((0, 0), |(l, t, _, _)| (l, t));
-                let local_x = cx as f64 - tgt_left as f64;
-                let local_y = cy as f64 - tgt_top as f64;
-                let client_pos = PhysicalPosition::new(local_x, local_y);
-
-                // Store cursor position so subsequent events have context.
-                self.cursor_pos.insert(target_wid, client_pos);
-
-                // Create drag state in the target window.
-                let mut drag = DragState::new(tab_id, target_wid, client_pos);
-                drag.phase = DragPhase::DraggingInBar;
-                drag.mouse_offset_in_tab = mouse_offset;
-                self.drag = Some(drag);
-                self.left_mouse_down = true;
-
-                // Set drag_visual_x so the tab renders at the cursor position
-                // immediately — without this, the tab snaps to its slot index
-                // until the next cursor_moved event.
-                let tw = &self.windows[&target_wid];
-                let layout = TabBarLayout::compute(
-                    tw.tabs.len(),
-                    tw.window.inner_size().width as usize,
-                    self.scale_factor,
-                    None,
+                self.begin_seamless_drag_after_merge(
+                    target_wid, tab_id, cursor, mouse_offset, sf,
                 );
-                let max_x = self.drag_max_x(target_wid, layout.tab_width as f32);
-                let dragged_x =
-                    ((local_x - mouse_offset) as f32).clamp(0.0, max_x);
-                self.drag_visual_x = Some((target_wid, dragged_x));
-
-                // Suppress the stale WM_LBUTTONUP that the OS modal move
-                // loop may deliver after ReleaseCapture.
-                self.merge_drag_suppress_release = true;
-
-                // Chrome-style vertical detach magnetism: after a merge,
-                // add extra Y tolerance to the tear-off check so the cursor
-                // needs to travel further before tearing off again. This
-                // prevents immediate re-tear-off when the cursor was near
-                // the bottom of the tab bar during merge.
-                // Chrome uses kVerticalDetachMagnetism = 15 DIPs.
-                self.tear_off_magnetism = 15.0 * sf;
                 log("merge: seamless drag active in target window");
             }
         } else {
@@ -526,6 +474,76 @@ impl App {
             }
             log("merge-check: no target window found, keeping torn-off");
         }
+    }
+
+    /// Synthesize a `DraggingInBar` state after a live merge so the user can
+    /// continue dragging the tab without releasing the mouse button.
+    ///
+    /// This intentionally sets `self.left_mouse_down = true` — the input-tracking
+    /// flag owned by `input_mouse.rs` — because the OS modal move loop consumed
+    /// the original button-down event. Without this, the mouse-up that eventually
+    /// arrives would have no matching down, causing the drag to be ignored.
+    #[cfg(target_os = "windows")]
+    fn begin_seamless_drag_after_merge(
+        &mut self,
+        target_wid: WindowId,
+        tab_id: TabId,
+        cursor: (i32, i32),
+        mouse_offset: f64,
+        sf: f64,
+    ) {
+        use crate::drag::{DragPhase, DragState};
+
+        let Some(tw) = self.windows.get(&target_wid) else {
+            return;
+        };
+
+        let (cx, cy) = cursor;
+        // Convert screen cursor to target client coords.
+        let (tgt_left, tgt_top) =
+            crate::platform_windows::visible_frame_bounds(&tw.window)
+                .map_or((0, 0), |(l, t, _, _)| (l, t));
+        let local_x = cx as f64 - tgt_left as f64;
+        let local_y = cy as f64 - tgt_top as f64;
+        let client_pos = PhysicalPosition::new(local_x, local_y);
+
+        // Store cursor position so subsequent events have context.
+        self.cursor_pos.insert(target_wid, client_pos);
+
+        // Create drag state in the target window.
+        let mut drag = DragState::new(tab_id, target_wid, client_pos);
+        drag.phase = DragPhase::DraggingInBar;
+        drag.mouse_offset_in_tab = mouse_offset;
+        self.drag = Some(drag);
+
+        // Synthesize mouse-down: the OS modal move loop consumed the original
+        // button-down, so input tracking must reflect that the button is held.
+        self.left_mouse_down = true;
+
+        // Set drag_visual_x so the tab renders at the cursor position
+        // immediately — without this, the tab snaps to its slot index
+        // until the next cursor_moved event.
+        let layout = TabBarLayout::compute(
+            tw.tabs.len(),
+            tw.window.inner_size().width as usize,
+            self.scale_factor,
+            None,
+        );
+        let max_x = self.drag_max_x(target_wid, layout.tab_width as f32);
+        let dragged_x =
+            ((local_x - mouse_offset) as f32).clamp(0.0, max_x);
+        self.drag_visual_x = Some((target_wid, dragged_x));
+
+        // Suppress the stale WM_LBUTTONUP that the OS modal move
+        // loop may deliver after ReleaseCapture.
+        self.merge_drag_suppress_release = true;
+
+        // Chrome-style vertical detach magnetism: after a merge, add extra Y
+        // tolerance so the cursor needs to travel further before tearing off
+        // again. Prevents immediate re-tear-off when the cursor was near the
+        // bottom of the tab bar during merge.
+        // Chrome uses kVerticalDetachMagnetism = 15 DIPs.
+        self.tear_off_magnetism = 15.0 * sf;
     }
 
     /// Compute the grab offset for a single-tab window drag.
