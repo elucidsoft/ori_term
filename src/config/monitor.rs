@@ -1,6 +1,5 @@
 //! Config file change monitor — watches TOML and sends reload events.
 
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -73,7 +72,7 @@ impl ConfigMonitor {
     }
 
     fn watch_loop(
-        config_file: &PathBuf,
+        config_file: &std::path::Path,
         proxy: &EventLoopProxy<TermEvent>,
         notify_rx: &mpsc::Receiver<Result<notify::Event, notify::Error>>,
         shutdown_rx: &mpsc::Receiver<()>,

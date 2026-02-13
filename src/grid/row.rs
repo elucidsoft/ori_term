@@ -7,7 +7,7 @@ use crate::cell::{Cell, CellFlags};
 #[derive(Debug, Clone)]
 pub struct Row {
     inner: Vec<Cell>,
-    pub occ: usize,
+    pub(super) occ: usize,
     /// True if this row is the start of a shell prompt (OSC 133;A).
     pub prompt_start: bool,
 }
@@ -40,16 +40,6 @@ impl Row {
     /// Returns a mutable iterator over the cells in this row.
     pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
         self.inner.iter_mut()
-    }
-
-    /// Direct access to the inner cell vector.
-    pub fn cells(&self) -> &[Cell] {
-        &self.inner
-    }
-
-    /// Direct mutable access to the inner cell vector.
-    pub fn cells_mut(&mut self) -> &mut Vec<Cell> {
-        &mut self.inner
     }
 
     /// Resets all cells in this row to the template cell, clearing content.

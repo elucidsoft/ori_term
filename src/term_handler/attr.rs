@@ -79,11 +79,7 @@ impl TermHandler<'_> {
     }
 
     pub(super) fn handle_set_cursor_style(&mut self, style: Option<CursorStyle>) {
-        if let Some(s) = style {
-            *self.cursor_shape = s.shape;
-        } else {
-            *self.cursor_shape = CursorShape::default();
-        }
+        *self.cursor_shape = style.map_or_else(CursorShape::default, |s| s.shape);
     }
 
     pub(super) fn handle_set_cursor_shape(&mut self, shape: CursorShape) {

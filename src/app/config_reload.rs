@@ -53,9 +53,7 @@ impl App {
                 "config reload: font size={}, cell={}x{}",
                 self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
             ));
-            if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-                renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
-            }
+            self.rebuild_atlas();
             let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();
             for wid in window_ids {
                 if !self.is_settings_window(wid) {

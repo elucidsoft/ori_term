@@ -3,9 +3,9 @@
 use vte::ansi::CursorShape;
 
 use crate::cell::CellFlags;
+use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP};
 use crate::render::{FontSet, FontStyle};
 use crate::search::MatchType;
-use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP};
 use crate::tab_bar::TAB_BAR_HEIGHT;
 use crate::term_mode::TermMode;
 use super::color_util::vte_rgb_to_rgba;
@@ -13,7 +13,7 @@ use super::instance_writer::InstanceWriter;
 use super::renderer::{FrameParams, GpuRenderer};
 
 impl GpuRenderer {
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "Flat per-cell rendering loop; further extraction would just scatter sequential logic")]
     pub(super) fn build_grid_instances(
         &mut self,
         bg: &mut InstanceWriter,
@@ -130,80 +130,11 @@ impl GpuRenderer {
                     }
                 }
 
-                // Underline decorations
-                if cell.flags.intersects(CellFlags::ANY_UNDERLINE) {
-                    let ul_color = if let Some(ul) = cell.underline_color() {
-                        vte_rgb_to_rgba(palette.resolve(ul, CellFlags::empty()))
-                    } else {
-                        fg_rgba
-                    };
-
-                    let underline_y = y0 + ch as f32 - 2.0;
-                    let draw_w = cell_w;
-
-                    if cell.flags.contains(CellFlags::UNDERCURL) {
-                        // Approximate undercurl with small rectangles at wave positions
-                        let steps = draw_w as usize;
-                        for dx in 0..steps {
-                            let phase = (dx as f32 / draw_w) * std::f32::consts::TAU;
-                            let offset = (phase.sin() * 2.0).round();
-                            bg.push_rect(x0 + dx as f32, underline_y + offset, 1.0, 1.0, ul_color);
-                        }
-                    } else if cell.flags.contains(CellFlags::DOUBLE_UNDERLINE) {
-                        bg.push_rect(x0, underline_y, draw_w, 1.0, ul_color);
-                        bg.push_rect(x0, underline_y - 2.0, draw_w, 1.0, ul_color);
-                    } else if cell.flags.contains(CellFlags::DOTTED_UNDERLINE) {
-                        // Dotted: every other pixel
-                        let steps = draw_w as usize;
-                        for dx in (0..steps).step_by(2) {
-                            bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, ul_color);
-                        }
-                    } else if cell.flags.contains(CellFlags::DASHED_UNDERLINE) {
-                        // Dashed: 3px on, 2px off
-                        let steps = draw_w as usize;
-                        for dx in 0..steps {
-                            if dx % 5 < 3 {
-                                bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, ul_color);
-                            }
-                        }
-                    } else if cell.flags.contains(CellFlags::UNDERLINE) {
-                        bg.push_rect(x0, underline_y, draw_w, 1.0, ul_color);
-                    } else {
-                        // No underline decoration
-                    }
-                }
-
-                // Hyperlink underline (only when cell doesn't already have an underline)
-                if cell.hyperlink().is_some() && !cell.flags.intersects(CellFlags::ANY_UNDERLINE) {
-                    let underline_y = y0 + ch as f32 - 2.0;
-                    let is_hovered = params.hover_hyperlink.is_some_and(|hover_uri| {
-                        cell.hyperlink().is_some_and(|h| h.uri == hover_uri)
-                    });
-                    if is_hovered {
-                        // Solid underline on hover
-                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
-                    } else {
-                        // Dotted underline (every other pixel)
-                        let steps = cell_w as usize;
-                        for dx in (0..steps).step_by(2) {
-                            bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, fg_rgba);
-                        }
-                    }
-                }
-
-                // Implicit URL underline (when hovered via Ctrl, no OSC 8, no explicit underline)
-                if let Some(segments) = params.hover_url_range {
-                    let in_url = segments
-                        .iter()
-                        .any(|&(r, sc, ec)| abs_row == r && col >= sc && col <= ec);
-                    if in_url
-                        && cell.hyperlink().is_none()
-                        && !cell.flags.intersects(CellFlags::ANY_UNDERLINE)
-                    {
-                        let underline_y = y0 + ch as f32 - 2.0;
-                        bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
-                    }
-                }
+                // Underline and hyperlink decorations
+                draw_underlines(
+                    bg, cell, x0, y0, ch, cell_w, fg_rgba,
+                    palette, params, abs_row, col,
+                );
 
                 // Strikethrough
                 if cell.flags.contains(CellFlags::STRIKEOUT) {
@@ -303,10 +234,95 @@ impl GpuRenderer {
     }
 }
 
+/// Draw a dotted underline: 1px rectangles every other pixel.
+fn draw_dotted_line(bg: &mut InstanceWriter, x: f32, y: f32, w: f32, color: [f32; 4]) {
+    let steps = w as usize;
+    for dx in (0..steps).step_by(2) {
+        bg.push_rect(x + dx as f32, y, 1.0, 1.0, color);
+    }
+}
+
+/// Draw all underline decorations for a single cell: VTE underline styles,
+/// OSC 8 hyperlink underlines, and implicit URL underlines.
+#[expect(clippy::too_many_arguments, reason = "Cell decoration requires full cell context")]
+fn draw_underlines(
+    bg: &mut InstanceWriter,
+    cell: &crate::cell::Cell,
+    x0: f32,
+    y0: f32,
+    ch: usize,
+    cell_w: f32,
+    fg_rgba: [f32; 4],
+    palette: &crate::palette::Palette,
+    params: &FrameParams<'_>,
+    abs_row: usize,
+    col: usize,
+) {
+    let underline_y = y0 + ch as f32 - 2.0;
+
+    // VTE underline decorations (UNDERLINE, DOUBLE, DOTTED, DASHED, UNDERCURL)
+    if cell.flags.intersects(CellFlags::ANY_UNDERLINE) {
+        let ul_color = if let Some(ul) = cell.underline_color() {
+            vte_rgb_to_rgba(palette.resolve(ul, CellFlags::empty()))
+        } else {
+            fg_rgba
+        };
+
+        if cell.flags.contains(CellFlags::UNDERCURL) {
+            let steps = cell_w as usize;
+            for dx in 0..steps {
+                let phase = (dx as f32 / cell_w) * std::f32::consts::TAU;
+                let offset = (phase.sin() * 2.0).round();
+                bg.push_rect(x0 + dx as f32, underline_y + offset, 1.0, 1.0, ul_color);
+            }
+        } else if cell.flags.contains(CellFlags::DOUBLE_UNDERLINE) {
+            bg.push_rect(x0, underline_y, cell_w, 1.0, ul_color);
+            bg.push_rect(x0, underline_y - 2.0, cell_w, 1.0, ul_color);
+        } else if cell.flags.contains(CellFlags::DOTTED_UNDERLINE) {
+            draw_dotted_line(bg, x0, underline_y, cell_w, ul_color);
+        } else if cell.flags.contains(CellFlags::DASHED_UNDERLINE) {
+            let steps = cell_w as usize;
+            for dx in 0..steps {
+                if dx % 5 < 3 {
+                    bg.push_rect(x0 + dx as f32, underline_y, 1.0, 1.0, ul_color);
+                }
+            }
+        } else if cell.flags.contains(CellFlags::UNDERLINE) {
+            bg.push_rect(x0, underline_y, cell_w, 1.0, ul_color);
+        } else {
+            // No matching underline flag (shouldn't happen with ANY_UNDERLINE guard).
+        }
+        return; // VTE underline takes precedence — skip hyperlink/URL underlines.
+    }
+
+    // OSC 8 hyperlink underline
+    if cell.hyperlink().is_some() {
+        let is_hovered = params.hover_hyperlink.is_some_and(|hover_uri| {
+            cell.hyperlink().is_some_and(|h| h.uri == hover_uri)
+        });
+        if is_hovered {
+            bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
+        } else {
+            draw_dotted_line(bg, x0, underline_y, cell_w, fg_rgba);
+        }
+        return; // Explicit hyperlink takes precedence over implicit URL.
+    }
+
+    // Implicit URL underline (Ctrl+hover detected URL, no OSC 8)
+    if let Some(segments) = params.hover_url_range {
+        let in_url = segments
+            .iter()
+            .any(|&(r, sc, ec)| abs_row == r && col >= sc && col <= ec);
+        if in_url {
+            bg.push_rect(x0, underline_y, cell_w, 1.0, fg_rgba);
+        }
+    }
+}
+
 /// Draw a Unicode block element (U+2580-U+259F) as pixel-perfect rectangles.
 /// Returns `true` if the character was handled, `false` to fall through to the
 /// normal glyph path.
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
+#[expect(clippy::many_single_char_names, reason = "Geometric drawing with standard x/y/w/h/c names")]
 fn draw_block_char(
     c: char,
     x: f32,
@@ -318,173 +334,79 @@ fn draw_block_char(
 ) -> bool {
     match c {
         // Upper half block
-        '\u{2580}' => {
-            bg.push_rect(x, y, w, (h / 2.0).round(), fg);
-        }
-        // Lower 1/8
-        '\u{2581}' => {
-            let bh = (h / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower 1/4
-        '\u{2582}' => {
-            let bh = (h / 4.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower 3/8
-        '\u{2583}' => {
-            let bh = (h * 3.0 / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower half
-        '\u{2584}' => {
-            let bh = (h / 2.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower 5/8
-        '\u{2585}' => {
-            let bh = (h * 5.0 / 8.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower 3/4
-        '\u{2586}' => {
-            let bh = (h * 3.0 / 4.0).round();
-            bg.push_rect(x, y + h - bh, w, bh, fg);
-        }
-        // Lower 7/8
-        '\u{2587}' => {
-            let bh = (h * 7.0 / 8.0).round();
+        '\u{2580}' => bg.push_rect(x, y, w, (h / 2.0).round(), fg),
+        // Lower N/8 blocks (U+2581-U+2587)
+        '\u{2581}'..='\u{2587}' => {
+            let eighths = (c as u32 - 0x2580) as f32;
+            let bh = (h * eighths / 8.0).round();
             bg.push_rect(x, y + h - bh, w, bh, fg);
         }
         // Full block
-        '\u{2588}' => {
-            bg.push_rect(x, y, w, h, fg);
-        }
-        // Left 7/8
-        '\u{2589}' => {
-            bg.push_rect(x, y, (w * 7.0 / 8.0).round(), h, fg);
-        }
-        // Left 3/4
-        '\u{258A}' => {
-            bg.push_rect(x, y, (w * 3.0 / 4.0).round(), h, fg);
-        }
-        // Left 5/8
-        '\u{258B}' => {
-            bg.push_rect(x, y, (w * 5.0 / 8.0).round(), h, fg);
-        }
-        // Left half
-        '\u{258C}' => {
-            bg.push_rect(x, y, (w / 2.0).round(), h, fg);
-        }
-        // Left 3/8
-        '\u{258D}' => {
-            bg.push_rect(x, y, (w * 3.0 / 8.0).round(), h, fg);
-        }
-        // Left 1/4
-        '\u{258E}' => {
-            bg.push_rect(x, y, (w / 4.0).round(), h, fg);
-        }
-        // Left 1/8
-        '\u{258F}' => {
-            bg.push_rect(x, y, (w / 8.0).round(), h, fg);
+        '\u{2588}' => bg.push_rect(x, y, w, h, fg),
+        // Left N/8 blocks (U+2589-U+258F): 7/8 down to 1/8
+        '\u{2589}'..='\u{258F}' => {
+            let eighths = (0x2590 - c as u32) as f32;
+            bg.push_rect(x, y, (w * eighths / 8.0).round(), h, fg);
         }
         // Right half
         '\u{2590}' => {
             let hw = (w / 2.0).round();
             bg.push_rect(x + w - hw, y, hw, h, fg);
         }
-        // Light shade (25%)
-        '\u{2591}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.25];
-            bg.push_rect(x, y, w, h, shade);
-        }
-        // Medium shade (50%)
-        '\u{2592}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.5];
-            bg.push_rect(x, y, w, h, shade);
-        }
-        // Dark shade (75%)
-        '\u{2593}' => {
-            let shade = [fg[0], fg[1], fg[2], fg[3] * 0.75];
-            bg.push_rect(x, y, w, h, shade);
+        // Shade blocks (25%, 50%, 75%)
+        '\u{2591}'..='\u{2593}' => {
+            let alpha = (c as u32 - 0x2590) as f32 * 0.25;
+            bg.push_rect(x, y, w, h, [fg[0], fg[1], fg[2], fg[3] * alpha]);
         }
         // Upper 1/8
-        '\u{2594}' => {
-            bg.push_rect(x, y, w, (h / 8.0).round(), fg);
-        }
+        '\u{2594}' => bg.push_rect(x, y, w, (h / 8.0).round(), fg),
         // Right 1/8
         '\u{2595}' => {
             let bw = (w / 8.0).round();
             bg.push_rect(x + w - bw, y, bw, h, fg);
         }
         // Quadrant block elements (U+2596-U+259F)
-        '\u{2596}' => {
-            // Quadrant lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y + hh, hw, h - hh, fg);
-        }
-        '\u{2597}' => {
-            // Quadrant lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg);
-        }
-        '\u{2598}' => {
-            // Quadrant upper left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg);
-        }
-        '\u{2599}' => {
-            // Quadrant upper left + lower left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg); // TL
-            bg.push_rect(x, y + hh, w, h - hh, fg); // full bottom
-        }
-        '\u{259A}' => {
-            // Quadrant upper left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, hw, hh, fg); // TL
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg); // BR
-        }
-        '\u{259B}' => {
-            // Quadrant upper left + upper right + lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, w, hh, fg); // full top
-            bg.push_rect(x, y + hh, hw, h - hh, fg); // BL
-        }
-        '\u{259C}' => {
-            // Quadrant upper left + upper right + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x, y, w, hh, fg); // full top
-            bg.push_rect(x + hw, y + hh, w - hw, h - hh, fg); // BR
-        }
-        '\u{259D}' => {
-            // Quadrant upper right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg);
-        }
-        '\u{259E}' => {
-            // Quadrant upper right + lower left
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg); // TR
-            bg.push_rect(x, y + hh, hw, h - hh, fg); // BL
-        }
-        '\u{259F}' => {
-            // Quadrant upper right + lower left + lower right
-            let hw = (w / 2.0).round();
-            let hh = (h / 2.0).round();
-            bg.push_rect(x + hw, y, w - hw, hh, fg); // TR
-            bg.push_rect(x, y + hh, w, h - hh, fg); // full bottom
-        }
+        '\u{2596}'..='\u{259F}' => draw_quadrant(c, x, y, w, h, fg, bg),
         _ => return false,
     }
     true
+}
+
+/// Draw a quadrant block element (U+2596-U+259F) from a bitmask.
+///
+/// Each quadrant char maps to a 4-bit mask: TL, TR, BL, BR.
+#[expect(clippy::many_single_char_names, reason = "Geometric drawing with standard x/y/w/h/c names")]
+fn draw_quadrant(
+    c: char,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    fg: [f32; 4],
+    bg: &mut InstanceWriter,
+) {
+    // Bitmask per quadrant: bit 3=TL, bit 2=TR, bit 1=BL, bit 0=BR
+    // Index 0 = U+2596, index 9 = U+259F
+    const QUADRANT_MASKS: [u8; 10] = [
+        0b0010, // U+2596: lower left
+        0b0001, // U+2597: lower right
+        0b1000, // U+2598: upper left
+        0b1011, // U+2599: upper left + lower left + lower right
+        0b1001, // U+259A: upper left + lower right
+        0b1110, // U+259B: upper left + upper right + lower left
+        0b1101, // U+259C: upper left + upper right + lower right
+        0b0100, // U+259D: upper right
+        0b0110, // U+259E: upper right + lower left
+        0b0111, // U+259F: upper right + lower left + lower right
+    ];
+
+    let idx = (c as u32 - 0x2596) as usize;
+    let mask = QUADRANT_MASKS[idx];
+    let hw = (w / 2.0).round();
+    let hh = (h / 2.0).round();
+
+    if mask & 0b1000 != 0 { bg.push_rect(x,      y,      hw,      hh,      fg); } // TL
+    if mask & 0b0100 != 0 { bg.push_rect(x + hw,  y,      w - hw,  hh,      fg); } // TR
+    if mask & 0b0010 != 0 { bg.push_rect(x,       y + hh, hw,      h - hh,  fg); } // BL
+    if mask & 0b0001 != 0 { bg.push_rect(x + hw,  y + hh, w - hw,  h - hh,  fg); } // BR
 }

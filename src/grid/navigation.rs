@@ -5,6 +5,7 @@ use vte::ansi::TabulationClearMode;
 use crate::cell::CellFlags;
 
 use super::Grid;
+use super::row::Row;
 
 /// How to detect that a row continues onto the next row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,9 +60,9 @@ impl Grid {
     }
 
     pub fn restore_cursor(&mut self) {
-        if let Some(saved) = self.saved_cursor.clone() {
-            self.cursor = saved;
-            // Clamp to current dimensions
+        if let Some(saved) = &self.saved_cursor {
+            self.cursor = saved.clone();
+            // Clamp to current dimensions.
             self.cursor.row = self.cursor.row.min(self.lines.saturating_sub(1));
             self.cursor.col = self.cursor.col.min(self.cols.saturating_sub(1));
         }
@@ -73,14 +74,6 @@ impl Grid {
             self.scroll_top = top;
             self.scroll_bottom = bottom;
         }
-    }
-
-    pub fn scroll_top(&self) -> usize {
-        self.scroll_top
-    }
-
-    pub fn scroll_bottom(&self) -> usize {
-        self.scroll_bottom
     }
 
     pub fn set_tab_stop(&mut self) {
@@ -159,7 +152,7 @@ impl Grid {
 }
 
 /// Check whether a row's content continues onto the next row.
-fn row_continues(row: &super::row::Row, detection: WrapDetection) -> bool {
+fn row_continues(row: &Row, detection: WrapDetection) -> bool {
     let cols = row.len();
     if cols == 0 {
         return false;

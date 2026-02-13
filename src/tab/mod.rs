@@ -3,7 +3,7 @@
 mod interceptor;
 mod types;
 
-pub use types::{CharsetState, Notification, PromptState, TabId, TermEvent};
+pub use types::{CharsetState, Notification, PromptState, SpawnConfig, TabId, TermEvent};
 
 use std::borrow::Cow;
 use std::io::{Read, Write};
@@ -68,29 +68,19 @@ pub struct Tab {
 }
 
 impl Tab {
-    pub fn spawn(
-        id: TabId,
-        cols: usize,
-        rows: usize,
-        proxy: EventLoopProxy<TermEvent>,
-        shell: Option<&str>,
-        max_scrollback: usize,
-        initial_cursor_shape: CursorShape,
-        integration_dir: Option<&Path>,
-        cwd: Option<&str>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        log(&format!("Tab::spawn start for {:?}", id));
+    pub fn spawn(cfg: SpawnConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        log(&format!("Tab::spawn start for {:?}", cfg.id));
 
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system.openpty(portable_pty::PtySize {
-            rows: rows as u16,
-            cols: cols as u16,
+            rows: cfg.rows as u16,
+            cols: cfg.cols as u16,
             pixel_width: 0,
             pixel_height: 0,
         })?;
         log("  pty opened");
 
-        let shell_line = shell.map_or_else(Self::default_shell, String::from);
+        let shell_line = cfg.shell.unwrap_or_else(Self::default_shell);
         let mut parts = shell_line.split_whitespace();
         let shell_program = parts.next().unwrap_or("sh").to_owned();
         let shell_args: Vec<&str> = parts.collect();
@@ -99,22 +89,28 @@ impl Tab {
             cmd.arg(arg);
         }
 
-        let detected_shell =
-            integration_dir.and_then(|_| shell_integration::detect_shell(&shell_program));
+        let detected_shell = cfg
+            .integration_dir
+            .as_ref()
+            .and_then(|_| shell_integration::detect_shell(&shell_program));
 
         // For WSL, CWD is passed via --cd (Linux paths don't work as Windows CWD).
         // For native shells, use cmd.cwd().
         let is_wsl = detected_shell == Some(shell_integration::Shell::Wsl);
-        if let Some(dir) = cwd {
+        if let Some(ref dir) = cfg.cwd {
             if !is_wsl {
                 cmd.cwd(dir);
             }
         }
 
-        if let Some(integ_dir) = integration_dir {
+        if let Some(ref integ_dir) = cfg.integration_dir {
             if let Some(shell_type) = detected_shell {
-                let extra_arg =
-                    shell_integration::setup_injection(&mut cmd, shell_type, integ_dir, cwd);
+                let extra_arg = shell_integration::setup_injection(
+                    &mut cmd,
+                    shell_type,
+                    integ_dir,
+                    cfg.cwd.as_deref(),
+                );
                 if let Some(arg) = extra_arg {
                     cmd.arg(arg);
                 }
@@ -125,96 +121,28 @@ impl Tab {
         log(&format!("  {} spawned", shell_program));
         drop(pair.slave);
 
-        let mut reader = pair.master.try_clone_reader()?;
+        let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         log("  reader/writer ready");
 
-        // On Windows, clone proxy for the child waiter thread (see below).
+        spawn_reader_thread(cfg.id, reader, cfg.proxy.clone());
         #[cfg(target_os = "windows")]
-        let wait_proxy = proxy.clone();
+        spawn_child_waiter(cfg.id, &*child, cfg.proxy);
 
-        let tab_id = id;
-        thread::spawn(move || {
-            log(&format!("reader thread started for tab {:?}", tab_id));
-            let mut buf = vec![0u8; 65536];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        log(&format!("reader: eof for tab {:?}", tab_id));
-                        let _ = proxy.send_event(TermEvent::PtyExited(tab_id));
-                        break;
-                    }
-                    Err(e) => {
-                        log(&format!("reader error for tab {:?}: {e}", tab_id));
-                        let _ = proxy.send_event(TermEvent::PtyExited(tab_id));
-                        break;
-                    }
-                    Ok(n) => {
-                        let _ = proxy.send_event(TermEvent::PtyOutput(tab_id, buf[..n].to_vec()));
-                    }
-                }
-            }
-        });
+        let initial_title = derive_initial_title(cfg.id, &shell_args, is_wsl);
 
-        // Windows/ConPTY doesn't reliably deliver EOF to the reader when
-        // the child exits, so we wait on the process handle directly
-        // (like Alacritty, WezTerm, and Ghostty all do).
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(pid) = child.process_id() {
-                let wait_id = id;
-                thread::spawn(move || {
-                    use windows_sys::Win32::Foundation::CloseHandle;
-                    use windows_sys::Win32::System::Threading::{
-                        INFINITE, OpenProcess, WaitForSingleObject,
-                    };
-                    const SYNCHRONIZE: u32 = 0x0010_0000;
-
-                    log(&format!(
-                        "child waiter thread started for tab {:?} (pid {})",
-                        wait_id, pid
-                    ));
-                    #[allow(unsafe_code)]
-                    let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
-                    if !handle.is_null() {
-                        #[allow(unsafe_code)]
-                        unsafe {
-                            WaitForSingleObject(handle, INFINITE)
-                        };
-                        #[allow(unsafe_code)]
-                        unsafe {
-                            CloseHandle(handle)
-                        };
-                        log(&format!("child exited (waiter) for tab {:?}", wait_id));
-                        let _ = wait_proxy.send_event(TermEvent::PtyExited(wait_id));
-                    }
-                });
-            }
-        }
-
-        // Derive a good initial title. For WSL, use the distro name.
-        let initial_title = if is_wsl {
-            shell_args
-                .iter()
-                .zip(shell_args.iter().skip(1))
-                .find(|&(&flag, _)| flag == "-d" || flag == "--distribution")
-                .map_or_else(|| "WSL".to_owned(), |(_, &name)| name.to_owned())
-        } else {
-            format!("Tab {}", id.0)
-        };
-
-        log(&format!("Tab::spawn done for {:?}", id));
+        log(&format!("Tab::spawn done for {:?}", cfg.id));
         Ok(Self {
-            id,
-            primary_grid: Grid::with_max_scrollback(cols, rows, max_scrollback),
-            alt_grid: Grid::new(cols, rows), // alt screen has no scrollback
+            id: cfg.id,
+            primary_grid: Grid::with_max_scrollback(cfg.cols, cfg.rows, cfg.max_scrollback),
+            alt_grid: Grid::new(cfg.cols, cfg.rows),
             active_is_alt: false,
             pty_writer: Some(writer),
             processor: vte::ansi::Processor::new(),
             title: initial_title,
             palette: Palette::new(),
             mode: TermMode::default(),
-            cursor_shape: initial_cursor_shape,
+            cursor_shape: cfg.cursor_shape,
             charset: CharsetState::default(),
             title_stack: Vec::new(),
             cwd: None,
@@ -515,6 +443,87 @@ impl Tab {
             return Cow::Owned(short_path(cwd));
         }
         Cow::Borrowed(&self.title)
+    }
+}
+
+/// Spawn the PTY reader thread that forwards output to the event loop.
+fn spawn_reader_thread(
+    id: TabId,
+    mut reader: Box<dyn Read + Send>,
+    proxy: EventLoopProxy<TermEvent>,
+) {
+    thread::spawn(move || {
+        log(&format!("reader thread started for tab {:?}", id));
+        let mut buf = vec![0u8; 65536];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    log(&format!("reader: eof for tab {:?}", id));
+                    let _ = proxy.send_event(TermEvent::PtyExited(id));
+                    break;
+                }
+                Err(e) => {
+                    log(&format!("reader error for tab {:?}: {e}", id));
+                    let _ = proxy.send_event(TermEvent::PtyExited(id));
+                    break;
+                }
+                Ok(n) => {
+                    let _ = proxy.send_event(TermEvent::PtyOutput(id, buf[..n].to_vec()));
+                }
+            }
+        }
+    });
+}
+
+/// Spawn a thread that waits for the child process to exit.
+///
+/// Windows/ConPTY does not reliably deliver EOF to the reader when the child
+/// exits, so we wait on the process handle directly (like Alacritty, `WezTerm`,
+/// and Ghostty all do).
+#[cfg(target_os = "windows")]
+fn spawn_child_waiter(
+    id: TabId,
+    child: &dyn portable_pty::Child,
+    proxy: EventLoopProxy<TermEvent>,
+) {
+    if let Some(pid) = child.process_id() {
+        thread::spawn(move || {
+            use windows_sys::Win32::Foundation::CloseHandle;
+            use windows_sys::Win32::System::Threading::{INFINITE, OpenProcess, WaitForSingleObject};
+            const SYNCHRONIZE: u32 = 0x0010_0000;
+
+            log(&format!(
+                "child waiter thread started for tab {:?} (pid {})",
+                id, pid
+            ));
+            #[allow(unsafe_code)]
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, pid) };
+            if !handle.is_null() {
+                #[allow(unsafe_code)]
+                unsafe {
+                    WaitForSingleObject(handle, INFINITE)
+                };
+                #[allow(unsafe_code)]
+                unsafe {
+                    CloseHandle(handle)
+                };
+                log(&format!("child exited (waiter) for tab {:?}", id));
+                let _ = proxy.send_event(TermEvent::PtyExited(id));
+            }
+        });
+    }
+}
+
+/// Derive a good initial title. For WSL, use the distro name.
+fn derive_initial_title(id: TabId, shell_args: &[&str], is_wsl: bool) -> String {
+    if is_wsl {
+        shell_args
+            .iter()
+            .zip(shell_args.iter().skip(1))
+            .find(|&(&flag, _)| flag == "-d" || flag == "--distribution")
+            .map_or_else(|| "WSL".to_owned(), |(_, &name)| name.to_owned())
+    } else {
+        format!("Tab {}", id.0)
     }
 }
 

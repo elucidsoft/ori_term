@@ -24,11 +24,11 @@ use super::atlas::GlyphAtlas;
 use super::color_util::u32_to_rgba;
 use super::color_util::{ortho_projection, vte_rgb_to_rgba, TabBarColors};
 use super::instance_writer::{reuse_or_create_buffer, InstanceWriter};
-use super::pipeline::{self, INSTANCE_STRIDE};
+use super::pipeline;
 use super::state::GpuState;
 
 /// Frame data needed to build a frame.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(clippy::struct_excessive_bools, reason = "Frame params aggregate independent per-frame flags")]
 pub struct FrameParams<'a> {
     pub width: u32,
     pub height: u32,
@@ -155,20 +155,8 @@ impl GpuRenderer {
         });
 
         // Atlas bind group
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas_bind_group"),
-            layout: &atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(atlas.view()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        let atlas_bind_group =
+            Self::create_atlas_bind_group(device, &atlas_layout, atlas.view(), &sampler);
 
         Self {
             bg_pipeline,
@@ -198,22 +186,35 @@ impl GpuRenderer {
     ) {
         self.atlas = GlyphAtlas::new(&gpu.device);
         self.cached_frame = None;
+        self.atlas_bind_group = Self::create_atlas_bind_group(
+            &gpu.device,
+            &self.atlas_layout,
+            self.atlas.view(),
+            &self.sampler,
+        );
+    }
 
-        // Recreate atlas bind group with new texture view
-        self.atlas_bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    /// Create the atlas bind group (texture view + sampler).
+    fn create_atlas_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas_bind_group"),
-            layout: &self.atlas_layout,
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(self.atlas.view()),
+                    resource: wgpu::BindingResource::TextureView(view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
-        });
+        })
     }
 
     /// Render a single clear frame to eliminate the white flash on startup.
@@ -264,7 +265,6 @@ impl GpuRenderer {
     }
 
     /// Render a full frame to the given surface (normal swapchain path).
-    #[allow(clippy::too_many_lines)]
     pub fn draw_frame(
         &mut self,
         gpu: &GpuState,
@@ -311,7 +311,7 @@ impl GpuRenderer {
     /// Build all instance data for a frame and cache the `PreparedFrame`.
     /// When nothing changed (no grid or tab bar dirty flags), the cached
     /// frame with its GPU buffers is reused — zero allocation, zero upload.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "Frame preparation has two distinct paths (cached overlay vs full rebuild) that share state")]
     fn prepare_frame(
         &mut self,
         gpu: &GpuState,
@@ -638,25 +638,10 @@ impl GpuRenderer {
             return;
         }
 
-        let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("simple_bg"),
-            size: (bg_bytes.len() as u64).max(INSTANCE_STRIDE),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !bg_bytes.is_empty() {
-            gpu.queue.write_buffer(&bg_buffer, 0, bg_bytes);
-        }
-
-        let fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("simple_fg"),
-            size: (fg_bytes.len() as u64).max(INSTANCE_STRIDE),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !fg_bytes.is_empty() {
-            gpu.queue.write_buffer(&fg_buffer, 0, fg_bytes);
-        }
+        let bg_buffer =
+            reuse_or_create_buffer(&gpu.device, &gpu.queue, None, bg_bytes, "simple_bg");
+        let fg_buffer =
+            reuse_or_create_buffer(&gpu.device, &gpu.queue, None, fg_bytes, "simple_fg");
 
         let frame = match surface.get_current_texture() {
             Ok(f) => f,

@@ -42,55 +42,103 @@ impl App {
         (cols.max(2), rows.max(1))
     }
 
+    /// Rebuild cached tab bar data (titles + bell badges) for the given window.
+    fn rebuild_tab_bar_cache(&mut self, window_id: WindowId, active_tab_id: Option<TabId>) {
+        let (new_info, new_badges) = if let Some(tw) = self.windows.get(&window_id) {
+            let info: Vec<(TabId, String)> = tw
+                .tabs
+                .iter()
+                .map(|id| {
+                    let title = self
+                        .tabs
+                        .get(id)
+                        .map_or_else(|| "?".to_string(), |t| t.effective_title().into_owned());
+                    (*id, title)
+                })
+                .collect();
+            let badges: Vec<bool> = tw
+                .tabs
+                .iter()
+                .map(|id| {
+                    self.tabs.get(id).is_some_and(|t| t.has_bell_badge)
+                        && Some(*id) != active_tab_id
+                })
+                .collect();
+            (info, badges)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        self.cached_tab_info = new_info;
+        self.cached_bell_badges = new_badges;
+    }
+
+    /// Update Windows `WM_NCHITTEST` rects so the OS knows which areas are
+    /// interactive (`HTCLIENT`) vs draggable (`HTCAPTION`).
+    #[cfg(target_os = "windows")]
+    fn update_snap_hit_rects(&self, window_id: WindowId, bar_w: usize, tab_count: usize) {
+        let Some(tw) = self.windows.get(&window_id) else {
+            return;
+        };
+        let sf = self.scale_factor;
+        let twl = self.tab_width_lock_for(window_id);
+        let layout = TabBarLayout::compute(tab_count, bar_w, sf, twl);
+        let h = self.scale_px(TAB_BAR_HEIGHT) as i32;
+        let left_margin = self.scale_px(TAB_LEFT_MARGIN);
+        let mut rects = Vec::new();
+        // Individual tab rects
+        for i in 0..layout.tab_count {
+            let left = (left_margin + i * layout.tab_width) as i32;
+            let right = left + layout.tab_width as i32;
+            rects.push([left, 0, right, h]);
+        }
+        // New tab button
+        let new_tab_w = self.scale_px(NEW_TAB_BUTTON_WIDTH);
+        let tabs_end = left_margin + layout.tab_count * layout.tab_width;
+        rects.push([tabs_end as i32, 0, (tabs_end + new_tab_w) as i32, h]);
+        // Dropdown button
+        let dropdown_w = self.scale_px(DROPDOWN_BUTTON_WIDTH);
+        let dd_start = tabs_end + new_tab_w;
+        rects.push([dd_start as i32, 0, (dd_start + dropdown_w) as i32, h]);
+        // Window controls
+        let controls_w = self.scale_px(CONTROLS_ZONE_WIDTH);
+        let controls_start = bar_w.saturating_sub(controls_w) as i32;
+        rects.push([controls_start, 0, bar_w as i32, h]);
+        crate::platform_windows::set_client_rects(&tw.window, rects);
+    }
+
+    /// Compute cursor blink visibility from elapsed time since last reset.
+    fn cursor_blink_visible(&self) -> bool {
+        if self.config.terminal.cursor_blink {
+            let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
+            let interval = self.config.terminal.cursor_blink_interval_ms.max(1);
+            (elapsed_ms / interval).is_multiple_of(2)
+        } else {
+            true
+        }
+    }
+
     /// Renders a single window, building frame params and dispatching to GPU renderer.
     pub(super) fn render_window(&mut self, window_id: WindowId) {
-        // Settings window has its own renderer path
         if self.is_settings_window(window_id) {
             self.render_settings_window(window_id);
             return;
         }
 
-        // Extract all info we need before borrowing mutably.
         let (phys, active_idx, active_tab_id, is_maximized) = {
             let tw = match self.windows.get(&window_id) {
                 Some(tw) => tw,
                 None => return,
             };
-            let phys = tw.window.inner_size();
-            let active_idx = tw.active_tab;
-            let active_tab_id = tw.active_tab_id();
-            let is_maximized = tw.is_maximized;
-            (phys, active_idx, active_tab_id, is_maximized)
+            (
+                tw.window.inner_size(),
+                tw.active_tab,
+                tw.active_tab_id(),
+                tw.is_maximized,
+            )
         };
 
-        // Only rebuild tab bar data (titles + bell badges) when dirty.
         if self.tab_bar_dirty {
-            let (new_info, new_badges) = if let Some(tw) = self.windows.get(&window_id) {
-                let info: Vec<(TabId, String)> = tw
-                    .tabs
-                    .iter()
-                    .map(|id| {
-                        let title = self
-                            .tabs
-                            .get(id)
-                            .map_or_else(|| "?".to_string(), |t| t.effective_title().into_owned());
-                        (*id, title)
-                    })
-                    .collect();
-                let badges: Vec<bool> = tw
-                    .tabs
-                    .iter()
-                    .map(|id| {
-                        self.tabs.get(id).is_some_and(|t| t.has_bell_badge)
-                            && Some(*id) != active_tab_id
-                    })
-                    .collect();
-                (info, badges)
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            self.cached_tab_info = new_info;
-            self.cached_bell_badges = new_badges;
+            self.rebuild_tab_bar_cache(window_id, active_tab_id);
         }
         let tab_info = &self.cached_tab_info;
         let bell_badges = &self.cached_bell_badges;
@@ -99,40 +147,8 @@ impl App {
             return;
         }
 
-        // Update snap hit-test rects so WM_NCHITTEST knows where interactive
-        // elements are (HTCLIENT). Everything else in the caption zone becomes
-        // HTCAPTION so the OS handles drag natively (avoids DPI oscillation).
         #[cfg(target_os = "windows")]
-        {
-            if let Some(tw) = self.windows.get(&window_id) {
-                let sf = self.scale_factor;
-                let bar_w = phys.width as usize;
-                let twl = self.tab_width_lock_for(window_id);
-                let layout = TabBarLayout::compute(tab_info.len(), bar_w, sf, twl);
-                let h = self.scale_px(TAB_BAR_HEIGHT) as i32;
-                let left_margin = self.scale_px(TAB_LEFT_MARGIN);
-                let mut rects = Vec::new();
-                // Individual tab rects
-                for i in 0..layout.tab_count {
-                    let left = (left_margin + i * layout.tab_width) as i32;
-                    let right = left + layout.tab_width as i32;
-                    rects.push([left, 0, right, h]);
-                }
-                // New tab button
-                let new_tab_w = self.scale_px(NEW_TAB_BUTTON_WIDTH);
-                let tabs_end = left_margin + layout.tab_count * layout.tab_width;
-                rects.push([tabs_end as i32, 0, (tabs_end + new_tab_w) as i32, h]);
-                // Dropdown button
-                let dropdown_w = self.scale_px(DROPDOWN_BUTTON_WIDTH);
-                let dd_start = tabs_end + new_tab_w;
-                rects.push([dd_start as i32, 0, (dd_start + dropdown_w) as i32, h]);
-                // Window controls
-                let controls_w = self.scale_px(CONTROLS_ZONE_WIDTH);
-                let controls_start = bar_w.saturating_sub(controls_w) as i32;
-                rects.push([controls_start, 0, bar_w as i32, h]);
-                crate::platform_windows::set_client_rects(&tw.window, rects);
-            }
-        }
+        self.update_snap_hit_rects(window_id, phys.width as usize, tab_info.len());
 
         let hover = self
             .hover_hit
@@ -140,8 +156,6 @@ impl App {
             .copied()
             .unwrap_or(TabBarHit::None);
 
-        // Drag visual: if this window has a dragged tab, pass its pixel X and
-        // the current animation offsets.
         let dragged_tab = self
             .drag_visual_x
             .filter(|(wid, _)| *wid == window_id)
@@ -159,8 +173,6 @@ impl App {
             .map_or(&[][..], |v| v.as_slice());
 
         let any_bell_badge = bell_badges.iter().any(|&b| b);
-
-        // Smooth sine pulse for bell badge animation (~0.5 Hz).
         let bell_phase = if any_bell_badge {
             let secs = self.last_anim_time.elapsed().as_secs_f32();
             (secs * std::f32::consts::TAU * 0.5).sin() * 0.5 + 0.5
@@ -168,16 +180,7 @@ impl App {
             0.0
         };
 
-        // Cursor blink: compute visibility based on elapsed time since last reset.
-        let cursor_visible = if self.config.terminal.cursor_blink {
-            let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
-            let interval = self.config.terminal.cursor_blink_interval_ms.max(1);
-            (elapsed_ms / interval).is_multiple_of(2)
-        } else {
-            true
-        };
-
-        // Damage tracking: compute dirty flags.
+        let cursor_visible = self.cursor_blink_visible();
         let cursor_visible_changed = cursor_visible != self.prev_cursor_visible;
         self.prev_cursor_visible = cursor_visible;
 
@@ -186,11 +189,8 @@ impl App {
             .is_some_and(|tab| tab.grid_dirty)
             || cursor_visible_changed;
         let tab_bar_dirty = self.tab_bar_dirty;
-
-        // Pre-compute before closure to avoid borrowing all of `self`.
         let twl = self.tab_width_lock_for(window_id);
 
-        // Build FrameParams — need the active tab's grid
         let frame_params = active_tab_id
             .and_then(|tab_id| self.tabs.get(&tab_id))
             .map(|tab| FrameParams {
@@ -255,7 +255,6 @@ impl App {
             &mut self.ui_glyphs,
         );
 
-        // Clear dirty flags after rendering.
         if let Some(tab_id) = active_tab_id {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.grid_dirty = false;

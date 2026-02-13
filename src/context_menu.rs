@@ -177,6 +177,18 @@ impl MenuOverlay {
         None
     }
 
+    /// Creates a new overlay with the given entries, position, and scale.
+    fn new(entries: Vec<MenuEntry>, position: (f32, f32), scale: f32) -> Self {
+        Self {
+            entries,
+            position,
+            hovered: None,
+            width: 0.0,
+            height: 0.0,
+            scale,
+        }
+    }
+
     /// Returns the action for the currently hovered item (consuming it).
     pub fn activate_hovered(&self) -> Option<ContextAction> {
         let idx = self.hovered?;
@@ -192,8 +204,8 @@ impl MenuOverlay {
 
 /// Build the tab right-click menu.
 pub fn build_tab_menu(position: (f32, f32), tab_index: usize, scale: f32) -> MenuOverlay {
-    MenuOverlay {
-        entries: vec![
+    MenuOverlay::new(
+        vec![
             MenuEntry::Item {
                 label: "Close Tab".into(),
                 action: ContextAction::CloseTab(tab_index),
@@ -208,26 +220,20 @@ pub fn build_tab_menu(position: (f32, f32), tab_index: usize, scale: f32) -> Men
             },
         ],
         position,
-        hovered: None,
-        width: 0.0,
-        height: 0.0,
         scale,
-    }
+    )
 }
 
 /// Build the tab bar right-click menu (empty area).
 pub fn build_tab_bar_menu(position: (f32, f32), scale: f32) -> MenuOverlay {
-    MenuOverlay {
-        entries: vec![MenuEntry::Item {
+    MenuOverlay::new(
+        vec![MenuEntry::Item {
             label: "New Tab".into(),
             action: ContextAction::NewTab,
         }],
         position,
-        hovered: None,
-        width: 0.0,
-        height: 0.0,
         scale,
-    }
+    )
 }
 
 /// Build the dropdown menu (settings + color scheme submenu).
@@ -248,12 +254,5 @@ pub fn build_dropdown_menu(position: (f32, f32), active_scheme: &str, scale: f32
         });
     }
 
-    MenuOverlay {
-        entries,
-        position,
-        hovered: None,
-        width: 0.0,
-        height: 0.0,
-        scale,
-    }
+    MenuOverlay::new(entries, position, scale)
 }

@@ -83,8 +83,10 @@ impl TermHandler<'_> {
     }
 
     pub(super) fn handle_pop_keyboard_modes(&mut self, to_pop: u16) {
-        let to_pop = (to_pop as usize).min(self.keyboard_mode_stack.len());
-        let new_len = self.keyboard_mode_stack.len() - to_pop;
+        let new_len = self
+            .keyboard_mode_stack
+            .len()
+            .saturating_sub(to_pop as usize);
         self.keyboard_mode_stack.truncate(new_len);
         self.apply_keyboard_mode();
     }

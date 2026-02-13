@@ -34,31 +34,23 @@ impl App {
 
     pub(super) fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
         let new_size = self.glyphs.size + delta * self.scale_factor as f32;
-        self.glyphs = self.glyphs.resize(new_size);
-        self.ui_glyphs = self.ui_glyphs.resize(new_size * UI_FONT_SCALE);
-        log(&format!(
-            "font resize: size={}, cell={}x{}",
-            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
-        ));
-        // Rebuild atlas for new font size
-        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
-        }
-        self.resize_all_tabs_in_window(window_id);
+        self.apply_font_size(new_size, "font resize", window_id);
     }
 
     pub(super) fn reset_font_size(&mut self, window_id: WindowId) {
-        let scaled_size = self.config.font.size * self.scale_factor as f32;
-        self.glyphs = self.glyphs.resize(scaled_size);
-        self.ui_glyphs = self.ui_glyphs.resize(scaled_size * UI_FONT_SCALE);
+        let new_size = self.config.font.size * self.scale_factor as f32;
+        self.apply_font_size(new_size, "font reset", window_id);
+    }
+
+    /// Resize fonts to `new_size`, rebuild the glyph atlas, and reflow all tabs.
+    fn apply_font_size(&mut self, new_size: f32, label: &str, window_id: WindowId) {
+        self.glyphs = self.glyphs.resize(new_size);
+        self.ui_glyphs = self.ui_glyphs.resize(new_size * UI_FONT_SCALE);
         log(&format!(
-            "font reset: size={}, cell={}x{}",
+            "{label}: size={}, cell={}x{}",
             self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
         ));
-        // Rebuild atlas for new font size
-        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
-        }
+        self.rebuild_atlas();
         self.resize_all_tabs_in_window(window_id);
     }
 
@@ -341,9 +333,7 @@ impl App {
         if (self.glyphs.size - expected_size).abs() > 0.1 {
             self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
             self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
-            if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-                renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
-            }
+            self.rebuild_atlas();
         }
 
         let (cols, rows) = self.grid_dims_for_size(width, height);

@@ -64,35 +64,7 @@ impl WindowState {
 
     /// Saves window state to `state.toml`. Creates the config directory if needed.
     pub fn save(&self) {
-        let dir = config_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            log(&format!(
-                "state: failed to create dir {}: {e}",
-                dir.display()
-            ));
-            return;
-        }
-        let path = state_path();
-        match toml::to_string_pretty(self) {
-            Ok(data) => {
-                if let Err(e) = std::fs::write(&path, data) {
-                    log(&format!("state: failed to write {}: {e}", path.display()));
-                }
-            }
-            Err(e) => {
-                log(&format!("state: serialize error: {e}"));
-            }
-        }
-    }
-}
-
-/// Parses a cursor style string to `CursorShape`.
-/// Accepts "block", "bar"/"beam", "underline". Defaults to Block.
-pub fn parse_cursor_style(s: &str) -> CursorShape {
-    match s.to_ascii_lowercase().as_str() {
-        "bar" | "beam" => CursorShape::Beam,
-        "underline" => CursorShape::Underline,
-        _ => CursorShape::Block,
+        save_toml(self, &state_path(), "state");
     }
 }
 
@@ -135,25 +107,39 @@ impl Config {
 
     /// Saves config to the default path. Creates the directory if needed.
     pub fn save(&self) {
-        let dir = config_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        save_toml(self, &config_path(), "config");
+    }
+}
+
+/// Parses a cursor style string to `CursorShape`.
+/// Accepts "block", "bar"/"beam", "underline". Defaults to Block.
+pub fn parse_cursor_style(s: &str) -> CursorShape {
+    match s.to_ascii_lowercase().as_str() {
+        "bar" | "beam" => CursorShape::Beam,
+        "underline" => CursorShape::Underline,
+        _ => CursorShape::Block,
+    }
+}
+
+/// Serialize a value to TOML and write it to `path`, creating the parent directory if needed.
+fn save_toml(value: &impl serde::Serialize, path: &std::path::Path, label: &str) {
+    if let Some(dir) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
             log(&format!(
-                "config: failed to create dir {}: {e}",
+                "{label}: failed to create dir {}: {e}",
                 dir.display()
             ));
             return;
         }
-
-        let path = config_path();
-        match toml::to_string_pretty(self) {
-            Ok(data) => {
-                if let Err(e) = std::fs::write(&path, data) {
-                    log(&format!("config: failed to write {}: {e}", path.display()));
-                }
+    }
+    match toml::to_string_pretty(value) {
+        Ok(data) => {
+            if let Err(e) = std::fs::write(path, data) {
+                log(&format!("{label}: failed to write {}: {e}", path.display()));
             }
-            Err(e) => {
-                log(&format!("config: serialize error: {e}"));
-            }
+        }
+        Err(e) => {
+            log(&format!("{label}: serialize error: {e}"));
         }
     }
 }

@@ -7,15 +7,13 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
-use crate::clipboard;
 use crate::context_menu;
 use crate::drag::{DragPhase, DragState};
-use crate::selection::{self, Selection};
+use crate::selection::Selection;
 use crate::tab_bar::{
     NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TabBarHit, TabBarLayout,
 };
 use crate::term_mode::TermMode;
-use crate::window::TermWindow;
 
 use super::{App, DOUBLE_CLICK_MS, SCROLL_LINES};
 
@@ -54,11 +52,7 @@ impl App {
                 .is_some_and(|m| m.contains(pos.x as f32, pos.y as f32));
 
             // Always close the menu
-            self.context_menu = None;
-            self.tab_bar_dirty = true;
-            if let Some(tw) = self.windows.get(&window_id) {
-                tw.window.request_redraw();
-            }
+            self.dismiss_context_menu(window_id);
 
             if let Some(action) = clicked_item {
                 self.dispatch_context_action(action, event_loop);
@@ -75,11 +69,7 @@ impl App {
         // report to PTY and skip normal handling (Shift overrides mouse reporting
         // so the user can still select text).
         if !self.modifiers.shift_key() && !self.is_settings_window(window_id) {
-            let tab_id = self
-                .windows
-                .get(&window_id)
-                .and_then(TermWindow::active_tab_id);
-            if let Some(tid) = tab_id {
+            if let Some(tid) = self.active_tab_id(window_id) {
                 let mouse_active = self
                     .tabs
                     .get(&tid)
@@ -137,22 +127,11 @@ impl App {
                     }
                 } else {
                     // Right-click in grid area → copy if selection, paste if not
-                    let tab_id = self
-                        .windows
-                        .get(&window_id)
-                        .and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
+                    if let Some(tid) = self.active_tab_id(window_id) {
                         let has_selection =
                             self.tabs.get(&tid).is_some_and(|t| t.selection.is_some());
                         if has_selection {
-                            if let Some(tab) = self.tabs.get(&tid) {
-                                if let Some(ref sel) = tab.selection {
-                                    let text = selection::extract_text(tab.grid(), sel);
-                                    if !text.is_empty() {
-                                        clipboard::set_text(&text);
-                                    }
-                                }
-                            }
+                            self.copy_selection_to_clipboard(tid);
                             if let Some(tab) = self.tabs.get_mut(&tid) {
                                 tab.clear_selection();
                             }
@@ -208,29 +187,21 @@ impl App {
                             self.new_tab_in_window(window_id);
                         }
                         TabBarHit::DropdownButton => {
-                            // Show dropdown menu overlay below the button
+                            // Show dropdown menu overlay below the button.
+                            // Reuse `layout` computed above (same window, same state).
+                            let s = self.scale_factor as f32;
+                            let tabs_end = self.scale_px(TAB_LEFT_MARGIN)
+                                + layout.tab_count * layout.tab_width;
+                            let menu_x =
+                                (tabs_end + self.scale_px(NEW_TAB_BUTTON_WIDTH)) as f32;
+                            let menu_y = self.scale_px(TAB_BAR_HEIGHT) as f32;
+                            let scheme = self.active_scheme;
+                            let mut menu =
+                                context_menu::build_dropdown_menu((menu_x, menu_y), scheme, s);
+                            menu.layout(&mut self.ui_glyphs);
+                            self.context_menu = Some(menu);
+                            self.tab_bar_dirty = true;
                             if let Some(tw) = self.windows.get(&window_id) {
-                                let s = self.scale_factor as f32;
-                                let bar_w = tw.window.inner_size().width as usize;
-                                let tab_count = tw.tabs.len();
-                                let twl = self.tab_width_lock_for(window_id);
-                                let btn_layout = TabBarLayout::compute(
-                                    tab_count,
-                                    bar_w,
-                                    self.scale_factor,
-                                    twl,
-                                );
-                                let tabs_end = self.scale_px(TAB_LEFT_MARGIN)
-                                    + tab_count * btn_layout.tab_width;
-                                let menu_x =
-                                    (tabs_end + self.scale_px(NEW_TAB_BUTTON_WIDTH)) as f32;
-                                let menu_y = self.scale_px(TAB_BAR_HEIGHT) as f32;
-                                let scheme = self.active_scheme;
-                                let mut menu =
-                                    context_menu::build_dropdown_menu((menu_x, menu_y), scheme, s);
-                                menu.layout(&mut self.ui_glyphs);
-                                self.context_menu = Some(menu);
-                                self.tab_bar_dirty = true;
                                 tw.window.request_redraw();
                             }
                         }
@@ -252,12 +223,7 @@ impl App {
                             }
                         }
                         TabBarHit::Maximize => {
-                            if let Some(tw) = self.windows.get_mut(&window_id) {
-                                let new_max = !tw.is_maximized;
-                                tw.is_maximized = new_max;
-                                tw.window.set_maximized(new_max);
-                                tw.window.request_redraw();
-                            }
+                            self.toggle_maximize(window_id);
                         }
                         TabBarHit::CloseWindow => {
                             self.close_window(window_id, event_loop);
@@ -273,12 +239,7 @@ impl App {
                                 // Double-click: toggle maximize
                                 self.last_click_time = None;
                                 self.last_click_window = None;
-                                if let Some(tw) = self.windows.get_mut(&window_id) {
-                                    let new_max = !tw.is_maximized;
-                                    tw.is_maximized = new_max;
-                                    tw.window.set_maximized(new_max);
-                                    tw.window.request_redraw();
-                                }
+                                self.toggle_maximize(window_id);
                             } else {
                                 // Single click: start window drag
                                 self.last_click_time = Some(now);
@@ -292,13 +253,7 @@ impl App {
                                 None => return,
                             };
                             if let Some(&tab_id) = tw.tabs.get(idx) {
-                                let twl = self.tab_width_lock_for(window_id);
-                                let layout = TabBarLayout::compute(
-                                    tw.tabs.len(),
-                                    tw.window.inner_size().width as usize,
-                                    self.scale_factor,
-                                    twl,
-                                );
+                                // Reuse `layout` computed above.
                                 let left_margin = self.scale_px(TAB_LEFT_MARGIN) as f64;
                                 let tab_left = left_margin + idx as f64 * layout.tab_width as f64;
                                 let offset_in_tab = pos.x - tab_left;
@@ -323,24 +278,20 @@ impl App {
                 // Finalize selection and auto-copy
                 if self.left_mouse_down {
                     self.left_mouse_down = false;
-                    let tab_id = self
-                        .windows
-                        .get(&window_id)
-                        .and_then(TermWindow::active_tab_id);
-                    if let Some(tid) = tab_id {
-                        if let Some(tab) = self.tabs.get_mut(&tid) {
-                            if tab.selection.as_ref().is_some_and(Selection::is_empty) {
+                    if let Some(tid) = self.active_tab_id(window_id) {
+                        let is_empty = self
+                            .tabs
+                            .get(&tid)
+                            .and_then(|t| t.selection.as_ref())
+                            .is_some_and(Selection::is_empty);
+                        if is_empty {
+                            if let Some(tab) = self.tabs.get_mut(&tid) {
                                 tab.clear_selection();
-                            } else if self.config.behavior.copy_on_select {
-                                if let Some(ref sel) = tab.selection {
-                                    let text = selection::extract_text(tab.grid(), sel);
-                                    if !text.is_empty() {
-                                        clipboard::set_text(&text);
-                                    }
-                                }
-                            } else {
-                                // copy_on_select disabled — keep selection visible
                             }
+                        } else if self.config.behavior.copy_on_select {
+                            self.copy_selection_to_clipboard(tid);
+                        } else {
+                            // copy_on_select disabled — keep selection visible
                         }
                     }
                 }
@@ -418,11 +369,9 @@ impl App {
             return;
         }
 
-        let tab_id = self
-            .windows
-            .get(&window_id)
-            .and_then(TermWindow::active_tab_id);
-        let Some(tid) = tab_id else { return };
+        let Some(tid) = self.active_tab_id(window_id) else {
+            return;
+        };
 
         // Mouse reporting: scroll events sent to PTY when mouse mode active
         if !self.modifiers.shift_key() {
@@ -449,14 +398,12 @@ impl App {
 
         // Alternate scroll: convert scroll to arrow keys in alt screen
         if !self.modifiers.shift_key() {
-            let alt_scroll = self.tabs.get(&tid).is_some_and(|t| {
-                t.mode.contains(TermMode::ALT_SCREEN) && t.mode.contains(TermMode::ALTERNATE_SCROLL)
+            let alt_scroll_mode = self.tabs.get(&tid).and_then(|t| {
+                let is_alt_scroll = t.mode.contains(TermMode::ALT_SCREEN)
+                    && t.mode.contains(TermMode::ALTERNATE_SCROLL);
+                is_alt_scroll.then(|| t.mode.contains(TermMode::APP_CURSOR))
             });
-            if alt_scroll {
-                let app_cursor = self
-                    .tabs
-                    .get(&tid)
-                    .is_some_and(|t| t.mode.contains(TermMode::APP_CURSOR));
+            if let Some(app_cursor) = alt_scroll_mode {
                 let (up, down) = if app_cursor {
                     (b"\x1bOA" as &[u8], b"\x1bOB" as &[u8])
                 } else {

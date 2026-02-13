@@ -9,7 +9,6 @@ use crate::tab_bar::{
     DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TAB_TOP_MARGIN,
     TabBarLayout,
 };
-
 use super::color_util::{
     lighten, TabBarColors, UI_BG, UI_BG_HOVER, UI_SEPARATOR, UI_TEXT, UI_TEXT_DIM,
 };
@@ -126,7 +125,6 @@ impl GpuRenderer {
         let separator_color = UI_SEPARATOR;
         let text_color = UI_TEXT;
         let text_dim = UI_TEXT_DIM;
-        let check_color = text_color;
 
         // 1. Shadow (offset down-right, all corners rounded)
         let shadow_offset = 2.0 * menu.scale;
@@ -148,38 +146,28 @@ impl GpuRenderer {
         for (i, entry) in menu.entries.iter().enumerate() {
             let item_h = entry.height() * menu.scale;
 
+            // Hover highlight (shared by Item and Check)
+            if matches!(entry, MenuEntry::Item { .. } | MenuEntry::Check { .. })
+                && menu.hovered == Some(i)
+            {
+                let inset = menu.item_hover_inset();
+                bg.push_all_rounded_rect(
+                    mx + inset,
+                    y,
+                    mw - inset * 2.0,
+                    item_h,
+                    hover_bg,
+                    menu.item_hover_radius(),
+                );
+            }
+
             match entry {
                 MenuEntry::Item { label, .. } => {
-                    // Hover highlight
-                    if menu.hovered == Some(i) {
-                        let inset = menu.item_hover_inset();
-                        bg.push_all_rounded_rect(
-                            mx + inset,
-                            y,
-                            mw - inset * 2.0,
-                            item_h,
-                            hover_bg,
-                            menu.item_hover_radius(),
-                        );
-                    }
-                    // Text
                     let tx = mx + menu.item_padding_x();
                     let ty = y + (item_h - cell_h) / 2.0;
                     self.push_text_instances(fg, label, tx, ty, text_color, glyphs, queue);
                 }
                 MenuEntry::Check { label, checked, .. } => {
-                    // Hover highlight
-                    if menu.hovered == Some(i) {
-                        let inset = menu.item_hover_inset();
-                        bg.push_all_rounded_rect(
-                            mx + inset,
-                            y,
-                            mw - inset * 2.0,
-                            item_h,
-                            hover_bg,
-                            menu.item_hover_radius(),
-                        );
-                    }
                     let tx = mx + menu.item_padding_x();
                     let ty = y + (item_h - cell_h) / 2.0;
 
@@ -196,7 +184,7 @@ impl GpuRenderer {
                             icon_cy,
                             crate::context_menu::CHECKMARK_ICON_SIZE,
                             menu.scale,
-                            check_color,
+                            text_color,
                             queue,
                         );
                     }

@@ -108,23 +108,9 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
 /// Each rect is `[left, top, right, bottom]` in client coordinates.
 /// Call this whenever the tab bar layout changes (resize, tab add/remove).
 pub fn set_client_rects(window: &winit::window::Window, rects: Vec<[i32; 4]>) {
-    let Some(hwnd) = hwnd_from_window(window) else {
+    let Some(data) = snap_data_for_window(window) else {
         return;
     };
-    let ptr = {
-        let map = match snap_ptrs().lock() {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-        match map.get(&(hwnd as usize)) {
-            Some(&p) => p,
-            None => return,
-        }
-    };
-    // SAFETY: The pointer was created by Box::into_raw in enable_snap and remains
-    // valid until WM_NCDESTROY. We only access the Mutex-protected field.
-    #[allow(unsafe_code)]
-    let data = unsafe { &*(ptr as *const SnapData) };
     if let Ok(mut rects_lock) = data.client_rects.lock() {
         *rects_lock = rects;
     }
@@ -136,23 +122,9 @@ pub fn set_client_rects(window: &winit::window::Window, rects: Vec<[i32; 4]>) {
 /// resizing the window at per-monitor DPI boundaries (which causes oscillation).
 /// Call with `false` when the drag ends so normal DPI handling resumes.
 pub fn set_dragging(window: &winit::window::Window, dragging: bool) {
-    let Some(hwnd) = hwnd_from_window(window) else {
+    let Some(data) = snap_data_for_window(window) else {
         return;
     };
-    let ptr = {
-        let map = match snap_ptrs().lock() {
-            Ok(m) => m,
-            Err(_) => return,
-        };
-        match map.get(&(hwnd as usize)) {
-            Some(&p) => p,
-            None => return,
-        }
-    };
-    // SAFETY: The pointer was created by Box::into_raw in enable_snap and remains
-    // valid until WM_NCDESTROY. AtomicBool is safe to access from any thread.
-    #[allow(unsafe_code)]
-    let data = unsafe { &*(ptr as *const SnapData) };
     data.dragging.store(dragging, Ordering::Relaxed);
 }
 
@@ -161,15 +133,7 @@ pub fn set_dragging(window: &winit::window::Window, dragging: bool) {
 /// Returns the scale factor (DPI / 96.0), or `None` if no DPI change has been
 /// received since `enable_snap` was called.
 pub fn get_current_dpi(window: &winit::window::Window) -> Option<f64> {
-    let hwnd = hwnd_from_window(window)?;
-    let ptr = {
-        let map = snap_ptrs().lock().ok()?;
-        *map.get(&(hwnd as usize))?
-    };
-    // SAFETY: The pointer was created by Box::into_raw in enable_snap and remains
-    // valid until WM_NCDESTROY. AtomicU32 is safe to access from any thread.
-    #[allow(unsafe_code)]
-    let data = unsafe { &*(ptr as *const SnapData) };
+    let data = snap_data_for_window(window)?;
     let dpi = data.last_dpi.load(Ordering::Relaxed);
     if dpi == 0 {
         None
@@ -180,6 +144,24 @@ pub fn get_current_dpi(window: &winit::window::Window) -> Option<f64> {
 
 fn snap_ptrs() -> &'static Mutex<HashMap<usize, usize>> {
     SNAP_PTRS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Look up the `SnapData` pointer for a window.
+///
+/// # Safety
+///
+/// The returned reference is valid until `WM_NCDESTROY` fires for the window.
+/// Callers must not hold the reference across event loop iterations.
+#[allow(unsafe_code)]
+fn snap_data_for_window(window: &winit::window::Window) -> Option<&'static SnapData> {
+    let hwnd = hwnd_from_window(window)?;
+    let ptr = {
+        let map = snap_ptrs().lock().ok()?;
+        *map.get(&(hwnd as usize))?
+    };
+    // SAFETY: The pointer was created by Box::into_raw in enable_snap and remains
+    // valid until WM_NCDESTROY frees it.
+    Some(unsafe { &*(ptr as *const SnapData) })
 }
 
 fn get_x_lparam(lp: isize) -> i32 {

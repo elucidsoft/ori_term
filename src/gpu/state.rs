@@ -8,19 +8,18 @@ use winit::window::Window;
 
 /// GPU state shared across all windows.
 pub struct GpuState {
-    pub instance: wgpu::Instance,
-    pub adapter: wgpu::Adapter,
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+    instance: wgpu::Instance,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     /// The native surface format (used for surface configuration).
-    pub surface_format: wgpu::TextureFormat,
+    surface_format: wgpu::TextureFormat,
     /// The sRGB format used for render passes and pipelines.
     /// May differ from `surface_format` when the surface doesn't natively
     /// support sRGB (e.g. DX12 `DirectComposition`).
-    pub render_format: wgpu::TextureFormat,
-    pub surface_alpha_mode: wgpu::CompositeAlphaMode,
+    pub(super) render_format: wgpu::TextureFormat,
+    surface_alpha_mode: wgpu::CompositeAlphaMode,
     /// Vulkan pipeline cache (compiled shaders cached to disk across sessions).
-    pub pipeline_cache: Option<wgpu::PipelineCache>,
+    pub(super) pipeline_cache: Option<wgpu::PipelineCache>,
     pipeline_cache_path: Option<std::path::PathBuf>,
 }
 
@@ -177,9 +176,11 @@ impl GpuState {
         // On subsequent launches, this skips shader recompilation.
         let (pipeline_cache, pipeline_cache_path) = Self::load_pipeline_cache(&device, &info);
 
+        // Adapter is no longer needed — device and queue are independent.
+        drop(adapter);
+
         Some(Self {
             instance,
-            adapter,
             device,
             queue,
             surface_format,
@@ -193,6 +194,17 @@ impl GpuState {
     /// Returns true if the surface alpha mode supports transparency.
     pub fn supports_transparency(&self) -> bool {
         !matches!(self.surface_alpha_mode, wgpu::CompositeAlphaMode::Opaque)
+    }
+
+    /// Compute the `view_formats` list needed for surface configuration.
+    /// When the render format differs from the surface format (e.g. DX12
+    /// `DirectComposition`), we need an sRGB view format.
+    fn view_formats(&self) -> Vec<wgpu::TextureFormat> {
+        if self.render_format == self.surface_format {
+            vec![]
+        } else {
+            vec![self.render_format]
+        }
     }
 
     /// Load a pipeline cache from disk (Vulkan only).
@@ -267,11 +279,6 @@ impl GpuState {
     ) -> Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)> {
         let surface = self.instance.create_surface(window.clone()).ok()?;
         let size = window.inner_size();
-        let view_formats = if self.render_format == self.surface_format {
-            vec![]
-        } else {
-            vec![self.render_format]
-        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: self.surface_format,
@@ -279,7 +286,7 @@ impl GpuState {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: self.surface_alpha_mode,
-            view_formats,
+            view_formats: self.view_formats(),
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&self.device, &config);

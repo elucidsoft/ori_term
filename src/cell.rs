@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use bitflags::bitflags;
-use vte::ansi::{Color, Hyperlink, Rgb};
+use vte::ansi::{Color, Hyperlink};
 
 bitflags! {
     /// Bitflags for cell text attributes and layout hints.
@@ -152,26 +152,15 @@ impl Cell {
         Arc::make_mut(extra).hyperlink = hyperlink;
     }
 
-    // Conversion
-
-    /// Converts a Color to an RGB triple, using fallback values for indexed/named colors.
-    pub fn to_rgb(color: Color) -> Rgb {
-        match color {
-            Color::Spec(rgb) => rgb,
-            Color::Indexed(idx) => Rgb {
-                r: idx,
-                g: idx,
-                b: idx,
-            },
-            Color::Named(_) => Rgb { r: 0, g: 0, b: 0 },
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::mem::size_of;
+
+    use vte::ansi::Rgb;
+
+    use super::*;
 
     #[test]
     fn cell_size() {

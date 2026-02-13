@@ -239,5 +239,4 @@ mod tests {
         assert_eq!(detect_shell("/bin/dash"), None);
         assert_eq!(detect_shell("nu"), None);
     }
-
 }

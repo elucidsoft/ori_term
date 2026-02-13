@@ -14,6 +14,22 @@ use crate::tab_bar::{
 use super::App;
 
 impl App {
+    /// Maximum drag X for a tab within a window's tab bar.
+    ///
+    /// Reserves space for the new-tab button, dropdown button, and window controls
+    /// to the right of the dragged tab.
+    fn drag_max_x(&self, window_id: WindowId, tab_width: f32) -> f32 {
+        let sf = self.scale_factor as f32;
+        let window_w = self
+            .windows
+            .get(&window_id)
+            .map_or(0.0, |tw| tw.window.inner_size().width as f32);
+        let controls_w = CONTROLS_ZONE_WIDTH as f32 * sf;
+        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * sf;
+        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * sf;
+        window_w - controls_w - new_tab_w - dropdown_w - tab_width
+    }
+
     pub(super) fn tear_off_tab(
         &mut self,
         tab_id: TabId,
@@ -160,16 +176,7 @@ impl App {
         let tab_wf = tab_w as f64;
 
         // 1. Compute dragged tab visual X (pixel-perfect cursor tracking)
-        // Dragged tab pushes + and dropdown buttons; max clamp reserves room
-        // for tab + both buttons before the window controls zone.
-        let window_w = self
-            .windows
-            .get(&window_id)
-            .map_or(0.0, |tw| tw.window.inner_size().width as f32);
-        let controls_w = CONTROLS_ZONE_WIDTH as f32 * sf as f32;
-        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * sf as f32;
-        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * sf as f32;
-        let max_x = window_w - controls_w - new_tab_w - dropdown_w - tab_wf as f32;
+        let max_x = self.drag_max_x(window_id, tab_wf as f32);
         let dragged_x = ((position.x - mouse_offset_in_tab) as f32).clamp(0.0, max_x);
 
         // 2. Compute insertion index from cursor center
@@ -208,12 +215,10 @@ impl App {
     }
 
     pub(super) fn window_containing_tab(&self, tab_id: TabId) -> Option<WindowId> {
-        for (wid, tw) in &self.windows {
-            if tw.tabs.contains(&tab_id) {
-                return Some(*wid);
-            }
-        }
-        None
+        self.windows
+            .iter()
+            .find(|(_, tw)| tw.tabs.contains(&tab_id))
+            .map(|(&wid, _)| wid)
     }
 
     pub(super) fn find_window_at_cursor(
@@ -286,20 +291,16 @@ impl App {
         let local_x = screen_x - target_x;
         let dragged_x = (local_x - mouse_off) as f32;
         let left_margin = TAB_LEFT_MARGIN as f32 * sf;
-        // Clamp to same bounds as update_drag_in_bar
-        let (window_w, tab_wf) = self.windows.get(&target_wid).map_or((0.0, 0.0), |tw| {
+        let tab_wf = self.windows.get(&target_wid).map_or(0.0, |tw| {
             let layout = TabBarLayout::compute(
                 tw.tabs.len(),
                 tw.window.inner_size().width as usize,
                 sf as f64,
                 None,
             );
-            (tw.window.inner_size().width as f32, layout.tab_width as f32)
+            layout.tab_width as f32
         });
-        let controls_w = CONTROLS_ZONE_WIDTH as f32 * sf;
-        let new_tab_w = NEW_TAB_BUTTON_WIDTH as f32 * sf;
-        let dropdown_w = DROPDOWN_BUTTON_WIDTH as f32 * sf;
-        let max_x = window_w - controls_w - new_tab_w - dropdown_w - tab_wf;
+        let max_x = self.drag_max_x(target_wid, tab_wf);
         self.drag_visual_x = Some((target_wid, dragged_x.clamp(left_margin, max_x)));
     }
 }

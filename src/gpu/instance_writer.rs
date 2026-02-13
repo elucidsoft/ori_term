@@ -80,17 +80,7 @@ impl InstanceWriter {
     /// Push a colored background rectangle (no texture, sharp corners).
     /// When opacity < 1.0, the color is premultiplied by opacity.
     pub(super) fn push_rect(&mut self, x: f32, y: f32, w: f32, h: f32, bg_color: [f32; 4]) {
-        let color = self.premultiply(bg_color);
-        self.push_raw(
-            [x, y],
-            [w, h],
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            color,
-            0,
-            0.0,
-        );
+        self.push_colored_rect(x, y, w, h, bg_color, 0.0);
     }
 
     /// Push a colored background rectangle with rounded top corners.
@@ -103,20 +93,11 @@ impl InstanceWriter {
         bg_color: [f32; 4],
         radius: f32,
     ) {
-        let color = self.premultiply(bg_color);
-        self.push_raw(
-            [x, y],
-            [w, h],
-            [0.0, 0.0],
-            [0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            color,
-            0,
-            radius,
-        );
+        self.push_colored_rect(x, y, w, h, bg_color, radius);
     }
 
     /// Push a colored rectangle with all four corners rounded.
+    /// Negative radius signals the shader to round all 4 corners.
     pub(super) fn push_all_rounded_rect(
         &mut self,
         x: f32,
@@ -126,8 +107,20 @@ impl InstanceWriter {
         bg_color: [f32; 4],
         radius: f32,
     ) {
+        self.push_colored_rect(x, y, w, h, bg_color, -radius);
+    }
+
+    /// Common path for all background rectangle variants.
+    fn push_colored_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        bg_color: [f32; 4],
+        corner_radius: f32,
+    ) {
         let color = self.premultiply(bg_color);
-        // Negative radius signals the shader to round all 4 corners.
         self.push_raw(
             [x, y],
             [w, h],
@@ -136,7 +129,7 @@ impl InstanceWriter {
             [0.0, 0.0, 0.0, 0.0],
             color,
             0,
-            -radius,
+            corner_radius,
         );
     }
 
@@ -157,7 +150,7 @@ impl InstanceWriter {
     }
 
     /// Write a full 80-byte instance record.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "Maps 1:1 to the GPU instance struct layout")]
     fn push_raw(
         &mut self,
         pos: [f32; 2],

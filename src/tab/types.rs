@@ -1,6 +1,9 @@
 //! Shared types used across the tab subsystem.
 
-use vte::ansi::{CharsetIndex, StandardCharset};
+use std::path::PathBuf;
+
+use vte::ansi::{CharsetIndex, CursorShape, StandardCharset};
+use winit::event_loop::EventLoopProxy;
 
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,6 +58,19 @@ pub enum PromptState {
 pub struct Notification {
     pub title: String,
     pub body: String,
+}
+
+/// Configuration for spawning a new tab.
+pub struct SpawnConfig {
+    pub id: TabId,
+    pub cols: usize,
+    pub rows: usize,
+    pub proxy: EventLoopProxy<TermEvent>,
+    pub shell: Option<String>,
+    pub max_scrollback: usize,
+    pub cursor_shape: CursorShape,
+    pub integration_dir: Option<PathBuf>,
+    pub cwd: Option<String>,
 }
 
 /// Events sent from background threads to the event loop.

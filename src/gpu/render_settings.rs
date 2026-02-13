@@ -1,13 +1,13 @@
 //! Settings window rendering — theme picker with color swatches.
 
+use crate::palette::{Palette, BUILTIN_SCHEMES};
+use crate::render::FontSet;
 use super::color_util::{
     darken, lerp_color, lighten, ortho_projection, srgb_to_linear, vte_rgb_to_rgba,
 };
 use super::instance_writer::InstanceWriter;
 use super::renderer::GpuRenderer;
 use super::state::GpuState;
-use crate::palette::{Palette, BUILTIN_SCHEMES};
-use crate::render::FontSet;
 
 impl GpuRenderer {
     /// Render the settings window frame.

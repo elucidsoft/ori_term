@@ -96,40 +96,11 @@ impl Palette {
     /// Apply config color overrides on top of the current scheme.
     /// Call this after `set_scheme()`.
     pub fn apply_overrides(&mut self, colors: &ColorConfig) {
-        if let Some(rgb) = colors.foreground.as_deref().and_then(parse_hex_color) {
-            self.colors[NamedColor::Foreground as usize] = rgb;
-            self.defaults[NamedColor::Foreground as usize] = rgb;
-        }
-        if let Some(rgb) = colors.background.as_deref().and_then(parse_hex_color) {
-            self.colors[NamedColor::Background as usize] = rgb;
-            self.defaults[NamedColor::Background as usize] = rgb;
-        }
-        if let Some(rgb) = colors.cursor.as_deref().and_then(parse_hex_color) {
-            self.colors[NamedColor::Cursor as usize] = rgb;
-            self.defaults[NamedColor::Cursor as usize] = rgb;
-        }
-        // ANSI 0-7
-        for (key, hex) in &colors.ansi {
-            if let Ok(i) = key.parse::<usize>() {
-                if i < 8 {
-                    if let Some(rgb) = parse_hex_color(hex) {
-                        self.colors[i] = rgb;
-                        self.defaults[i] = rgb;
-                    }
-                }
-            }
-        }
-        // Bright 8-15
-        for (key, hex) in &colors.bright {
-            if let Ok(i) = key.parse::<usize>() {
-                if i < 8 {
-                    if let Some(rgb) = parse_hex_color(hex) {
-                        self.colors[8 + i] = rgb;
-                        self.defaults[8 + i] = rgb;
-                    }
-                }
-            }
-        }
+        self.override_named(NamedColor::Foreground, colors.foreground.as_deref());
+        self.override_named(NamedColor::Background, colors.background.as_deref());
+        self.override_named(NamedColor::Cursor, colors.cursor.as_deref());
+        self.apply_indexed_overrides(&colors.ansi, 0);
+        self.apply_indexed_overrides(&colors.bright, 8);
         // Selection colors
         self.selection_fg = colors
             .selection_foreground
@@ -149,6 +120,34 @@ impl Palette {
         // Update bright foreground if fg was overridden
         self.colors[NamedColor::BrightForeground as usize] =
             self.colors[NamedColor::Foreground as usize];
+    }
+
+    /// Override a named palette color from an optional hex string.
+    fn override_named(&mut self, name: NamedColor, hex: Option<&str>) {
+        if let Some(rgb) = hex.and_then(parse_hex_color) {
+            let idx = name as usize;
+            self.colors[idx] = rgb;
+            self.defaults[idx] = rgb;
+        }
+    }
+
+    /// Apply indexed color overrides from a `HashMap` of `"0".."7"` to hex strings.
+    /// `base_offset` is 0 for standard ANSI (0-7) or 8 for bright (8-15).
+    fn apply_indexed_overrides(
+        &mut self,
+        overrides: &std::collections::HashMap<String, String>,
+        base_offset: usize,
+    ) {
+        for (key, hex) in overrides {
+            if let Ok(i) = key.parse::<usize>() {
+                if i < 8 {
+                    if let Some(rgb) = parse_hex_color(hex) {
+                        self.colors[base_offset + i] = rgb;
+                        self.defaults[base_offset + i] = rgb;
+                    }
+                }
+            }
+        }
     }
 
     /// Return selection colors. Falls back to FG/BG swap when not configured.
@@ -237,7 +236,7 @@ impl Default for Palette {
 }
 
 /// Parse "#RRGGBB" or "#RGB" to Rgb. Returns None on invalid input.
-pub fn parse_hex_color(s: &str) -> Option<Rgb> {
+pub(crate) fn parse_hex_color(s: &str) -> Option<Rgb> {
     let hex = s.strip_prefix('#').unwrap_or(s);
     let bytes = hex.as_bytes();
     match bytes.len() {

@@ -93,26 +93,18 @@ impl FontSet {
     #[must_use]
     pub fn resize(&self, new_size: f32) -> Self {
         let new_size = new_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-
-        let fonts = self.fonts.clone();
-        let has_variant = self.has_variant;
-        let font_paths = self.font_paths.clone();
-        let fallback_fonts = self.fallback_fonts.clone();
-        let fallback_paths = self.fallback_paths.clone();
-        let fallbacks_loaded = self.fallbacks_loaded;
-
-        let regular = fonts[0]
+        let regular = self.fonts[0]
             .as_ref()
             .expect("Regular font must always be loaded");
         let (cell_width, cell_height, baseline) = Self::compute_metrics(regular, new_size);
 
         Self {
-            fonts,
-            has_variant,
-            font_paths,
-            fallback_fonts,
-            fallback_paths,
-            fallbacks_loaded,
+            fonts: self.fonts.clone(),
+            has_variant: self.has_variant,
+            font_paths: self.font_paths.clone(),
+            fallback_fonts: self.fallback_fonts.clone(),
+            fallback_paths: self.fallback_paths.clone(),
+            fallbacks_loaded: self.fallbacks_loaded,
             size: new_size,
             cell_width,
             cell_height,

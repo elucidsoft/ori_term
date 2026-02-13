@@ -23,6 +23,30 @@ pub struct SelectionPoint {
     pub side: Side,
 }
 
+impl SelectionPoint {
+    /// The effective first column included in the selection at this point.
+    /// When `side` is `Right`, the click landed on the right half of the cell,
+    /// so the selection starts at the next column.
+    pub fn effective_start_col(&self) -> usize {
+        if self.side == Side::Right {
+            self.col + 1
+        } else {
+            self.col
+        }
+    }
+
+    /// The effective last column included in the selection at this point.
+    /// When `side` is `Left`, the click landed on the left half of the cell,
+    /// so the selection ends at the previous column.
+    pub fn effective_end_col(&self) -> usize {
+        if self.side == Side::Left && self.col > 0 {
+            self.col - 1
+        } else {
+            self.col
+        }
+    }
+}
+
 impl Ord for SelectionPoint {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.row
@@ -109,47 +133,24 @@ impl Selection {
         let (start, end) = self.ordered();
 
         if self.mode == SelectionMode::Block {
-            // Block selection: rectangular region
             let min_col = start.col.min(end.col);
             let max_col = start.col.max(end.col);
             abs_row >= start.row && abs_row <= end.row && col >= min_col && col <= max_col
         } else {
-            // Normal selection: spans rows
             if abs_row < start.row || abs_row > end.row {
                 return false;
             }
-            if abs_row == start.row && abs_row == end.row {
-                // Single row
-                let start_col = if start.side == Side::Right {
-                    start.col + 1
-                } else {
-                    start.col
-                };
-                let end_col = if end.side == Side::Left && end.col > 0 {
-                    end.col - 1
-                } else {
-                    end.col
-                };
-                return col >= start_col && col <= end_col;
-            }
-            if abs_row == start.row {
-                let start_col = if start.side == Side::Right {
-                    start.col + 1
-                } else {
-                    start.col
-                };
-                return col >= start_col;
-            }
-            if abs_row == end.row {
-                let end_col = if end.side == Side::Left && end.col > 0 {
-                    end.col - 1
-                } else {
-                    end.col
-                };
-                return col <= end_col;
-            }
-            // Middle rows are fully selected
-            true
+            let first = if abs_row == start.row {
+                start.effective_start_col()
+            } else {
+                0
+            };
+            let last = if abs_row == end.row {
+                end.effective_end_col()
+            } else {
+                usize::MAX
+            };
+            col >= first && col <= last
         }
     }
 

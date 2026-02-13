@@ -36,6 +36,7 @@ use crate::keybindings::{self, KeyBinding};
 use crate::log;
 use crate::palette;
 use crate::render::FontSet;
+use crate::selection;
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::TabBarHit;
 use crate::term_mode::TermMode;
@@ -275,14 +276,56 @@ impl App {
         id
     }
 
-    pub(super) fn paste_from_clipboard(&mut self, window_id: WindowId) {
-        let tab_id = match self
-            .windows
+    /// Returns the active tab ID for the given window.
+    pub(super) fn active_tab_id(&self, window_id: WindowId) -> Option<TabId> {
+        self.windows
             .get(&window_id)
             .and_then(TermWindow::active_tab_id)
-        {
-            Some(id) => id,
-            None => return,
+    }
+
+    /// Copy the current selection text to clipboard. Returns true if text was copied.
+    pub(super) fn copy_selection_to_clipboard(&self, tab_id: TabId) -> bool {
+        if let Some(tab) = self.tabs.get(&tab_id) {
+            if let Some(ref sel) = tab.selection {
+                let text = selection::extract_text(tab.grid(), sel);
+                if !text.is_empty() {
+                    clipboard::set_text(&text);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Dismiss the context menu overlay and mark the tab bar dirty.
+    pub(super) fn dismiss_context_menu(&mut self, window_id: WindowId) {
+        self.context_menu = None;
+        self.tab_bar_dirty = true;
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
+        }
+    }
+
+    /// Toggle the maximized state of a window.
+    pub(super) fn toggle_maximize(&mut self, window_id: WindowId) {
+        if let Some(tw) = self.windows.get_mut(&window_id) {
+            let new_max = !tw.is_maximized;
+            tw.is_maximized = new_max;
+            tw.window.set_maximized(new_max);
+            tw.window.request_redraw();
+        }
+    }
+
+    /// Rebuild the GPU glyph atlas after font size changes.
+    pub(super) fn rebuild_atlas(&mut self) {
+        if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
+            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
+        }
+    }
+
+    pub(super) fn paste_from_clipboard(&mut self, window_id: WindowId) {
+        let Some(tab_id) = self.active_tab_id(window_id) else {
+            return;
         };
         if let Some(text) = clipboard::get_text() {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {

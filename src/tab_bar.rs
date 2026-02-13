@@ -42,6 +42,11 @@ pub const WINDOW_BORDER_COLOR: u32 = 0x00585b70; // overlay0 accent border
 #[cfg(target_os = "windows")]
 pub const WINDOW_BORDER_WIDTH: usize = 1;
 
+/// Scale a logical pixel value by DPI factor.
+fn scaled(v: usize, scale: f64) -> usize {
+    (v as f64 * scale).round() as usize
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarHit {
     Tab(usize),
@@ -68,7 +73,7 @@ impl TabBarLayout {
         scale: f64,
         max_tab_width: Option<usize>,
     ) -> Self {
-        let s = |v: usize| -> usize { (v as f64 * scale).round() as usize };
+        let s = |v: usize| scaled(v, scale);
         // Reserve space for left margin, new-tab button, dropdown, and window controls
         let available = bar_width
             .saturating_sub(s(TAB_LEFT_MARGIN))
@@ -89,7 +94,7 @@ impl TabBarLayout {
     }
 
     pub fn hit_test(&self, x: usize, y: usize, scale: f64) -> TabBarHit {
-        let s = |v: usize| -> usize { (v as f64 * scale).round() as usize };
+        let s = |v: usize| scaled(v, scale);
 
         if y >= s(TAB_BAR_HEIGHT) {
             return TabBarHit::None;

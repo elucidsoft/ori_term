@@ -18,7 +18,7 @@ use crate::cell::{Cell, CellFlags};
 use cursor::Cursor;
 use row::Row;
 
-pub const DEFAULT_TAB_INTERVAL: usize = 8;
+const DEFAULT_TAB_INTERVAL: usize = 8;
 
 // Grid inset from window edges (used by GPU renderer and app layout).
 pub const GRID_PADDING_LEFT: usize = 6;
@@ -31,15 +31,15 @@ pub struct Grid {
     pub cols: usize,
     pub lines: usize,
     pub cursor: Cursor,
-    pub saved_cursor: Option<Cursor>,
+    saved_cursor: Option<Cursor>,
     scroll_top: usize,
     scroll_bottom: usize,
-    pub tab_stops: Vec<bool>,
+    tab_stops: Vec<bool>,
     pub scrollback: VecDeque<Row>,
-    pub max_scrollback: usize,
+    max_scrollback: usize,
     pub display_offset: usize,
     /// Total number of rows evicted from scrollback (for absolute row tracking).
-    pub total_evicted: usize,
+    total_evicted: usize,
 }
 
 impl Grid {
@@ -55,7 +55,7 @@ impl Grid {
             rows,
             cols,
             lines,
-            cursor: Cursor::new(cols, lines),
+            cursor: Cursor::default(),
             saved_cursor: None,
             scroll_top: 0,
             scroll_bottom: lines.saturating_sub(1),
@@ -67,7 +67,7 @@ impl Grid {
         }
     }
 
-    pub(super) fn build_tab_stops(cols: usize) -> Vec<bool> {
+    fn build_tab_stops(cols: usize) -> Vec<bool> {
         let mut stops = vec![false; cols];
         for i in (DEFAULT_TAB_INTERVAL..cols).step_by(DEFAULT_TAB_INTERVAL) {
             stops[i] = true;
@@ -132,11 +132,12 @@ impl Grid {
     }
 
     pub fn decaln(&mut self) {
+        let default = Cell::default();
         for r in 0..self.lines {
             for c in 0..self.cols {
                 self.rows[r][c].c = 'E';
-                self.rows[r][c].fg = Cell::default().fg;
-                self.rows[r][c].bg = Cell::default().bg;
+                self.rows[r][c].fg = default.fg;
+                self.rows[r][c].bg = default.bg;
                 self.rows[r][c].flags = CellFlags::empty();
             }
         }

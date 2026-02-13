@@ -97,7 +97,7 @@ impl GlyphAtlas {
     /// Look up a glyph in the atlas, inserting it if missing.
     ///
     /// Rasterizes the glyph via `FontSet` and uploads the bitmap to the GPU texture.
-    #[allow(clippy::map_entry)] // self.upload_bitmap() borrows &mut self for row packing
+    #[allow(clippy::map_entry, reason = "Entry API unusable: upload_bitmap() borrows &mut self for row packing")]
     pub fn get_or_insert(
         &mut self,
         ch: char,
@@ -140,7 +140,7 @@ impl GlyphAtlas {
     }
 
     /// Look up an icon in the atlas, rasterizing and inserting it if missing.
-    #[allow(clippy::map_entry)]
+    #[allow(clippy::map_entry, reason = "Entry API unusable: upload_bitmap() borrows &mut self")]
     pub fn get_or_insert_icon(
         &mut self,
         icon: Icon,

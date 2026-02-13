@@ -8,7 +8,6 @@ use crate::drag::{DRAG_START_THRESHOLD, DragPhase, TEAR_OFF_THRESHOLD};
 use crate::log;
 use crate::tab_bar::{CONTROLS_ZONE_WIDTH, TAB_BAR_HEIGHT, TabBarHit, TabBarLayout};
 use crate::term_mode::TermMode;
-use crate::window::TermWindow;
 
 use super::{App, RESIZE_BORDER};
 
@@ -103,11 +102,7 @@ impl App {
         self.hover_url_range = new_url_range;
 
         if hover_changed {
-            if let Some(tid) = self
-                .windows
-                .get(&window_id)
-                .and_then(TermWindow::active_tab_id)
-            {
+            if let Some(tid) = self.active_tab_id(window_id) {
                 if let Some(tab) = self.tabs.get_mut(&tid) {
                     tab.grid_dirty = true;
                 }
@@ -121,39 +116,9 @@ impl App {
             }
         }
 
-        // Mouse motion reporting (before selection drag)
-        let mut mouse_motion_reported = false;
-        if !self.is_settings_window(window_id) && !self.modifiers.shift_key() {
-            let tab_id = self
-                .windows
-                .get(&window_id)
-                .and_then(TermWindow::active_tab_id);
-            if let Some(tid) = tab_id {
-                let report_all = self
-                    .tabs
-                    .get(&tid)
-                    .is_some_and(|t| t.mode.contains(TermMode::MOUSE_ALL));
-                let report_motion = self
-                    .tabs
-                    .get(&tid)
-                    .is_some_and(|t| t.mode.contains(TermMode::MOUSE_MOTION));
-
-                if report_all || (report_motion && self.left_mouse_down) {
-                    if let Some((col, line)) = self.pixel_to_cell(position) {
-                        let cell = (col, line);
-                        if self.last_mouse_cell != Some(cell) {
-                            self.last_mouse_cell = Some(cell);
-                            // Motion code: 32 + button (32 for left drag, 35 for no button)
-                            let code = if self.left_mouse_down { 32 } else { 35 };
-                            self.send_mouse_report(tid, code, col, line, true);
-                        }
-                        mouse_motion_reported = true;
-                    }
-                }
-            }
-        }
-
-        // Selection drag (skip when mouse reporting handled motion)
+        // Mouse motion reporting (before selection drag).
+        // When the PTY handles motion, skip selection drag to avoid conflicts.
+        let mouse_motion_reported = self.report_mouse_motion(window_id, position);
         if self.left_mouse_down && !mouse_motion_reported {
             self.update_selection_drag(window_id, position);
         }
@@ -163,6 +128,42 @@ impl App {
 
         // Tab drag state machine
         self.update_drag_state(window_id, position, event_loop);
+    }
+
+    /// Send mouse motion reports to the PTY when mouse tracking is active.
+    ///
+    /// Returns true if motion was reported (caller should skip selection drag).
+    fn report_mouse_motion(
+        &mut self,
+        window_id: WindowId,
+        position: PhysicalPosition<f64>,
+    ) -> bool {
+        if self.is_settings_window(window_id) || self.modifiers.shift_key() {
+            return false;
+        }
+        let Some(tid) = self.active_tab_id(window_id) else {
+            return false;
+        };
+        let mode = self
+            .tabs
+            .get(&tid)
+            .map_or(TermMode::empty(), |t| t.mode);
+        let report_all = mode.contains(TermMode::MOUSE_ALL);
+        let report_motion = mode.contains(TermMode::MOUSE_MOTION);
+        if !(report_all || report_motion && self.left_mouse_down) {
+            return false;
+        }
+        let Some((col, line)) = self.pixel_to_cell(position) else {
+            return false;
+        };
+        let cell = (col, line);
+        if self.last_mouse_cell != Some(cell) {
+            self.last_mouse_cell = Some(cell);
+            // Motion code: 32 + button (32 for left drag, 35 for no button).
+            let code = if self.left_mouse_down { 32 } else { 35 };
+            self.send_mouse_report(tid, code, col, line, true);
+        }
+        true
     }
 
     /// Update tab bar hover state and width lock.
@@ -294,8 +295,8 @@ impl App {
                     .and_then(|tw| tw.window.inner_position().ok())
                     .map(|ip| (ip.x as f64 + position.x, ip.y as f64 + position.y));
 
-                if let Some((sx, sy)) = screen_cursor {
-                    self.handle_torn_off_drag(tab_id, source_wid, grab_offset, sx, sy, mouse_off);
+                if let Some(screen) = screen_cursor {
+                    self.handle_torn_off_drag(tab_id, source_wid, grab_offset, screen, mouse_off);
                 }
             }
         }
@@ -307,23 +308,17 @@ impl App {
         tab_id: crate::tab::TabId,
         torn_wid: WindowId,
         grab_offset: PhysicalPosition<f64>,
-        sx: f64,
-        sy: f64,
+        screen: (f64, f64),
         mouse_off: f64,
     ) {
-        // Position torn-off window (even when hidden)
+        let (sx, sy) = screen;
+
+        // Position torn-off window (even when hidden).
         if self.drop_preview.is_none() {
-            if let Some(tw) = self.windows.get(&torn_wid) {
-                let new_x = sx - grab_offset.x;
-                let new_y = sy - grab_offset.y;
-                tw.window.set_outer_position(PhysicalPosition::new(
-                    new_x as i32,
-                    new_y as i32,
-                ));
-            }
+            self.position_window_at(torn_wid, sx - grab_offset.x, sy - grab_offset.y);
         }
 
-        // Check if cursor is over another window's tab bar
+        // Check if cursor is over another window's tab bar.
         let new_target = self
             .find_window_at_cursor(torn_wid, sx, sy)
             .map(|(twid, scr_x)| {
@@ -335,13 +330,7 @@ impl App {
         match (old_preview, new_target) {
             (None, Some((target_wid, idx))) => {
                 // Entering target: move tab into target, hide torn-off window.
-                if let Some(tw) = self.windows.get_mut(&torn_wid) {
-                    tw.remove_tab(tab_id);
-                }
-                if let Some(tw) = self.windows.get_mut(&target_wid) {
-                    tw.insert_tab_at(tab_id, idx);
-                    tw.window.request_redraw();
-                }
+                self.relocate_tab(tab_id, torn_wid, target_wid, idx);
                 if let Some(tw) = self.windows.get(&torn_wid) {
                     tw.window.set_visible(false);
                 }
@@ -362,15 +351,8 @@ impl App {
                     self.drop_preview = Some((new_twid, idx));
                 } else {
                     // Switched to different target window.
-                    self.drag_visual_x = None;
-                    self.tab_anim_offsets.remove(&old_twid);
-                    if let Some(tw) = self.windows.get_mut(&old_twid) {
-                        tw.remove_tab(tab_id);
-                    }
-                    if let Some(tw) = self.windows.get_mut(&new_twid) {
-                        tw.insert_tab_at(tab_id, new_idx);
-                        tw.window.request_redraw();
-                    }
+                    self.clear_preview_visuals(old_twid);
+                    self.relocate_tab(tab_id, old_twid, new_twid, new_idx);
                     self.drop_preview = Some((new_twid, new_idx));
                     self.tab_bar_dirty = true;
                     self.render_window(old_twid);
@@ -379,30 +361,53 @@ impl App {
             }
             (Some((old_twid, _)), None) => {
                 // Left target: undo preview, show torn-off window at cursor.
-                self.drag_visual_x = None;
-                self.tab_anim_offsets.remove(&old_twid);
+                self.clear_preview_visuals(old_twid);
                 if let Some(tw) = self.windows.get_mut(&old_twid) {
                     tw.remove_tab(tab_id);
                 }
                 if let Some(tw) = self.windows.get_mut(&torn_wid) {
                     tw.add_tab(tab_id);
                 }
+                self.position_window_at(torn_wid, sx - grab_offset.x, sy - grab_offset.y);
                 if let Some(tw) = self.windows.get(&torn_wid) {
-                    let new_x = sx - grab_offset.x;
-                    let new_y = sy - grab_offset.y;
-                    tw.window.set_outer_position(PhysicalPosition::new(
-                        new_x as i32,
-                        new_y as i32,
-                    ));
                     tw.window.set_visible(true);
                 }
                 self.drop_preview = None;
                 self.tab_bar_dirty = true;
                 self.render_window(old_twid);
             }
-            (None, None) => {
-                // Not over any target — nothing to do.
-            }
+            (None, None) => {}
+        }
+    }
+
+    /// Move a tab from one window to another at the given index.
+    fn relocate_tab(
+        &mut self,
+        tab_id: crate::tab::TabId,
+        from_wid: WindowId,
+        to_wid: WindowId,
+        idx: usize,
+    ) {
+        if let Some(tw) = self.windows.get_mut(&from_wid) {
+            tw.remove_tab(tab_id);
+        }
+        if let Some(tw) = self.windows.get_mut(&to_wid) {
+            tw.insert_tab_at(tab_id, idx);
+            tw.window.request_redraw();
+        }
+    }
+
+    /// Clear drag animation state for a window.
+    fn clear_preview_visuals(&mut self, window_id: WindowId) {
+        self.drag_visual_x = None;
+        self.tab_anim_offsets.remove(&window_id);
+    }
+
+    /// Set a window's outer position to the given screen coordinates.
+    fn position_window_at(&self, window_id: WindowId, x: f64, y: f64) {
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window
+                .set_outer_position(PhysicalPosition::new(x as i32, y as i32));
         }
     }
 }

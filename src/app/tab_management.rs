@@ -6,17 +6,14 @@ use winit::window::WindowId;
 use crate::config;
 use crate::log;
 use crate::palette;
-use crate::tab::{Tab, TabId};
-use crate::window::TermWindow;
+use crate::tab::{SpawnConfig, Tab, TabId};
 
 use super::App;
 
 impl App {
     pub(super) fn new_tab_in_window(&mut self, window_id: WindowId) -> Option<TabId> {
         let inherit_cwd: Option<String> = self
-            .windows
-            .get(&window_id)
-            .and_then(TermWindow::active_tab_id)
+            .active_tab_id(window_id)
             .and_then(|tid| self.tabs.get(&tid))
             .and_then(|t| t.cwd.clone());
 
@@ -86,17 +83,17 @@ impl App {
 
         let tab_id = self.alloc_tab_id();
         let cursor_shape = config::parse_cursor_style(&self.config.terminal.cursor_style);
-        let tab = match Tab::spawn(
-            tab_id,
+        let mut tab = match Tab::spawn(SpawnConfig {
+            id: tab_id,
             cols,
             rows,
-            self.proxy.clone(),
-            self.config.terminal.shell.as_deref(),
-            self.config.terminal.scrollback,
+            proxy: self.proxy.clone(),
+            shell: self.config.terminal.shell.clone(),
+            max_scrollback: self.config.terminal.scrollback,
             cursor_shape,
-            self.shell_integration_dir.as_deref(),
-            cwd,
-        ) {
+            integration_dir: self.shell_integration_dir.clone(),
+            cwd: cwd.map(String::from),
+        }) {
             Ok(t) => t,
             Err(e) => {
                 log(&format!("failed to spawn tab: {e}"));
@@ -104,14 +101,9 @@ impl App {
             }
         };
 
+        let scheme = palette::find_scheme(self.active_scheme);
+        tab.apply_color_config(scheme, &self.config.colors, self.config.behavior.bold_is_bright);
         self.tabs.insert(tab_id, tab);
-        if let Some(t) = self.tabs.get_mut(&tab_id) {
-            t.apply_color_config(
-                palette::find_scheme(self.active_scheme),
-                &self.config.colors,
-                self.config.behavior.bold_is_bright,
-            );
-        }
 
         self.tab_bar_dirty = true;
         if let Some(tw) = self.windows.get_mut(&window_id) {

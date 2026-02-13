@@ -35,34 +35,37 @@ pub(crate) fn byte_span_to_cols(
         return None;
     }
 
-    // Find the character index for byte_start
-    let mut char_idx_start = 0;
-    let mut byte_pos = 0;
-    for (i, ch) in text.chars().enumerate() {
-        if byte_pos >= byte_start {
-            char_idx_start = i;
-            break;
-        }
-        byte_pos += ch.len_utf8();
-        char_idx_start = i + 1;
-    }
+    let char_idx_start = char_index_at_byte(text, byte_start);
+    let char_idx_end = char_index_containing_byte(text, byte_end);
 
-    // Find the character index for byte_end (exclusive -> we want the last char)
-    let mut char_idx_end = 0;
-    byte_pos = 0;
-    for (i, ch) in text.chars().enumerate() {
-        byte_pos += ch.len_utf8();
-        if byte_pos >= byte_end {
-            char_idx_end = i;
-            break;
-        }
-        char_idx_end = i;
-    }
-
-    // Map character indices to column indices via col_map
     // col_map only has entries for non-spacer cells, so char indices
     // from zero-width chars may exceed col_map length.
     let start_col = col_map.get(char_idx_start).copied()?;
     let end_col = col_map.get(char_idx_end).copied()?;
     Some((start_col, end_col))
+}
+
+/// Return the char index of the first character starting at or after `byte_offset`.
+fn char_index_at_byte(text: &str, byte_offset: usize) -> usize {
+    let mut pos = 0;
+    for (i, ch) in text.chars().enumerate() {
+        if pos >= byte_offset {
+            return i;
+        }
+        pos += ch.len_utf8();
+    }
+    text.chars().count()
+}
+
+/// Return the char index of the character whose encoding contains `byte_offset`
+/// (i.e., the last character whose cumulative byte position reaches `byte_offset`).
+fn char_index_containing_byte(text: &str, byte_offset: usize) -> usize {
+    let mut pos = 0;
+    for (i, ch) in text.chars().enumerate() {
+        pos += ch.len_utf8();
+        if pos >= byte_offset {
+            return i;
+        }
+    }
+    text.chars().count().saturating_sub(1)
 }

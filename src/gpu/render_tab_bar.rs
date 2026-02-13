@@ -1,10 +1,5 @@
 //! Tab bar instance building — inactive/active tabs, close buttons, window controls.
 
-use super::color_util::{
-    lerp_color, lighten, TabBarColors, CONTROL_CLOSE_HOVER_BG, CONTROL_CLOSE_HOVER_FG,
-};
-use super::instance_writer::InstanceWriter;
-use super::renderer::{FrameParams, GpuRenderer};
 use crate::render::FontSet;
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH,
@@ -15,6 +10,11 @@ use crate::tab_bar::{
 use crate::tab_bar::CONTROL_BUTTON_WIDTH;
 #[cfg(not(target_os = "windows"))]
 use crate::tab_bar::{CONTROL_BUTTON_DIAMETER, CONTROL_BUTTON_MARGIN, CONTROL_BUTTON_SPACING};
+use super::color_util::{
+    lerp_color, lighten, TabBarColors, CONTROL_CLOSE_HOVER_BG, CONTROL_CLOSE_HOVER_FG,
+};
+use super::instance_writer::InstanceWriter;
+use super::renderer::{FrameParams, GpuRenderer};
 
 #[cfg(not(target_os = "windows"))]
 const CONTROL_CIRCLE_ALPHA: f32 = 0.3;
@@ -276,7 +276,7 @@ impl GpuRenderer {
         let btn_w = CONTROL_BUTTON_WIDTH as f32 * sc;
         let bar_h = TAB_BAR_HEIGHT as f32 * sc;
         let icon_sz = ICON_SIZE as f32 * sc;
-        let line_t = 1.0 * sc; // line thickness
+        let line_t = sc;
 
         // Minimize button (geometric horizontal line)
         {
@@ -310,58 +310,12 @@ impl GpuRenderer {
             };
             let icon_x = btn_x + (btn_w - icon_sz) / 2.0;
             let icon_y = (bar_h - icon_sz) / 2.0;
-            if params.is_maximized {
-                let sm = icon_sz - 2.0 * sc;
-                bg.push_rect(icon_x + 2.0 * sc, icon_y, sm, line_t, fg_color);
-                bg.push_rect(
-                    icon_x + 2.0 * sc,
-                    icon_y + sm - line_t,
-                    sm,
-                    line_t,
-                    fg_color,
-                );
-                bg.push_rect(icon_x + 2.0 * sc, icon_y, line_t, sm, fg_color);
-                bg.push_rect(
-                    icon_x + sm + 2.0 * sc - line_t,
-                    icon_y,
-                    line_t,
-                    sm,
-                    fg_color,
-                );
-                bg.push_rect(icon_x, icon_y + 2.0 * sc, sm, line_t, fg_color);
-                bg.push_rect(
-                    icon_x,
-                    icon_y + sm + 2.0 * sc - line_t,
-                    sm,
-                    line_t,
-                    fg_color,
-                );
-                bg.push_rect(icon_x, icon_y + 2.0 * sc, line_t, sm, fg_color);
-                bg.push_rect(
-                    icon_x + sm - line_t,
-                    icon_y + 2.0 * sc,
-                    line_t,
-                    sm,
-                    fg_color,
-                );
-                let inner_bg = if hovered {
-                    tc.control_hover_bg
-                } else {
-                    tc.bar_bg
-                };
-                bg.push_rect(
-                    icon_x + line_t,
-                    icon_y + 3.0 * sc,
-                    sm - 2.0 * line_t,
-                    sm - 2.0 * line_t,
-                    inner_bg,
-                );
+            let erase_bg = if hovered {
+                tc.control_hover_bg
             } else {
-                bg.push_rect(icon_x, icon_y, icon_sz, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y + icon_sz - line_t, icon_sz, line_t, fg_color);
-                bg.push_rect(icon_x, icon_y, line_t, icon_sz, fg_color);
-                bg.push_rect(icon_x + icon_sz - line_t, icon_y, line_t, icon_sz, fg_color);
-            }
+                tc.bar_bg
+            };
+            draw_maximize_icon(bg, icon_x, icon_y, icon_sz, sc, line_t, fg_color, erase_bg, params.is_maximized);
         }
 
         // Close button (Windows 11 style: geometric x drawn with small rects)
@@ -379,13 +333,7 @@ impl GpuRenderer {
             let x_size: f32 = 10.0 * sc;
             let cx = btn_x + (btn_w - x_size) / 2.0;
             let cy = (bar_h - x_size) / 2.0;
-            let steps = (10.0 * sc) as usize;
-            let step = x_size / steps as f32;
-            for i in 0..steps {
-                let fi = i as f32 * step;
-                bg.push_rect(cx + fi, cy + fi, sc, sc, close_fg);
-                bg.push_rect(cx + x_size - sc - fi, cy + fi, sc, sc, close_fg);
-            }
+            draw_x_icon(bg, cx, cy, x_size, sc, close_fg);
         }
     }
 
@@ -405,7 +353,7 @@ impl GpuRenderer {
         let margin = CONTROL_BUTTON_MARGIN as f32 * sc;
         let diameter = CONTROL_BUTTON_DIAMETER as f32 * sc;
         let spacing = CONTROL_BUTTON_SPACING as f32 * sc;
-        let line_t = 1.0 * sc;
+        let line_t = sc;
 
         // Button center X positions: minimize, maximize, close (left to right)
         let btn_cx = [
@@ -453,49 +401,75 @@ impl GpuRenderer {
 
             match i {
                 0 => {
-                    // Minimize: horizontal line
                     bg.push_rect(ix, cy, icon_s, line_t, fg_color);
                 }
                 1 => {
-                    // Maximize/Restore
-                    if params.is_maximized {
-                        let sm = icon_s - 2.0 * sc;
-                        // Back square
-                        bg.push_rect(ix + 2.0 * sc, iy, sm, line_t, fg_color);
-                        bg.push_rect(ix + 2.0 * sc, iy + sm - line_t, sm, line_t, fg_color);
-                        bg.push_rect(ix + 2.0 * sc, iy, line_t, sm, fg_color);
-                        bg.push_rect(ix + sm + 2.0 * sc - line_t, iy, line_t, sm, fg_color);
-                        // Front square
-                        bg.push_rect(ix, iy + 2.0 * sc, sm, line_t, fg_color);
-                        bg.push_rect(ix, iy + sm + 2.0 * sc - line_t, sm, line_t, fg_color);
-                        bg.push_rect(ix, iy + 2.0 * sc, line_t, sm, fg_color);
-                        bg.push_rect(ix + sm - line_t, iy + 2.0 * sc, line_t, sm, fg_color);
-                        bg.push_rect(
-                            ix + line_t,
-                            iy + 3.0 * sc,
-                            sm - 2.0 * line_t,
-                            sm - 2.0 * line_t,
-                            circle_bg,
-                        );
-                    } else {
-                        // Single square outline
-                        bg.push_rect(ix, iy, icon_s, line_t, fg_color);
-                        bg.push_rect(ix, iy + icon_s - line_t, icon_s, line_t, fg_color);
-                        bg.push_rect(ix, iy, line_t, icon_s, fg_color);
-                        bg.push_rect(ix + icon_s - line_t, iy, line_t, icon_s, fg_color);
-                    }
+                    draw_maximize_icon(bg, ix, iy, icon_s, sc, line_t, fg_color, circle_bg, params.is_maximized);
                 }
                 _ => {
-                    // Close: x drawn as 1px diagonal squares
-                    let steps = (ICON_SIZE as f32 * sc) as usize;
-                    let step = icon_s / steps as f32;
-                    for j in 0..steps {
-                        let fj = j as f32 * step;
-                        bg.push_rect(ix + fj, iy + fj, sc, sc, fg_color);
-                        bg.push_rect(ix + icon_s - sc - fj, iy + fj, sc, sc, fg_color);
-                    }
+                    draw_x_icon(bg, ix, iy, icon_s, sc, fg_color);
                 }
             }
         }
+    }
+}
+
+/// Draw a maximize (single square) or restore (two overlapping squares) icon.
+/// `erase_bg` is used to punch out the overlap area in restore mode.
+#[expect(clippy::too_many_arguments, reason = "Geometric drawing primitive with explicit coordinates")]
+fn draw_maximize_icon(
+    bg: &mut InstanceWriter,
+    x: f32,
+    y: f32,
+    size: f32,
+    sc: f32,
+    line_t: f32,
+    fg: [f32; 4],
+    erase_bg: [f32; 4],
+    is_maximized: bool,
+) {
+    if is_maximized {
+        let sm = size - 2.0 * sc;
+        // Back square (offset up-right)
+        draw_square_outline(bg, x + 2.0 * sc, y, sm, line_t, fg);
+        // Front square (offset down-left)
+        draw_square_outline(bg, x, y + 2.0 * sc, sm, line_t, fg);
+        // Erase overlap between the two squares
+        bg.push_rect(x + line_t, y + 3.0 * sc, sm - 2.0 * line_t, sm - 2.0 * line_t, erase_bg);
+    } else {
+        draw_square_outline(bg, x, y, size, line_t, fg);
+    }
+}
+
+/// Draw a square outline (4 edges) as rectangles.
+fn draw_square_outline(
+    bg: &mut InstanceWriter,
+    x: f32,
+    y: f32,
+    size: f32,
+    line_t: f32,
+    fg: [f32; 4],
+) {
+    bg.push_rect(x, y, size, line_t, fg);                  // top
+    bg.push_rect(x, y + size - line_t, size, line_t, fg);  // bottom
+    bg.push_rect(x, y, line_t, size, fg);                  // left
+    bg.push_rect(x + size - line_t, y, line_t, size, fg);  // right
+}
+
+/// Draw an X icon as 1px diagonal squares.
+fn draw_x_icon(
+    bg: &mut InstanceWriter,
+    x: f32,
+    y: f32,
+    size: f32,
+    sc: f32,
+    fg: [f32; 4],
+) {
+    let steps = size as usize;
+    let step = size / steps as f32;
+    for i in 0..steps {
+        let fi = i as f32 * step;
+        bg.push_rect(x + fi, y + fi, sc, sc, fg);
+        bg.push_rect(x + size - sc - fi, y + fi, sc, sc, fg);
     }
 }

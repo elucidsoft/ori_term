@@ -5,7 +5,7 @@ use vte::ansi::Color;
 use crate::cell::{Cell, CellFlags};
 
 /// Terminal cursor position and attribute template for newly written cells.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Cursor {
     /// Column position (0-based)
     pub col: usize,
@@ -18,17 +18,6 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Creates a new cursor at position (0, 0) with default attributes.
-    pub fn new(cols: usize, rows: usize) -> Self {
-        let _ = (cols, rows);
-        Self {
-            col: 0,
-            row: 0,
-            template: Cell::default(),
-            input_needs_wrap: false,
-        }
-    }
-
     /// Resets the cursor's attribute template to default colors and flags.
     pub fn reset_attrs(&mut self) {
         self.template.fg = Color::Named(vte::ansi::NamedColor::Foreground);

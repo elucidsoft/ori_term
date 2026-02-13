@@ -5,17 +5,11 @@ use winit::window::WindowId;
 
 use super::App;
 use crate::tab::TabId;
-use crate::window::TermWindow;
 
 impl App {
     pub(super) fn open_search(&mut self, window_id: WindowId) {
-        let tab_id = match self
-            .windows
-            .get(&window_id)
-            .and_then(TermWindow::active_tab_id)
-        {
-            Some(id) => id,
-            None => return,
+        let Some(tab_id) = self.active_tab_id(window_id) else {
+            return;
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
             tab.open_search();
@@ -27,11 +21,7 @@ impl App {
     }
 
     pub(super) fn close_search(&mut self, window_id: WindowId) {
-        let tab_id = self
-            .windows
-            .get(&window_id)
-            .and_then(TermWindow::active_tab_id);
-        if let Some(tid) = tab_id {
+        if let Some(tid) = self.active_tab_id(window_id) {
             if let Some(tab) = self.tabs.get_mut(&tid) {
                 tab.close_search();
             }
@@ -47,67 +37,56 @@ impl App {
         window_id: WindowId,
         event: &winit::event::KeyEvent,
     ) {
+        // Escape closes the search bar (which handles its own redraw).
+        if event.logical_key == Key::Named(NamedKey::Escape) {
+            self.close_search(window_id);
+            return;
+        }
+
+        let Some(tid) = self.active_tab_id(window_id) else {
+            return;
+        };
+
+        let mut needs_redraw = false;
         match &event.logical_key {
-            Key::Named(NamedKey::Escape) => {
-                self.close_search(window_id);
-            }
             Key::Named(NamedKey::Enter) => {
-                let tab_id = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(TermWindow::active_tab_id);
-                if let Some(tid) = tab_id {
-                    if let Some(tab) = self.tabs.get_mut(&tid) {
-                        if let Some(ref mut search) = tab.search {
-                            if self.modifiers.shift_key() {
-                                search.prev_match();
-                            } else {
-                                search.next_match();
-                            }
+                if let Some(tab) = self.tabs.get_mut(&tid) {
+                    if let Some(search) = &mut tab.search {
+                        if self.modifiers.shift_key() {
+                            search.prev_match();
+                        } else {
+                            search.next_match();
                         }
                     }
-                    self.scroll_to_search_match(tid);
                 }
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
+                self.scroll_to_search_match(tid);
+                needs_redraw = true;
             }
             Key::Named(NamedKey::Backspace) => {
-                let tab_id = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(TermWindow::active_tab_id);
-                if let Some(tid) = tab_id {
-                    if let Some(tab) = self.tabs.get_mut(&tid) {
-                        if let Some(ref mut search) = tab.search {
-                            search.query.pop();
-                        }
+                if let Some(tab) = self.tabs.get_mut(&tid) {
+                    if let Some(search) = &mut tab.search {
+                        search.query.pop();
                     }
-                    self.update_search(tid);
                 }
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
+                self.update_search(tid);
+                needs_redraw = true;
             }
             Key::Character(c) => {
-                let tab_id = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(TermWindow::active_tab_id);
-                if let Some(tid) = tab_id {
-                    let text = c.as_str().to_owned();
-                    if let Some(tab) = self.tabs.get_mut(&tid) {
-                        if let Some(ref mut search) = tab.search {
-                            search.query.push_str(&text);
-                        }
+                if let Some(tab) = self.tabs.get_mut(&tid) {
+                    if let Some(search) = &mut tab.search {
+                        search.query.push_str(c.as_str());
                     }
-                    self.update_search(tid);
                 }
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
+                self.update_search(tid);
+                needs_redraw = true;
             }
             _ => {}
+        }
+
+        if needs_redraw {
+            if let Some(tw) = self.windows.get(&window_id) {
+                tw.window.request_redraw();
+            }
         }
     }
 

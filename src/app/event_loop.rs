@@ -16,7 +16,6 @@ use crate::keybindings;
 use crate::log;
 use crate::tab::TermEvent;
 use crate::term_mode::TermMode;
-use crate::window::TermWindow;
 
 use super::{App, build_modifiers};
 
@@ -191,9 +190,7 @@ impl ApplicationHandler<TermEvent> for App {
                 // Allow key release through only when Kitty REPORT_EVENT_TYPES is active.
                 if event.state != ElementState::Pressed {
                     let has_kitty_events = self
-                        .windows
-                        .get(&window_id)
-                        .and_then(TermWindow::active_tab_id)
+                        .active_tab_id(window_id)
                         .and_then(|tid| self.tabs.get(&tid))
                         .is_some_and(|tab| tab.mode.contains(TermMode::REPORT_EVENT_TYPES));
                     if !has_kitty_events {
@@ -214,11 +211,7 @@ impl ApplicationHandler<TermEvent> for App {
                 // Context menu: Escape dismisses it, all other keys ignored
                 if self.context_menu.is_some() {
                     if is_pressed && matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
-                        self.context_menu = None;
-                        self.tab_bar_dirty = true;
-                        if let Some(tw) = self.windows.get(&window_id) {
-                            tw.window.request_redraw();
-                        }
+                        self.dismiss_context_menu(window_id);
                     }
                     return;
                 }
@@ -295,11 +288,7 @@ impl ApplicationHandler<TermEvent> for App {
                 if is_pressed {
                     self.cursor_blink_reset = Instant::now();
                 }
-                let tab_id = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(TermWindow::active_tab_id);
-                if let Some(tid) = tab_id {
+                if let Some(tid) = self.active_tab_id(window_id) {
                     // Scroll to live on press (not release).
                     if is_pressed {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
@@ -337,11 +326,7 @@ impl ApplicationHandler<TermEvent> for App {
             WindowEvent::Focused(focused) => {
                 // Dismiss context menu on focus loss
                 if !focused && self.context_menu.is_some() {
-                    self.context_menu = None;
-                    self.tab_bar_dirty = true;
-                    if let Some(tw) = self.windows.get(&window_id) {
-                        tw.window.request_redraw();
-                    }
+                    self.dismiss_context_menu(window_id);
                 }
                 // Skip settings window — no PTY to send to
                 if self.is_settings_window(window_id) {
@@ -350,11 +335,7 @@ impl ApplicationHandler<TermEvent> for App {
                 if focused {
                     self.cursor_blink_reset = Instant::now();
                 }
-                if let Some(tid) = self
-                    .windows
-                    .get(&window_id)
-                    .and_then(TermWindow::active_tab_id)
-                {
+                if let Some(tid) = self.active_tab_id(window_id) {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
                         if tab.mode.contains(TermMode::FOCUS_IN_OUT) {
                             let seq = if focused {

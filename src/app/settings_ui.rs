@@ -8,6 +8,15 @@ use crate::log;
 use crate::palette::{BUILTIN_SCHEMES, ColorScheme};
 use crate::window::TermWindow;
 
+/// Settings window close button size (pixels, top-right corner).
+const SETTINGS_CLOSE_SIZE: usize = 30;
+
+/// Settings window title area height (pixels).
+const SETTINGS_TITLE_HEIGHT: usize = 50;
+
+/// Settings window row height for scheme list items (pixels).
+const SETTINGS_ROW_HEIGHT: usize = 40;
+
 impl App {
     pub(super) fn is_settings_window(&self, window_id: WindowId) -> bool {
         self.settings_window == Some(window_id)
@@ -114,24 +123,20 @@ impl App {
     }
 
     pub(super) fn handle_settings_mouse(&mut self, window_id: WindowId, x: usize, y: usize) {
-        // Close button (top-right 30x30) — check first
         let w = self
             .windows
             .get(&window_id)
             .map_or(0, |tw| tw.window.inner_size().width as usize);
-        if x >= w.saturating_sub(30) && y < 30 {
+        if x >= w.saturating_sub(SETTINGS_CLOSE_SIZE) && y < SETTINGS_CLOSE_SIZE {
             self.close_settings_window();
             return;
         }
 
-        let title_h: usize = 50;
-        let row_h: usize = 40;
-
-        if y < title_h {
+        if y < SETTINGS_TITLE_HEIGHT {
             return;
         }
 
-        let row_idx = (y - title_h) / row_h;
+        let row_idx = (y - SETTINGS_TITLE_HEIGHT) / SETTINGS_ROW_HEIGHT;
         if row_idx < BUILTIN_SCHEMES.len() {
             let scheme = BUILTIN_SCHEMES[row_idx];
             self.apply_scheme_to_all_tabs(scheme);

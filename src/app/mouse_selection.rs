@@ -5,10 +5,7 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 
-use crate::grid::GRID_PADDING_TOP;
 use crate::selection::{self, Selection, SelectionMode, SelectionPoint, Side};
-use crate::tab_bar::TAB_BAR_HEIGHT;
-use crate::window::TermWindow;
 
 use super::{App, DOUBLE_CLICK_MS};
 
@@ -44,6 +41,35 @@ impl App {
         count
     }
 
+    /// Handle Ctrl+click to open a hyperlink URL (OSC 8 or implicit).
+    ///
+    /// Returns true if a URL was opened and the click should be consumed.
+    fn handle_ctrl_click_url(&mut self, tab_id: crate::tab::TabId, abs_row: usize, col: usize) -> bool {
+        // Check OSC 8 hyperlink first
+        let uri: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
+            let row = tab.grid().absolute_row(abs_row)?;
+            if col >= row.len() {
+                return None;
+            }
+            row[col].hyperlink().map(|h| h.uri.clone())
+        });
+        if let Some(ref uri) = uri {
+            Self::open_url(uri);
+            return true;
+        }
+        // Fall through to implicit URL detection
+        let implicit_url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
+            let grid = tab.grid();
+            let hit = self.url_cache.url_at(grid, abs_row, col)?;
+            Some(hit.url)
+        });
+        if let Some(ref url) = implicit_url {
+            Self::open_url(url);
+            return true;
+        }
+        false
+    }
+
     /// Handle a left-click press in the grid area — selection start.
     pub(super) fn handle_grid_press(&mut self, window_id: WindowId, pos: PhysicalPosition<f64>) {
         let (col, line) = match self.pixel_to_cell(pos) {
@@ -52,51 +78,24 @@ impl App {
         };
         let side = self.pixel_to_side(pos);
 
-        let tab_id = match self
-            .windows
-            .get(&window_id)
-            .and_then(TermWindow::active_tab_id)
-        {
-            Some(id) => id,
-            None => return,
+        let Some(tab_id) = self.active_tab_id(window_id) else {
+            return;
         };
 
-        // Clamp col/line to grid bounds
-        let (grid_cols, grid_lines) = match self.tabs.get(&tab_id) {
-            Some(tab) => (tab.grid().cols, tab.grid().lines),
-            None => return,
-        };
-        let col = col.min(grid_cols.saturating_sub(1));
-        let line = line.min(grid_lines.saturating_sub(1));
-
-        let abs_row = match self.tabs.get(&tab_id) {
-            Some(tab) => tab.grid().viewport_to_absolute(line),
+        // Clamp col/line to grid bounds and compute absolute row in one lookup.
+        let (grid_cols, col, line, abs_row) = match self.tabs.get(&tab_id) {
+            Some(tab) => {
+                let g = tab.grid();
+                let c = col.min(g.cols.saturating_sub(1));
+                let l = line.min(g.lines.saturating_sub(1));
+                (g.cols, c, l, g.viewport_to_absolute(l))
+            }
             None => return,
         };
 
         // Ctrl+click: open hyperlink URL (OSC 8 first, then implicit URL)
-        if self.modifiers.control_key() {
-            let uri: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
-                let row = tab.grid().absolute_row(abs_row)?;
-                if col >= row.len() {
-                    return None;
-                }
-                row[col].hyperlink().map(|h| h.uri.clone())
-            });
-            if let Some(ref uri) = uri {
-                Self::open_url(uri);
-                return;
-            }
-            // Fall through to implicit URL detection
-            let implicit_url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
-                let grid = tab.grid();
-                let hit = self.url_cache.url_at(grid, abs_row, col)?;
-                Some(hit.url)
-            });
-            if let Some(ref url) = implicit_url {
-                Self::open_url(url);
-                return;
-            }
+        if self.modifiers.control_key() && self.handle_ctrl_click_url(tab_id, abs_row, col) {
+            return;
         }
 
         let click_count = self.detect_click_count(window_id, col, line);
@@ -197,11 +196,7 @@ impl App {
     ) {
         if let Some((col, line)) = self.pixel_to_cell(position) {
             let side = self.pixel_to_side(position);
-            let tab_id = self
-                .windows
-                .get(&window_id)
-                .and_then(TermWindow::active_tab_id);
-            if let Some(tid) = tab_id {
+            if let Some(tid) = self.active_tab_id(window_id) {
                 if let Some(tab) = self.tabs.get_mut(&tid) {
                     let grid_cols = tab.grid().cols;
                     let grid_lines = tab.grid().lines;
@@ -272,26 +267,17 @@ impl App {
         } else {
             // Mouse outside grid — auto-scroll
             let y = position.y as usize;
-            let grid_top =
-                self.scale_px(TAB_BAR_HEIGHT) + self.scale_px(GRID_PADDING_TOP);
-            let tab_id = self
-                .windows
-                .get(&window_id)
-                .and_then(TermWindow::active_tab_id);
-            if let Some(tid) = tab_id {
-                if y < grid_top {
-                    // Above grid: scroll up into history
-                    if let Some(tab) = self.tabs.get_mut(&tid) {
-                        tab.scroll_lines(1);
-                    }
-                }
-                // Below grid: scroll down toward live
-                // (Only if display_offset > 0)
+            let grid_top = self.grid_top();
+            let ch = self.glyphs.cell_height;
+            if let Some(tid) = self.active_tab_id(window_id) {
                 if let Some(tab) = self.tabs.get_mut(&tid) {
-                    let ch = self.glyphs.cell_height;
-                    let grid_bottom = grid_top + tab.grid().lines * ch;
-                    if y >= grid_bottom && tab.grid().display_offset > 0 {
-                        tab.scroll_lines(-1);
+                    if y < grid_top {
+                        tab.scroll_lines(1);
+                    } else {
+                        let grid_bottom = grid_top + tab.grid().lines * ch;
+                        if y >= grid_bottom && tab.grid().display_offset > 0 {
+                            tab.scroll_lines(-1);
+                        }
                     }
                 }
                 if let Some(tw) = self.windows.get(&window_id) {
