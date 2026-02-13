@@ -48,8 +48,15 @@ impl ApplicationHandler<TermEvent> for App {
 
                 self.cursor_blink_reset = Instant::now();
 
+                let old_title = self.tabs.get(&tab_id)
+                    .map(|t| t.effective_title().into_owned());
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
+                }
+                let new_title = self.tabs.get(&tab_id)
+                    .map(|t| t.effective_title().into_owned());
+                if old_title != new_title {
+                    self.tab_bar_dirty = true;
                 }
 
                 // Process bell state: if this tab rang the bell and is NOT active,

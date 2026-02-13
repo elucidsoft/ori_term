@@ -316,7 +316,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, input: CellInput) -> VertexOutput {
 
 // sRGB render target handles gamma-correct blending automatically:
 // the GPU reads the framebuffer in linear, blends in linear, and writes
-// back sRGB.  fontdue's area-coverage is already linear, so raw coverage
+// back sRGB.  swash's area-coverage is already linear, so raw coverage
 // is the correct alpha -- no manual gamma correction needed.
 //
 // When linear correction is enabled (flags bit 0), we adjust the alpha

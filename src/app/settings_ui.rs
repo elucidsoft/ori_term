@@ -118,7 +118,7 @@ impl App {
             phys.height,
             self.active_scheme,
             palette,
-            &mut self.ui_glyphs,
+            &mut self.ui_collection,
         );
     }
 

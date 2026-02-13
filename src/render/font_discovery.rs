@@ -129,68 +129,10 @@ pub(crate) const DWRITE_FAMILIES: &[&str] = &[
 #[cfg(target_os = "windows")]
 const DWRITE_FALLBACK_FAMILIES: &[&str] = &["Segoe UI Symbol", "MS Gothic", "Segoe UI"];
 
-/// UI font family names to try on Windows (proportional).
-#[cfg(target_os = "windows")]
-pub(super) const DWRITE_UI_FAMILIES: &[&str] = &["Segoe UI", "Tahoma", "Arial"];
-
-/// Detect the OS system UI font family name.
-///
-/// On Windows, queries `SystemParametersInfo(SPI_GETNONCLIENTMETRICS)` to get
-/// the message font (used for dialogs and general UI text).
-#[cfg(target_os = "windows")]
-#[allow(unsafe_code)]
-pub(super) fn detect_system_ui_font_name() -> Option<String> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SystemParametersInfoW,
-    };
-
-    // SAFETY: We pass a properly sized and zeroed NONCLIENTMETRICSW buffer to
-    // SystemParametersInfoW, which is a standard Win32 API call that fills the
-    // struct with system font metrics.
-    let mut metrics = unsafe { std::mem::zeroed::<NONCLIENTMETRICSW>() };
-    metrics.cbSize = size_of::<NONCLIENTMETRICSW>() as u32;
-
-    let success = unsafe {
-        SystemParametersInfoW(
-            SPI_GETNONCLIENTMETRICS,
-            metrics.cbSize,
-            (&raw mut metrics).cast::<std::ffi::c_void>(),
-            0,
-        )
-    };
-
-    if success == 0 {
-        return None;
-    }
-
-    // lfMessageFont is the font used for message boxes and general dialog UI.
-    let face_name = &metrics.lfMessageFont.lfFaceName;
-    let len = face_name
-        .iter()
-        .position(|&c| c == 0)
-        .unwrap_or(face_name.len());
-    String::from_utf16(&face_name[..len]).ok()
-}
-
-/// UI font filenames to try on Linux (proportional, SemiBold preferred).
-#[cfg(not(target_os = "windows"))]
-pub(super) const UI_FONT_NAMES: &[&str] = &[
-    "Cantarell-Bold.otf",
-    "Ubuntu-M.ttf",
-    "NotoSans-SemiBold.ttf",
-    "NotoSans-SemiBold.otf",
-    "DejaVuSans-Bold.ttf",
-    "LiberationSans-Bold.ttf",
-    // Regular fallbacks
-    "Cantarell-Regular.otf",
-    "Ubuntu-R.ttf",
-    "NotoSans-Regular.ttf",
-    "NotoSans-Regular.otf",
-    "DejaVuSans.ttf",
-    "LiberationSans-Regular.ttf",
-];
-
 /// Resolve a single font variant via DirectWrite by family name + weight + style.
+///
+/// Uses `GetFirstMatchingFont` for best-match selection rather than requiring
+/// an exact weight match. DirectWrite picks the closest available weight.
 #[cfg(target_os = "windows")]
 pub(crate) fn resolve_font_dwrite(
     family_name: &str,
@@ -198,16 +140,10 @@ pub(crate) fn resolve_font_dwrite(
     style: dwrote::FontStyle,
 ) -> Option<PathBuf> {
     let collection = dwrote::FontCollection::system();
-    let descriptor = dwrote::FontDescriptor {
-        family_name: family_name.to_string(),
-        weight,
-        stretch: dwrote::FontStretch::Normal,
-        style,
-    };
-    let font = collection
-        .font_from_descriptor(&descriptor)
-        .ok()
-        .flatten()?;
+    let family = collection.font_family_by_name(family_name).ok().flatten()?;
+    let font = family
+        .first_matching_font(weight, dwrote::FontStretch::Normal, style)
+        .ok()?;
     let face = font.create_font_face();
     let files = face.files().ok()?;
     let file = files.first()?;
@@ -218,36 +154,78 @@ pub(crate) fn resolve_font_dwrite(
 /// via DirectWrite. Returns `None` if the family doesn't exist (Regular not found).
 /// Bold/Italic/BoldItalic paths are filtered: if DirectWrite returns the same file
 /// as Regular (fuzzy fallback), the variant is treated as unavailable.
+///
+/// `weight` is the CSS-style weight (100–900) for the Regular slot. Bold is
+/// derived as `min(900, weight + 300)` per the CSS "bolder" algorithm.
 #[cfg(target_os = "windows")]
-pub(crate) fn resolve_family_paths_dwrite(family_name: &str) -> Option<[Option<PathBuf>; 4]> {
+pub(crate) fn resolve_family_paths_dwrite(
+    family_name: &str,
+    weight: u16,
+) -> Option<[Option<PathBuf>; 4]> {
+    let regular_weight = dwrote::FontWeight::from_u32(weight as u32);
+    let bold_weight = dwrote::FontWeight::from_u32((weight + 300).min(900) as u32);
+
     let regular = resolve_font_dwrite(
         family_name,
-        dwrote::FontWeight::Regular,
+        regular_weight,
         dwrote::FontStyle::Normal,
     )?;
 
     let bold = resolve_font_dwrite(
         family_name,
-        dwrote::FontWeight::Bold,
+        bold_weight,
         dwrote::FontStyle::Normal,
     )
     .filter(|p| *p != regular);
 
     let italic = resolve_font_dwrite(
         family_name,
-        dwrote::FontWeight::Regular,
+        regular_weight,
         dwrote::FontStyle::Italic,
     )
     .filter(|p| *p != regular);
 
     let bold_italic = resolve_font_dwrite(
         family_name,
-        dwrote::FontWeight::Bold,
+        bold_weight,
         dwrote::FontStyle::Italic,
     )
     .filter(|p| *p != regular);
 
+    let path_str = |p: &Option<PathBuf>| -> String {
+        p.as_ref().map_or_else(|| "none".into(), |p| p.display().to_string())
+    };
+    crate::log(&format!(
+        "font_discovery: {family_name:?} weight={weight} bold_weight={} \
+         regular={} bold={} italic={} bold_italic={}",
+        (weight + 300).min(900),
+        regular.display(),
+        path_str(&bold),
+        path_str(&italic),
+        path_str(&bold_italic),
+    ));
+
     Some([Some(regular), bold, italic, bold_italic])
+}
+
+/// Resolve a user-configured fallback font family name to a file path (Windows).
+///
+/// Tries DirectWrite first, then falls back to `C:\Windows\Fonts\{name}`.
+#[cfg(target_os = "windows")]
+pub(crate) fn resolve_user_fallback(family: &str) -> Option<PathBuf> {
+    if let Some(path) = resolve_font_dwrite(
+        family,
+        dwrote::FontWeight::Regular,
+        dwrote::FontStyle::Normal,
+    ) {
+        return Some(path);
+    }
+    let path = if std::path::Path::new(family).is_absolute() {
+        PathBuf::from(family)
+    } else {
+        PathBuf::from(r"C:\Windows\Fonts").join(family)
+    };
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Resolve fallback font paths via DirectWrite, with static paths as additional fallback.
@@ -322,6 +300,21 @@ pub(crate) fn find_font_variant_path(
         if let Some(path) = index.get(*name) {
             return Some(path.clone());
         }
+    }
+    None
+}
+
+/// Resolve a user-configured fallback font family name to a file path (Linux).
+///
+/// Looks up in the pre-built font index first, then tries as an absolute path.
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn resolve_user_fallback(family: &str, font_index: &HashMap<String, PathBuf>) -> Option<PathBuf> {
+    if let Some(path) = font_index.get(family) {
+        return Some(path.clone());
+    }
+    let path = PathBuf::from(family);
+    if path.is_absolute() && path.exists() {
+        return Some(path);
     }
     None
 }

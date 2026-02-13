@@ -1,6 +1,6 @@
 //! Tab bar instance building — inactive/active tabs, close buttons, window controls.
 
-use crate::render::FontSet;
+use crate::font::FontCollection;
 use crate::tab_bar::{
     TabBarHit, TabBarLayout, CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH,
     DROPDOWN_BUTTON_WIDTH, ICON_SIZE, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN,
@@ -26,7 +26,7 @@ impl GpuRenderer {
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
         tc: &TabBarColors,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
         let w = params.width as f32;
@@ -213,7 +213,7 @@ impl GpuRenderer {
         tc: &TabBarColors,
         tab_idx: usize,
         params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
         let s = params.scale;

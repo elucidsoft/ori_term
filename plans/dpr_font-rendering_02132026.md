@@ -1205,17 +1205,18 @@ When `builtin_glyphs = true` (default), box drawing / block elements / braille /
 
 ### Phase 2: Core (Shaping + Collection)
 
-- [ ] Add `rustybuzz` dependency to `Cargo.toml` (pure Rust HarfBuzz port, cross-compiles cleanly)
+- [x] Add `rustybuzz` dependency to `Cargo.toml` (pure Rust HarfBuzz port, cross-compiles cleanly)
 - [ ] Implement `FontDatabase`: system font enumeration with cmap-based coverage indexing
-- [ ] Implement `DeferredFace` / `LoadedFace` with lazy loading (extend existing `ensure_font_loaded()`)
-- [ ] Implement `FontCollection` with primary + fallback chain, metric normalization (cap height scaling)
-- [ ] Implement `shape_line()`: segment cells into runs, shape via rustybuzz, map glyphs back to columns
-- [ ] Update `build_grid_instances()` in `render_grid.rs` to use shaped glyphs instead of per-cell atlas lookup
-- [ ] Handle ligatures in grid rendering: multi-column glyph placement with correct cell spanning
-- [ ] Add `Feature` type and per-font feature parsing from config
-- [ ] Migrate `FontConfig` to expanded config format (features, fallback chain, axes)
-- [ ] Implement combining mark shaping (zero-width characters via shaping runs, replacing current overlay loop)
-- [ ] Add grid clamping post-shaping: quantize glyph advances to cell-width multiples to eliminate sub-pixel gaps with hinting enabled
+- [x] Implement `DeferredFace` / `LoadedFace` with lazy loading (extend existing `ensure_font_loaded()`) — implemented as `FaceData` + `ensure_primary_loaded()`/`ensure_fallbacks_loaded()`
+- [x] Implement `FontCollection` with primary + fallback chain — metric normalization (cap height scaling) NOT YET DONE
+- [x] Implement `shape_line()`: segment cells into runs, shape via rustybuzz, map glyphs back to columns — two-phase API: `prepare_line()` + `shape_prepared_runs()`
+- [x] Update `build_grid_instances()` in `render_grid.rs` to use shaped glyphs instead of per-cell atlas lookup
+- [x] Handle ligatures in grid rendering: multi-column glyph placement via `col_glyph_map` sparse indexing
+- [x] Add `Feature` type and per-font feature parsing from config — `FontCollection::parse_features()` + `features` field
+- [ ] Migrate `FontConfig` to expanded config format (per-fallback features, size_offset, axes)
+- [x] Implement combining mark shaping (zero-width characters via shaping runs)
+- [x] Add grid clamping post-shaping: implicit via `col_glyph_map` column mapping + `col_span` rounding
+- [ ] Implement cap-height metric normalization for fallback fonts (scale_factor = primary.cap_height / fallback.cap_height)
 - [ ] Implement OpenType BASE table reading via `ttf-parser` for per-script baseline offsets (CJK ideographic baseline, etc.)
 
 ### Phase 2.5: Color Emoji (CBDT/CBLC Bitmap)

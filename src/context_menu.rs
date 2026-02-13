@@ -6,8 +6,8 @@
 //! - **Tab bar menu**: right-click on empty tab bar area → New Tab
 //! - **Dropdown menu**: dropdown button → Settings + Color Scheme submenu
 
+use crate::font::FontCollection;
 use crate::palette::BUILTIN_SCHEMES;
-use crate::render::FontSet;
 
 /// Corner radius for the menu popup.
 const MENU_RADIUS: f32 = 8.0;
@@ -132,7 +132,7 @@ impl MenuOverlay {
     }
 
     /// Compute layout dimensions. Call once after creating the overlay.
-    pub fn layout(&mut self, glyphs: &mut FontSet) {
+    pub fn layout(&mut self, collection: &FontCollection) {
         let s = self.scale;
         // Checkmark rendered as a vector icon — use fixed icon size + gap
         let check_prefix_w = CHECKMARK_ICON_SIZE * s + CHECKMARK_GAP * s;
@@ -146,7 +146,7 @@ impl MenuOverlay {
             .iter()
             .filter_map(|e| {
                 let label = e.label()?;
-                let text_w = glyphs.text_advance(label);
+                let text_w = collection.text_advance(label);
                 let extra = if has_checks { check_prefix_w } else { 0.0 };
                 Some(text_w + extra)
             })

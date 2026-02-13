@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use crate::font::FaceIdx;
 use crate::icons::Icon;
-use crate::render::{FontSet, FontStyle};
 
 /// Atlas page size in pixels (width = height).
 const PAGE_SIZE: u32 = 2048;
@@ -17,11 +16,9 @@ const PAGE_SIZE: u32 = 2048;
 /// Maximum number of atlas pages before LRU eviction kicks in.
 const MAX_PAGES: u32 = 4;
 
-/// Cache key: character + style + size at 1/64th point precision (26.6 fixed-point).
-type GlyphKey = (char, FontStyle, u32);
-
-/// Cache key for shaped glyphs: glyph ID + face index + size (26.6 fixed-point).
-type ShapedGlyphKey = (u16, FaceIdx, u32);
+/// Cache key for shaped glyphs: glyph ID + face index + size (26.6 fixed-point)
+/// + collection discriminator (0 = grid, 1 = UI).
+type ShapedGlyphKey = (u16, FaceIdx, u32, u8);
 
 /// Convert a font size in points to a 26.6 fixed-point size key.
 ///
@@ -178,13 +175,28 @@ pub struct AtlasEntry {
     pub page: u32,
 }
 
-/// Subset of `fontdue::Metrics` stored per glyph.
+/// Rasterized glyph data — decoupled from any specific rasterizer.
+pub struct GlyphBitmap {
+    pub width: usize,
+    pub height: usize,
+    /// X bearing (positive = right of origin).
+    pub left: i32,
+    /// Y bearing (positive = above baseline, matching FreeType/swash convention).
+    pub top: i32,
+    pub advance_width: f32,
+    /// Grayscale alpha bitmap (1 byte per pixel).
+    pub data: Vec<u8>,
+}
+
+/// Per-glyph metrics stored in the atlas (no pixel data).
 #[derive(Clone, Copy)]
 pub struct GlyphMetrics {
     pub width: usize,
     pub height: usize,
-    pub xmin: i32,
-    pub ymin: i32,
+    /// X bearing (positive = right of origin).
+    pub left: i32,
+    /// Y bearing (positive = above baseline).
+    pub top: i32,
     pub advance_width: f32,
 }
 
@@ -202,9 +214,8 @@ pub struct GlyphAtlas {
     max_pages: u32,
     /// Monotonically increasing frame counter for LRU tracking.
     frame_counter: u64,
-    entries: HashMap<GlyphKey, AtlasEntry>,
     icon_entries: HashMap<(Icon, u16), AtlasEntry>,
-    /// Cache for shaped glyphs (glyph ID + face index + size).
+    /// Cache for shaped glyphs (glyph ID + face index + size + collection ID).
     shaped_entries: HashMap<ShapedGlyphKey, AtlasEntry>,
 }
 
@@ -228,7 +239,6 @@ impl GlyphAtlas {
             page_size: PAGE_SIZE,
             max_pages: MAX_PAGES,
             frame_counter: 0,
-            entries: HashMap::new(),
             icon_entries: HashMap::new(),
             shaped_entries: HashMap::new(),
         }
@@ -236,47 +246,6 @@ impl GlyphAtlas {
 
     pub fn view(&self) -> &wgpu::TextureView {
         &self.view
-    }
-
-    /// Look up a glyph in the atlas, inserting it if missing.
-    ///
-    /// Rasterizes the glyph via `FontSet` and uploads the bitmap to the GPU texture.
-    #[allow(clippy::map_entry, reason = "Entry API unusable: upload_bitmap() borrows &mut self for packing")]
-    pub fn get_or_insert(
-        &mut self,
-        ch: char,
-        style: FontStyle,
-        glyphs: &mut FontSet,
-        queue: &wgpu::Queue,
-    ) -> &AtlasEntry {
-        let key = (ch, style, size_key(glyphs.size));
-
-        // Cache miss: rasterize, upload, insert.
-        // Uses `contains_key` (returns bool) instead of `get` (returns ref)
-        // to avoid holding an immutable borrow across the miss path.
-        if !self.entries.contains_key(&key) {
-            glyphs.ensure(ch, style);
-            if let Some((metrics, bitmap)) = glyphs.get(ch, style) {
-                let glyph_metrics = GlyphMetrics {
-                    width: metrics.width,
-                    height: metrics.height,
-                    xmin: metrics.xmin,
-                    ymin: metrics.ymin,
-                    advance_width: metrics.advance_width,
-                };
-                let entry = self.upload_bitmap(&glyph_metrics, bitmap, queue);
-                self.entries.insert(key, entry);
-            } else {
-                self.entries.insert(key, AtlasEntry::empty());
-            }
-        }
-
-        // Single lookup for both hit and miss paths: get entry + mark LRU.
-        let entry = self.entries.get(&key).expect("glyph entry just inserted");
-        if let Some(page) = self.pages.get_mut(entry.page as usize) {
-            page.last_used_frame = self.frame_counter;
-        }
-        entry
     }
 
     /// Look up an icon in the atlas, rasterizing and inserting it if missing.
@@ -293,8 +262,8 @@ impl GlyphAtlas {
             let metrics = GlyphMetrics {
                 width: bmp.width as usize,
                 height: bmp.height as usize,
-                xmin: 0,
-                ymin: 0,
+                left: 0,
+                top: 0,
                 advance_width: bmp.width as f32,
             };
             let entry = self.upload_bitmap(&metrics, &bmp.data, queue);
@@ -308,28 +277,30 @@ impl GlyphAtlas {
     /// Look up a shaped glyph in the atlas, inserting it if missing.
     ///
     /// Uses a glyph-ID-based key (not codepoint). The `rasterize` callback is
-    /// invoked on cache miss to produce the bitmap via `fontdue::rasterize_indexed`.
+    /// invoked on cache miss to produce the bitmap. `collection_id` discriminates
+    /// between grid (0) and UI (1) font collections that may share face indices.
     #[allow(clippy::map_entry, reason = "Entry API unusable: upload_bitmap() borrows &mut self for packing")]
     pub fn get_or_insert_shaped(
         &mut self,
         glyph_id: u16,
         face_idx: FaceIdx,
         size_q6: u32,
-        rasterize: impl FnOnce() -> Option<(fontdue::Metrics, Vec<u8>)>,
+        collection_id: u8,
+        rasterize: impl FnOnce() -> Option<GlyphBitmap>,
         queue: &wgpu::Queue,
     ) -> &AtlasEntry {
-        let key = (glyph_id, face_idx, size_q6);
+        let key = (glyph_id, face_idx, size_q6, collection_id);
 
         if !self.shaped_entries.contains_key(&key) {
-            if let Some((metrics, bitmap)) = rasterize() {
+            if let Some(bitmap) = rasterize() {
                 let glyph_metrics = GlyphMetrics {
-                    width: metrics.width,
-                    height: metrics.height,
-                    xmin: metrics.xmin,
-                    ymin: metrics.ymin,
-                    advance_width: metrics.advance_width,
+                    width: bitmap.width,
+                    height: bitmap.height,
+                    left: bitmap.left,
+                    top: bitmap.top,
+                    advance_width: bitmap.advance_width,
                 };
-                let entry = self.upload_bitmap(&glyph_metrics, &bitmap, queue);
+                let entry = self.upload_bitmap(&glyph_metrics, &bitmap.data, queue);
                 self.shaped_entries.insert(key, entry);
             } else {
                 self.shaped_entries.insert(key, AtlasEntry::empty());
@@ -343,13 +314,6 @@ impl GlyphAtlas {
         entry
     }
 
-    /// Pre-populate the atlas with ASCII printable characters.
-    pub fn precache_ascii(&mut self, glyphs: &mut FontSet, queue: &wgpu::Queue) {
-        for ch in ' '..='~' {
-            self.get_or_insert(ch, FontStyle::Regular, glyphs, queue);
-        }
-    }
-
     /// Advance the frame counter. Call once per frame before rendering.
     pub fn begin_frame(&mut self) {
         self.frame_counter += 1;
@@ -359,7 +323,6 @@ impl GlyphAtlas {
     ///
     /// Call this when font size changes (atlas needs to be rebuilt).
     pub fn clear(&mut self) {
-        self.entries.clear();
         self.icon_entries.clear();
         self.shaped_entries.clear();
         for page in &mut self.pages {
@@ -469,7 +432,6 @@ impl GlyphAtlas {
         self.pages[lru_idx].last_used_frame = self.frame_counter;
 
         // Remove all entries pointing to the evicted page.
-        self.entries.retain(|_, e| e.page as usize != lru_idx);
         self.icon_entries.retain(|_, e| e.page as usize != lru_idx);
         self.shaped_entries.retain(|_, e| e.page as usize != lru_idx);
 
@@ -508,8 +470,8 @@ impl AtlasEntry {
             metrics: GlyphMetrics {
                 width: 0,
                 height: 0,
-                xmin: 0,
-                ymin: 0,
+                left: 0,
+                top: 0,
                 advance_width: 0.0,
             },
             page: 0,

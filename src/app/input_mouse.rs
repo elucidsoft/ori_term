@@ -126,7 +126,7 @@ impl App {
                             }
                             _ => context_menu::build_tab_bar_menu(menu_pos, s),
                         };
-                        menu.layout(&mut self.ui_glyphs);
+                        menu.layout(&self.ui_collection);
                         self.context_menu = Some(menu);
                         self.tab_bar_dirty = true;
                         tw.window.request_redraw();
@@ -204,7 +204,7 @@ impl App {
                             let scheme = self.active_scheme;
                             let mut menu =
                                 context_menu::build_dropdown_menu((menu_x, menu_y), scheme, s);
-                            menu.layout(&mut self.ui_glyphs);
+                            menu.layout(&self.ui_collection);
                             self.context_menu = Some(menu);
                             self.tab_bar_dirty = true;
                             if let Some(tw) = self.windows.get(&window_id) {

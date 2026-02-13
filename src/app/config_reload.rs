@@ -42,23 +42,40 @@ impl App {
             );
         }
 
-        // Font size, family, or features change
+        // Font size, family, features, fallback, weight, or tab bar weight change
         let font_changed = (new_config.font.size - self.config.font.size).abs() > f32::EPSILON
             || new_config.font.family != self.config.font.family
-            || new_config.font.features != self.config.font.features;
+            || new_config.font.features != self.config.font.features
+            || new_config.font.fallback != self.config.font.fallback
+            || new_config.font.weight != self.config.font.weight
+            || new_config.font.tab_bar_font_weight != self.config.font.tab_bar_font_weight
+            || new_config.font.tab_bar_font_family != self.config.font.tab_bar_font_family;
         if font_changed {
             let scaled_size = new_config.font.size * self.scale_factor as f32;
             self.font_collection = FontCollection::load(
                 scaled_size,
                 new_config.font.family.as_deref(),
                 &FontCollection::parse_features(&new_config.font.features),
+                &new_config.font.fallback,
+                new_config.font.effective_weight(),
             );
-            self.ui_glyphs = self.ui_glyphs.resize(scaled_size * UI_FONT_SCALE);
+            let ui_size = scaled_size * UI_FONT_SCALE;
+            let ui_weight = new_config.font.effective_tab_bar_weight();
+            let ui_family = new_config.font.tab_bar_font_family.as_deref()
+                .or(new_config.font.family.as_deref());
+            self.ui_collection = FontCollection::load(
+                ui_size,
+                ui_family,
+                &[],
+                &[],
+                ui_weight,
+            );
             log(&format!(
-                "config reload: font size={}, cell={}x{}",
+                "config reload: font size={}, cell={}x{}, tab_bar_weight={}",
                 self.font_collection.size,
                 self.font_collection.cell_width,
                 self.font_collection.cell_height,
+                ui_weight,
             ));
             self.rebuild_atlas();
             let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();

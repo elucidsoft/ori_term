@@ -26,18 +26,48 @@ pub struct Config {
     pub keybind: Vec<KeybindConfig>,
 }
 
+/// Per-fallback font configuration.
+///
+/// Allows overriding OpenType features and size for individual fallback fonts.
+/// Users specify these via `[[font.fallback]]` TOML array-of-tables.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FallbackFontConfig {
+    /// Font family name (resolved via platform font discovery) or absolute path.
+    pub family: String,
+    /// Override OpenType features for this fallback (uses primary features if `None`).
+    #[serde(default)]
+    pub features: Option<Vec<String>>,
+    /// Point size adjustment relative to primary font (e.g. `-1.0` for smaller).
+    #[serde(default)]
+    pub size_offset: Option<f32>,
+}
+
 /// Font configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
     pub size: f32,
     pub family: Option<String>,
+    /// CSS-style font weight (100–900). Controls which weight fills the Regular
+    /// and Bold slots during font discovery. Default: 400 (Regular).
+    ///
+    /// Bold is derived as `min(900, weight + 300)`, matching CSS "bolder".
+    /// On Windows, passed to DirectWrite for closest-weight matching.
+    pub weight: u16,
+    /// CSS-style font weight for tab bar text (100–900).
+    /// When `None`, defaults to 600 (`SemiBold`).
+    pub tab_bar_font_weight: Option<u16>,
+    /// Font family for tab bar text. When `None`, uses `family`.
+    pub tab_bar_font_family: Option<String>,
     /// OpenType features to enable/disable during text shaping.
     ///
     /// Each string is a 4-character feature tag, optionally prefixed with `-`
     /// to disable. Examples: `"calt"`, `"liga"`, `"-dlig"`.
     /// Defaults to `["calt", "liga"]` (contextual alternates + standard ligatures).
     pub features: Vec<String>,
+    /// User-configured fallback fonts with per-font feature and size overrides.
+    #[serde(default)]
+    pub fallback: Vec<FallbackFontConfig>,
 }
 
 /// Terminal behavior configuration.
@@ -199,12 +229,33 @@ impl BellConfig {
     }
 }
 
+impl FontConfig {
+    /// Returns `weight` clamped to the CSS font-weight range [100, 900].
+    pub fn effective_weight(&self) -> u16 {
+        self.weight.clamp(100, 900)
+    }
+
+    /// Returns the bold weight derived from the user weight: `min(900, weight + 300)`.
+    pub fn effective_bold_weight(&self) -> u16 {
+        (self.effective_weight() + 300).min(900)
+    }
+
+    /// Returns `tab_bar_font_weight` clamped to [100, 900], defaulting to 600 (`SemiBold`).
+    pub fn effective_tab_bar_weight(&self) -> u16 {
+        self.tab_bar_font_weight.unwrap_or(600).clamp(100, 900)
+    }
+}
+
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
             size: render::FONT_SIZE,
             family: None,
+            weight: 400,
+            tab_bar_font_weight: None,
+            tab_bar_font_family: None,
             features: vec!["calt".into(), "liga".into()],
+            fallback: Vec::new(),
         }
     }
 }

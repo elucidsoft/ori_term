@@ -44,7 +44,7 @@ impl App {
     /// Resize fonts to `new_size`, rebuild the glyph atlas, and reflow all tabs.
     fn apply_font_size(&mut self, new_size: f32, label: &str, window_id: WindowId) {
         self.font_collection = self.font_collection.resize(new_size);
-        self.ui_glyphs = self.ui_glyphs.resize(new_size * UI_FONT_SCALE);
+        self.ui_collection = self.ui_collection.resize(new_size * UI_FONT_SCALE);
         log(&format!(
             "{label}: size={}, cell={}x{}",
             self.font_collection.size,
@@ -137,7 +137,7 @@ impl App {
             let expected_size = self.config.font.size * initial_scale as f32;
             if (self.font_collection.size - expected_size).abs() > 0.1 {
                 self.font_collection = self.font_collection.resize(expected_size);
-                self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
+                self.ui_collection = self.ui_collection.resize(expected_size * UI_FONT_SCALE);
                 log(&format!(
                     "HiDPI: scale={initial_scale:.2}, font reloaded at size={expected_size}"
                 ));
@@ -333,7 +333,7 @@ impl App {
         let expected_size = self.config.font.size * self.scale_factor as f32;
         if (self.font_collection.size - expected_size).abs() > 0.1 {
             self.font_collection = self.font_collection.resize(expected_size);
-            self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
+            self.ui_collection = self.ui_collection.resize(expected_size * UI_FONT_SCALE);
             self.rebuild_atlas();
         }
 

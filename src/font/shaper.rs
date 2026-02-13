@@ -6,6 +6,21 @@ use crate::render::FontStyle;
 
 use super::{FaceIdx, FontCollection, ShapedGlyph};
 
+/// A shaped glyph for UI text rendering (not tied to grid columns).
+#[derive(Debug, Clone, Copy)]
+pub struct UiShapedGlyph {
+    /// Glyph ID within the font face (0 for space-advance-only entries).
+    pub glyph_id: u16,
+    /// Which face this glyph comes from.
+    pub face_idx: FaceIdx,
+    /// Pixel advance for cursor positioning.
+    pub x_advance: f32,
+    /// Shaper X offset from glyph origin.
+    pub x_offset: f32,
+    /// Shaper Y offset from baseline.
+    pub y_offset: f32,
+}
+
 /// Shape a line of grid cells into positioned glyphs (convenience wrapper).
 ///
 /// For hot-path usage, prefer the two-phase API: call `prepare_line()` then
@@ -159,12 +174,14 @@ fn shape_run(
     buffer.push_str(&run.text);
     buffer.set_direction(rustybuzz::Direction::LeftToRight);
 
-    let glyph_buffer = rustybuzz::shape(face, &collection.features, buffer);
+    let features = collection.features_for_face(run.face_idx);
+    let glyph_buffer = rustybuzz::shape(face, features, buffer);
     let infos = glyph_buffer.glyph_infos();
     let positions = glyph_buffer.glyph_positions();
 
     let upem = face.units_per_em() as f32;
-    let scale = collection.size / upem;
+    let effective_size = collection.effective_size(run.face_idx);
+    let scale = effective_size / upem;
     let cell_w = collection.cell_width as f32;
 
     for (info, pos) in infos.iter().zip(positions.iter()) {
@@ -214,6 +231,122 @@ fn emit_unshaped_fallback(
     }
 }
 
+/// Shape a plain text string for UI rendering (tab titles, overlays).
+///
+/// Requires `FontCollection::ensure_all_loaded()` to have been called.
+/// Clears and fills `output`.
+pub fn shape_text_string(
+    text: &str,
+    faces: &[Option<rustybuzz::Face<'_>>],
+    collection: &FontCollection,
+    output: &mut Vec<UiShapedGlyph>,
+) {
+    output.clear();
+
+    if text.is_empty() {
+        return;
+    }
+
+    // Segment text into runs by face. Spaces are emitted directly as
+    // advance-only glyphs (no shaping needed — consistent with grid path).
+    let mut run_start = 0;
+    let mut run_face = None;
+    let mut run_chars = String::new();
+
+    for ch in text.chars() {
+        if ch == ' ' {
+            // Flush pending run before the space
+            if !run_chars.is_empty() {
+                if let Some(fi) = run_face {
+                    shape_ui_run(&run_chars, fi, faces, collection, output);
+                }
+                run_chars.clear();
+                run_face = None;
+            }
+            // Emit space as advance-only glyph
+            output.push(UiShapedGlyph {
+                glyph_id: 0,
+                face_idx: FaceIdx(0),
+                x_advance: collection.char_advance(' '),
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+            run_start += 1;
+            continue;
+        }
+
+        let face_idx = collection.find_face_loaded(ch, FontStyle::Regular);
+
+        if run_face.is_some_and(|f| f != face_idx) {
+            // Face changed — flush the current run
+            if let Some(fi) = run_face {
+                shape_ui_run(&run_chars, fi, faces, collection, output);
+            }
+            run_chars.clear();
+        }
+
+        run_face = Some(face_idx);
+        run_chars.push(ch);
+        run_start += 1;
+    }
+
+    // Flush the last run
+    if !run_chars.is_empty() {
+        if let Some(fi) = run_face {
+            shape_ui_run(&run_chars, fi, faces, collection, output);
+        }
+    }
+
+    let _ = run_start; // Consumed by iteration
+}
+
+/// Shape a single UI text run and append results.
+fn shape_ui_run(
+    text: &str,
+    face_idx: FaceIdx,
+    faces: &[Option<rustybuzz::Face<'_>>],
+    collection: &FontCollection,
+    output: &mut Vec<UiShapedGlyph>,
+) {
+    let fi = face_idx.0 as usize;
+    let Some(face) = faces.get(fi).and_then(|f| f.as_ref()) else {
+        // No face available — emit unshaped advances
+        for ch in text.chars() {
+            output.push(UiShapedGlyph {
+                glyph_id: 0,
+                face_idx,
+                x_advance: collection.char_advance(ch),
+                x_offset: 0.0,
+                y_offset: 0.0,
+            });
+        }
+        return;
+    };
+
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(text);
+    buffer.set_direction(rustybuzz::Direction::LeftToRight);
+
+    let features = collection.features_for_face(face_idx);
+    let glyph_buffer = rustybuzz::shape(face, features, buffer);
+    let infos = glyph_buffer.glyph_infos();
+    let positions = glyph_buffer.glyph_positions();
+
+    let upem = face.units_per_em() as f32;
+    let effective_size = collection.effective_size(face_idx);
+    let scale = effective_size / upem;
+
+    for (info, pos) in infos.iter().zip(positions.iter()) {
+        output.push(UiShapedGlyph {
+            glyph_id: info.glyph_id as u16,
+            face_idx,
+            x_advance: pos.x_advance as f32 * scale,
+            x_offset: pos.x_offset as f32 * scale,
+            y_offset: pos.y_offset as f32 * scale,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,7 +363,7 @@ mod tests {
 
     #[test]
     fn shape_hello() {
-        let mut fc = FontCollection::load(FONT_SIZE, None, &[]);
+        let mut fc = FontCollection::load(FONT_SIZE, None, &[], &[], 400);
         let cells = make_cells("Hello");
         let shaped = shape_line(&cells, cells.len(), &mut fc);
         assert_eq!(shaped.len(), 5, "5 glyphs for 'Hello'");
@@ -242,7 +375,7 @@ mod tests {
 
     #[test]
     fn shape_skips_spaces() {
-        let mut fc = FontCollection::load(FONT_SIZE, None, &[]);
+        let mut fc = FontCollection::load(FONT_SIZE, None, &[], &[], 400);
         let cells = make_cells("A B");
         let shaped = shape_line(&cells, cells.len(), &mut fc);
         assert_eq!(shaped.len(), 2);
@@ -252,7 +385,7 @@ mod tests {
 
     #[test]
     fn shape_empty_line() {
-        let mut fc = FontCollection::load(FONT_SIZE, None, &[]);
+        let mut fc = FontCollection::load(FONT_SIZE, None, &[], &[], 400);
         let cells = make_cells("   ");
         let shaped = shape_line(&cells, cells.len(), &mut fc);
         assert!(shaped.is_empty(), "spaces produce no shaped glyphs");
@@ -260,7 +393,7 @@ mod tests {
 
     #[test]
     fn two_phase_api_matches_convenience() {
-        let mut fc = FontCollection::load(FONT_SIZE, None, &[]);
+        let mut fc = FontCollection::load(FONT_SIZE, None, &[], &[], 400);
         let cells = make_cells("Hello World");
 
         let one_shot = shape_line(&cells, cells.len(), &mut fc);

@@ -1,14 +1,15 @@
-//! Font collection, text shaping, and glyph management for grid rendering.
+//! Font collection, text shaping, and glyph management for all text rendering.
 //!
-//! Provides `FontCollection` (font data + rasterization) and `shape_line()`
-//! (HarfBuzz-based text shaping via `rustybuzz`). UI text rendering continues
-//! to use `render::FontSet` — only grid cells go through the shaping pipeline.
+//! Provides `FontCollection` (font data + rasterization), `shape_line()`
+//! (rustybuzz text shaping for grid cells), and `shape_text_string()` (UI text
+//! shaping for tab titles, search bar, menus). All text — grid and UI — goes
+//! through: `FontCollection` → rustybuzz shaping → swash rasterization → GPU atlas.
 
 mod collection;
 mod shaper;
 
 pub use collection::FontCollection;
-pub use shaper::{ShapingRun, prepare_line, shape_line, shape_prepared_runs};
+pub use shaper::{ShapingRun, UiShapedGlyph, prepare_line, shape_line, shape_prepared_runs, shape_text_string};
 
 use crate::render::FontStyle;
 

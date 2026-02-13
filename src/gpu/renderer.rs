@@ -8,10 +8,9 @@ use winit::window::WindowId;
 use vte::ansi::CursorShape;
 
 use crate::config::AlphaBlending;
-use crate::font::FontCollection;
+use crate::font::{FontCollection, UiShapedGlyph, shape_text_string};
 use crate::grid::Grid;
 use crate::palette::Palette;
-use crate::render::{FontSet, FontStyle};
 use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::tab::TabId;
@@ -112,6 +111,10 @@ pub struct GpuRenderer {
     pub(super) shaped_scratch: Vec<crate::font::ShapedGlyph>,
     /// Scratch buffer for shaping runs, reused across lines to avoid allocation.
     pub(super) runs_scratch: Vec<crate::font::ShapingRun>,
+    /// Reusable swash scale context for glyph rasterization.
+    pub(super) scale_context: swash::scale::ScaleContext,
+    /// Scratch buffer for UI text shaped glyphs, reused across calls.
+    ui_shaped_scratch: Vec<UiShapedGlyph>,
 }
 
 impl GpuRenderer {
@@ -184,6 +187,8 @@ impl GpuRenderer {
             col_glyph_map: Vec::new(),
             shaped_scratch: Vec::new(),
             runs_scratch: Vec::new(),
+            scale_context: swash::scale::ScaleContext::new(),
+            ui_shaped_scratch: Vec::new(),
         }
     }
 
@@ -277,9 +282,9 @@ impl GpuRenderer {
         config: &wgpu::SurfaceConfiguration,
         params: &FrameParams<'_>,
         collection: &mut FontCollection,
-        ui_glyphs: &mut FontSet,
+        ui_collection: &mut FontCollection,
     ) {
-        self.prepare_frame(gpu, params, collection, ui_glyphs);
+        self.prepare_frame(gpu, params, collection, ui_collection);
         let Some(prepared) = self.cached_frame.as_ref() else {
             return;
         };
@@ -322,7 +327,7 @@ impl GpuRenderer {
         gpu: &GpuState,
         params: &FrameParams<'_>,
         collection: &mut FontCollection,
-        ui_glyphs: &mut FontSet,
+        ui_collection: &mut FontCollection,
     ) {
         // Advance atlas frame counter for LRU page tracking.
         self.atlas.begin_frame();
@@ -381,14 +386,14 @@ impl GpuRenderer {
                     &mut overlay_fg_w,
                     params,
                     &tc,
-                    ui_glyphs,
+                    ui_collection,
                     &gpu.queue,
                 );
                 self.build_context_menu_overlay(
                     &mut overlay_bg_w,
                     &mut overlay_fg_w,
                     params,
-                    ui_glyphs,
+                    ui_collection,
                     &gpu.queue,
                 );
 
@@ -452,7 +457,7 @@ impl GpuRenderer {
         let default_bg = vte_rgb_to_rgba(params.palette.default_bg());
 
         // 1. Tab bar (always fully opaque — individual tabs carry their own alpha)
-        self.build_tab_bar_instances(&mut bg, &mut fg, params, &tc, ui_glyphs, &gpu.queue);
+        self.build_tab_bar_instances(&mut bg, &mut fg, params, &tc, ui_collection, &gpu.queue);
 
         // Switch to transparent for grid content
         bg.opacity = params.opacity;
@@ -461,7 +466,7 @@ impl GpuRenderer {
         self.build_grid_instances(&mut bg, &mut fg, params, collection, &gpu.queue, &default_bg);
 
         // 3. Search bar overlay (at bottom of grid, UI font)
-        self.build_search_bar_overlay(&mut bg, &mut fg, params, &tc, ui_glyphs, &gpu.queue);
+        self.build_search_bar_overlay(&mut bg, &mut fg, params, &tc, ui_collection, &gpu.queue);
 
         // 4. Window border (opaque, Windows only — Linux WM draws its own)
         bg.opacity = 1.0;
@@ -485,14 +490,14 @@ impl GpuRenderer {
             &mut overlay_fg_w,
             params,
             &tc,
-            ui_glyphs,
+            ui_collection,
             &gpu.queue,
         );
         self.build_context_menu_overlay(
             &mut overlay_bg_w,
             &mut overlay_fg_w,
             params,
-            ui_glyphs,
+            ui_collection,
             &gpu.queue,
         );
 
@@ -717,6 +722,9 @@ impl GpuRenderer {
     }
 
     /// Push glyph instances for a text string at the given pixel position.
+    ///
+    /// Shapes text through rustybuzz via the UI `FontCollection`, then rasterizes
+    /// and caches each glyph in the shared atlas (`collection_id` = 1).
     pub(super) fn push_text_instances(
         &mut self,
         fg: &mut InstanceWriter,
@@ -724,38 +732,56 @@ impl GpuRenderer {
         x: f32,
         y: f32,
         color: [f32; 4],
-        glyphs: &mut FontSet,
+        collection: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
-        let baseline = glyphs.baseline;
+        let baseline = collection.baseline;
+        let size_q6 = super::atlas::size_key(collection.size);
+
+        collection.ensure_all_loaded();
+        let faces = collection.create_shaping_faces();
+        shape_text_string(text, &faces, collection, &mut self.ui_shaped_scratch);
+
+        // Iterate shaped glyphs — `ui_shaped_scratch` is borrowed immutably while
+        // `self.atlas` and `self.scale_context` are borrowed mutably (disjoint fields).
         let mut cx = x;
+        for i in 0..self.ui_shaped_scratch.len() {
+            let glyph = self.ui_shaped_scratch[i];
+            let advance = glyph.x_advance.ceil();
 
-        for ch in text.chars() {
-            let entry = self
-                .atlas
-                .get_or_insert(ch, FontStyle::Regular, glyphs, queue);
+            if glyph.glyph_id != 0 {
+                let entry = self.atlas.get_or_insert_shaped(
+                    glyph.glyph_id,
+                    glyph.face_idx,
+                    size_q6,
+                    1, // UI collection
+                    || collection.rasterize_glyph_with(
+                        glyph.face_idx,
+                        glyph.glyph_id,
+                        &mut self.scale_context,
+                    ),
+                    queue,
+                );
 
-            let advance = entry.metrics.advance_width.ceil();
-
-            if entry.metrics.width > 0 && entry.metrics.height > 0 {
-                // Round to pixel boundaries — with nearest-neighbor sampling,
-                // sub-pixel positions cause jagged/distorted glyphs.
-                let gx = (cx + entry.metrics.xmin as f32).round();
-                let gy =
-                    (y + baseline as f32 - entry.metrics.height as f32 - entry.metrics.ymin as f32)
+                if entry.metrics.width > 0 && entry.metrics.height > 0 {
+                    let gx = (cx + entry.metrics.left as f32 + glyph.x_offset).round();
+                    let gy = (y + baseline as f32
+                        - entry.metrics.top as f32
+                        + glyph.y_offset)
                         .round();
 
-                fg.push_glyph(
-                    gx,
-                    gy,
-                    entry.metrics.width as f32,
-                    entry.metrics.height as f32,
-                    entry.uv_pos,
-                    entry.uv_size,
-                    color,
-                    [0.0, 0.0, 0.0, 0.0],
-                    entry.page,
-                );
+                    fg.push_glyph(
+                        gx,
+                        gy,
+                        entry.metrics.width as f32,
+                        entry.metrics.height as f32,
+                        entry.uv_pos,
+                        entry.uv_size,
+                        color,
+                        [0.0, 0.0, 0.0, 0.0],
+                        entry.page,
+                    );
+                }
             }
 
             cx += advance;

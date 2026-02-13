@@ -343,6 +343,104 @@ fn ansi_overrides_from_toml() {
 }
 
 #[test]
+fn weight_defaults_to_400() {
+    let parsed: Config = toml::from_str("").expect("deserialize");
+    assert_eq!(parsed.font.weight, 400);
+    assert_eq!(parsed.font.effective_weight(), 400);
+    assert_eq!(parsed.font.effective_bold_weight(), 700);
+}
+
+#[test]
+fn weight_from_toml() {
+    let toml_str = r#"
+[font]
+weight = 300
+"#;
+    let parsed: Config = toml::from_str(toml_str).expect("deserialize");
+    assert_eq!(parsed.font.weight, 300);
+    assert_eq!(parsed.font.effective_weight(), 300);
+    assert_eq!(parsed.font.effective_bold_weight(), 600);
+}
+
+#[test]
+fn weight_effective_clamped() {
+    // Below minimum
+    let mut cfg = FontConfig::default();
+    cfg.weight = 50;
+    assert_eq!(cfg.effective_weight(), 100);
+    assert_eq!(cfg.effective_bold_weight(), 400);
+
+    // Above maximum
+    cfg.weight = 1000;
+    assert_eq!(cfg.effective_weight(), 900);
+    assert_eq!(cfg.effective_bold_weight(), 900);
+
+    // High weight — bold capped at 900
+    cfg.weight = 700;
+    assert_eq!(cfg.effective_bold_weight(), 900);
+}
+
+#[test]
+fn weight_roundtrip() {
+    let mut cfg = Config::default();
+    cfg.font.weight = 300;
+    let toml_str = toml::to_string_pretty(&cfg).expect("serialize");
+    let parsed: Config = toml::from_str(&toml_str).expect("deserialize");
+    assert_eq!(parsed.font.weight, 300);
+}
+
+#[test]
+fn tab_bar_font_weight_defaults_to_none() {
+    let parsed: Config = toml::from_str("").expect("deserialize");
+    assert!(parsed.font.tab_bar_font_weight.is_none());
+    assert_eq!(parsed.font.effective_tab_bar_weight(), 600);
+}
+
+#[test]
+fn tab_bar_font_weight_from_toml() {
+    let toml_str = r#"
+[font]
+tab_bar_font_weight = 400
+"#;
+    let parsed: Config = toml::from_str(toml_str).expect("deserialize");
+    assert_eq!(parsed.font.tab_bar_font_weight, Some(400));
+    assert_eq!(parsed.font.effective_tab_bar_weight(), 400);
+}
+
+#[test]
+fn tab_bar_font_weight_effective_clamped() {
+    let mut cfg = FontConfig::default();
+
+    // Below minimum
+    cfg.tab_bar_font_weight = Some(50);
+    assert_eq!(cfg.effective_tab_bar_weight(), 100);
+
+    // Above maximum
+    cfg.tab_bar_font_weight = Some(1000);
+    assert_eq!(cfg.effective_tab_bar_weight(), 900);
+
+    // Within range
+    cfg.tab_bar_font_weight = Some(700);
+    assert_eq!(cfg.effective_tab_bar_weight(), 700);
+}
+
+#[test]
+fn tab_bar_font_family_defaults_to_none() {
+    let cfg = FontConfig::default();
+    assert!(cfg.tab_bar_font_family.is_none());
+}
+
+#[test]
+fn tab_bar_font_family_from_toml() {
+    let toml_str = r#"
+[font]
+tab_bar_font_family = "Segoe UI"
+"#;
+    let parsed: Config = toml::from_str(toml_str).expect("deserialize");
+    assert_eq!(parsed.font.tab_bar_font_family.as_deref(), Some("Segoe UI"));
+}
+
+#[test]
 fn color_overrides_roundtrip() {
     let mut cfg = Config::default();
     cfg.colors.foreground = Some("#FFFFFF".to_owned());

@@ -1,7 +1,7 @@
 //! Settings window rendering — theme picker with color swatches.
 
+use crate::font::FontCollection;
 use crate::palette::{Palette, BUILTIN_SCHEMES};
-use crate::render::FontSet;
 use super::color_util::{
     darken, lerp_color, lighten, ortho_projection, srgb_to_linear, vte_rgb_to_rgba,
 };
@@ -24,7 +24,7 @@ impl GpuRenderer {
         height: u32,
         active_scheme: &str,
         palette: Option<&Palette>,
-        glyphs: &mut FontSet, // UI font
+        glyphs: &mut FontCollection, // UI font
     ) {
         let w = width as f32;
         let h = height as f32;

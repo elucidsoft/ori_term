@@ -192,7 +192,8 @@ impl GpuRenderer {
                     gid,
                     face_idx,
                     size_q6,
-                    || collection.rasterize_glyph(face_idx, gid),
+                    0, // grid collection
+                    || collection.rasterize_glyph_with(face_idx, gid, &mut self.scale_context),
                     queue,
                 );
 
@@ -201,10 +202,9 @@ impl GpuRenderer {
                 }
 
                 // Glyph position (shaper offsets applied for combining/ligature positioning)
-                let gx = x0 + entry.metrics.xmin as f32 + glyph.x_offset;
+                let gx = x0 + entry.metrics.left as f32 + glyph.x_offset;
                 let gy = y0 + baseline as f32
-                    - entry.metrics.height as f32
-                    - entry.metrics.ymin as f32
+                    - entry.metrics.top as f32
                     + glyph.y_offset;
 
                 // Only invert text color for block cursor (beam/underline don't cover the glyph)

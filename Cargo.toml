@@ -11,7 +11,7 @@ unicode-segmentation = "1.12"
 winit = "0.30"
 wgpu = "28"
 pollster = "0.4"
-fontdue = "0.9.3"
+swash = "0.2"
 rustybuzz = "0.20"
 portable-pty = "0.9.0"
 vte = { version = "0.15.0", features = ["ansi"] }

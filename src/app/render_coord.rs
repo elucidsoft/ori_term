@@ -252,7 +252,7 @@ impl App {
             &tw.surface_config,
             &frame_params,
             &mut self.font_collection,
-            &mut self.ui_glyphs,
+            &mut self.ui_collection,
         );
 
         if let Some(tab_id) = active_tab_id {

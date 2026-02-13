@@ -36,7 +36,6 @@ use crate::key_encoding::Modifiers;
 use crate::keybindings::{self, KeyBinding};
 use crate::log;
 use crate::palette;
-use crate::render::FontSet;
 use crate::selection;
 use crate::tab::{Tab, TabId, TermEvent};
 use crate::tab_bar::TabBarHit;
@@ -61,7 +60,7 @@ pub struct App {
     pub(super) config: Config,
     pub(super) windows: HashMap<WindowId, TermWindow>,
     pub(super) tabs: HashMap<TabId, Tab>,
-    pub(super) ui_glyphs: FontSet,
+    pub(super) ui_collection: FontCollection,
     pub(super) font_collection: FontCollection,
     pub(super) gpu: Option<GpuState>,
     pub(super) renderer: Option<GpuRenderer>,
@@ -171,17 +170,31 @@ impl App {
             config.font.size,
             config.font.family.as_deref(),
             &FontCollection::parse_features(&config.font.features),
+            &config.font.fallback,
+            config.font.effective_weight(),
         );
         let ui_size = font_collection.size * UI_FONT_SCALE;
-        let ui_glyphs = FontSet::load_ui(ui_size)
-            .unwrap_or_else(|| FontSet::load(ui_size, config.font.family.as_deref()));
+        let ui_family = config.font.tab_bar_font_family.as_deref()
+            .or(config.font.family.as_deref());
+        let ui_collection = FontCollection::load(
+            ui_size,
+            ui_family,
+            &[],
+            &[],
+            config.font.effective_tab_bar_weight(),
+        );
         log(&format!(
-            "font loaded: cell={}x{}, baseline={}, size={} (ui: {}) ({:.1}ms)",
+            "font loaded: cell={}x{}, baseline={}, size={}, weight={}, wght_axis={} \
+             (ui: size={}, weight={}, wght_axis={}) ({:.1}ms)",
             font_collection.cell_width,
             font_collection.cell_height,
             font_collection.baseline,
             font_collection.size,
-            ui_glyphs.size,
+            config.font.effective_weight(),
+            font_collection.has_wght_axis(),
+            ui_collection.size,
+            config.font.effective_tab_bar_weight(),
+            ui_collection.has_wght_axis(),
             t0.elapsed().as_secs_f64() * 1000.0,
         ));
 
@@ -229,7 +242,7 @@ impl App {
             config,
             windows: HashMap::new(),
             tabs: HashMap::new(),
-            ui_glyphs,
+            ui_collection,
             font_collection,
             gpu: None,
             renderer: None,

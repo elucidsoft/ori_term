@@ -4,7 +4,7 @@
 //! appear on top of all grid and tab bar content.
 
 use crate::context_menu::MenuEntry;
-use crate::render::FontSet;
+use crate::font::FontCollection;
 use crate::tab_bar::{
     DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TAB_TOP_MARGIN,
     TabBarLayout,
@@ -22,7 +22,7 @@ impl GpuRenderer {
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
         tc: &TabBarColors,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
         let (drag_idx, drag_x) = match params.dragged_tab {
@@ -107,7 +107,7 @@ impl GpuRenderer {
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
         let menu = match params.context_menu {
@@ -215,7 +215,7 @@ impl GpuRenderer {
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
         tc: &TabBarColors,
-        glyphs: &mut FontSet,
+        glyphs: &mut FontCollection,
         queue: &wgpu::Queue,
     ) {
         let search = match params.search {
