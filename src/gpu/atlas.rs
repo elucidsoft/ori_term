@@ -19,13 +19,16 @@ const MAX_PAGES: u32 = 4;
 /// Cache key: character + style + size at 1/64th point precision (26.6 fixed-point).
 type GlyphKey = (char, FontStyle, u32);
 
+/// Cache key for shaped glyphs: glyph ID + face index + size (26.6 fixed-point).
+type ShapedGlyphKey = (u16, u16, u32);
+
 /// Convert a font size in points to a 26.6 fixed-point size key.
 ///
 /// Uses `(size * 64.0).round()` for 1/64th point precision, matching
 /// `FreeType`'s 26.6 convention. This eliminates rounding collisions that
 /// occurred with the old `(size * 10.0).round() as u16` key at fractional
 /// DPI scales.
-fn size_key(size: f32) -> u32 {
+pub fn size_key(size: f32) -> u32 {
     (size * 64.0).round() as u32
 }
 
@@ -200,6 +203,8 @@ pub struct GlyphAtlas {
     frame_counter: u64,
     entries: HashMap<GlyphKey, AtlasEntry>,
     icon_entries: HashMap<(Icon, u16), AtlasEntry>,
+    /// Cache for shaped glyphs (glyph ID + face index + size).
+    shaped_entries: HashMap<ShapedGlyphKey, AtlasEntry>,
 }
 
 impl GlyphAtlas {
@@ -224,6 +229,7 @@ impl GlyphAtlas {
             frame_counter: 0,
             entries: HashMap::new(),
             icon_entries: HashMap::new(),
+            shaped_entries: HashMap::new(),
         }
     }
 
@@ -298,6 +304,44 @@ impl GlyphAtlas {
             .expect("icon entry just inserted")
     }
 
+    /// Look up a shaped glyph in the atlas, inserting it if missing.
+    ///
+    /// Uses a glyph-ID-based key (not codepoint). The `rasterize` callback is
+    /// invoked on cache miss to produce the bitmap via `fontdue::rasterize_indexed`.
+    #[allow(clippy::map_entry, reason = "Entry API unusable: upload_bitmap() borrows &mut self for packing")]
+    pub fn get_or_insert_shaped(
+        &mut self,
+        glyph_id: u16,
+        face_idx: u16,
+        size_q6: u32,
+        rasterize: impl FnOnce() -> Option<(fontdue::Metrics, Vec<u8>)>,
+        queue: &wgpu::Queue,
+    ) -> &AtlasEntry {
+        let key = (glyph_id, face_idx, size_q6);
+
+        if !self.shaped_entries.contains_key(&key) {
+            if let Some((metrics, bitmap)) = rasterize() {
+                let glyph_metrics = GlyphMetrics {
+                    width: metrics.width,
+                    height: metrics.height,
+                    xmin: metrics.xmin,
+                    ymin: metrics.ymin,
+                    advance_width: metrics.advance_width,
+                };
+                let entry = self.upload_bitmap(&glyph_metrics, &bitmap, queue);
+                self.shaped_entries.insert(key, entry);
+            } else {
+                self.shaped_entries.insert(key, AtlasEntry::empty());
+            }
+        }
+
+        let entry = self.shaped_entries.get(&key).expect("shaped entry just inserted");
+        if let Some(page) = self.pages.get_mut(entry.page as usize) {
+            page.last_used_frame = self.frame_counter;
+        }
+        entry
+    }
+
     /// Pre-populate the atlas with ASCII printable characters.
     pub fn precache_ascii(&mut self, glyphs: &mut FontSet, queue: &wgpu::Queue) {
         for ch in ' '..='~' {
@@ -316,6 +360,7 @@ impl GlyphAtlas {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.icon_entries.clear();
+        self.shaped_entries.clear();
         for page in &mut self.pages {
             page.packer.reset();
             page.glyph_count = 0;
@@ -425,6 +470,7 @@ impl GlyphAtlas {
         // Remove all entries pointing to the evicted page.
         self.entries.retain(|_, e| e.page as usize != lru_idx);
         self.icon_entries.retain(|_, e| e.page as usize != lru_idx);
+        self.shaped_entries.retain(|_, e| e.page as usize != lru_idx);
 
         let pos = self.pages[lru_idx]
             .packer

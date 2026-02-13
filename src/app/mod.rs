@@ -30,6 +30,7 @@ use crate::config::{self, Config};
 use crate::config::monitor::ConfigMonitor;
 use crate::context_menu::MenuOverlay;
 use crate::drag::DragState;
+use crate::font::FontCollection;
 use crate::gpu::{GpuRenderer, GpuState};
 use crate::key_encoding::Modifiers;
 use crate::keybindings::{self, KeyBinding};
@@ -60,8 +61,8 @@ pub struct App {
     pub(super) config: Config,
     pub(super) windows: HashMap<WindowId, TermWindow>,
     pub(super) tabs: HashMap<TabId, Tab>,
-    pub(super) glyphs: FontSet,
     pub(super) ui_glyphs: FontSet,
+    pub(super) font_collection: FontCollection,
     pub(super) gpu: Option<GpuState>,
     pub(super) renderer: Option<GpuRenderer>,
     pub(super) drag: Option<DragState>,
@@ -166,15 +167,20 @@ impl App {
         ));
 
         let t0 = Instant::now();
-        let glyphs = FontSet::load(config.font.size, config.font.family.as_deref());
-        let ui_size = glyphs.size * UI_FONT_SCALE;
-        let ui_glyphs = FontSet::load_ui(ui_size).unwrap_or_else(|| glyphs.resize(ui_size));
+        let font_collection = FontCollection::load(
+            config.font.size,
+            config.font.family.as_deref(),
+            &FontCollection::parse_features(&config.font.features),
+        );
+        let ui_size = font_collection.size * UI_FONT_SCALE;
+        let ui_glyphs = FontSet::load_ui(ui_size)
+            .unwrap_or_else(|| FontSet::load(ui_size, config.font.family.as_deref()));
         log(&format!(
             "font loaded: cell={}x{}, baseline={}, size={} (ui: {}) ({:.1}ms)",
-            glyphs.cell_width,
-            glyphs.cell_height,
-            glyphs.baseline,
-            glyphs.size,
+            font_collection.cell_width,
+            font_collection.cell_height,
+            font_collection.baseline,
+            font_collection.size,
             ui_glyphs.size,
             t0.elapsed().as_secs_f64() * 1000.0,
         ));
@@ -223,8 +229,8 @@ impl App {
             config,
             windows: HashMap::new(),
             tabs: HashMap::new(),
-            glyphs,
             ui_glyphs,
+            font_collection,
             gpu: None,
             renderer: None,
             drag: None,
@@ -333,7 +339,7 @@ impl App {
     /// Rebuild the GPU glyph atlas after font size changes.
     pub(super) fn rebuild_atlas(&mut self) {
         if let (Some(gpu), Some(renderer)) = (&self.gpu, &mut self.renderer) {
-            renderer.rebuild_atlas(gpu, &mut self.glyphs, &mut self.ui_glyphs);
+            renderer.rebuild_atlas(gpu);
         }
     }
 

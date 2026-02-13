@@ -32,6 +32,11 @@ impl Row {
         self.inner.is_empty()
     }
 
+    /// Returns the cells as a contiguous slice.
+    pub fn as_slice(&self) -> &[Cell] {
+        &self.inner
+    }
+
     /// Returns an iterator over the cells in this row.
     pub fn iter(&self) -> std::slice::Iter<'_, Cell> {
         self.inner.iter()

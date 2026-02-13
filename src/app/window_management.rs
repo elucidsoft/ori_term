@@ -11,7 +11,6 @@ use crate::config;
 use crate::gpu::{GpuRenderer, GpuState};
 use crate::log;
 use crate::palette;
-use crate::render::FontSet;
 use crate::tab::TabId;
 use crate::grid::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP};
 use crate::tab_bar::TAB_BAR_HEIGHT;
@@ -33,7 +32,7 @@ impl App {
     }
 
     pub(super) fn change_font_size(&mut self, window_id: WindowId, delta: f32) {
-        let new_size = self.glyphs.size + delta * self.scale_factor as f32;
+        let new_size = self.font_collection.size + delta * self.scale_factor as f32;
         self.apply_font_size(new_size, "font resize", window_id);
     }
 
@@ -44,11 +43,13 @@ impl App {
 
     /// Resize fonts to `new_size`, rebuild the glyph atlas, and reflow all tabs.
     fn apply_font_size(&mut self, new_size: f32, label: &str, window_id: WindowId) {
-        self.glyphs = self.glyphs.resize(new_size);
+        self.font_collection = self.font_collection.resize(new_size);
         self.ui_glyphs = self.ui_glyphs.resize(new_size * UI_FONT_SCALE);
         log(&format!(
             "{label}: size={}, cell={}x{}",
-            self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+            self.font_collection.size,
+            self.font_collection.cell_width,
+            self.font_collection.cell_height,
         ));
         self.rebuild_atlas();
         self.resize_all_tabs_in_window(window_id);
@@ -90,9 +91,9 @@ impl App {
         saved_pos: Option<&config::WindowState>,
         visible: bool,
     ) -> Option<WindowId> {
-        let win_w = (self.glyphs.cell_width * self.config.window.columns) as u32
+        let win_w = (self.font_collection.cell_width * self.config.window.columns) as u32
             + self.scale_px(GRID_PADDING_LEFT) as u32;
-        let win_h = (self.glyphs.cell_height * self.config.window.rows) as u32
+        let win_h = (self.font_collection.cell_height * self.config.window.rows) as u32
             + self.scale_px(TAB_BAR_HEIGHT) as u32
             + self.scale_px(GRID_PADDING_TOP) as u32
             + self.scale_px(GRID_PADDING_BOTTOM) as u32;
@@ -134,8 +135,8 @@ impl App {
         if (initial_scale - self.scale_factor).abs() > 0.01 {
             self.scale_factor = initial_scale;
             let expected_size = self.config.font.size * initial_scale as f32;
-            if (self.glyphs.size - expected_size).abs() > 0.1 {
-                self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
+            if (self.font_collection.size - expected_size).abs() > 0.1 {
+                self.font_collection = self.font_collection.resize(expected_size);
                 self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
                 log(&format!(
                     "HiDPI: scale={initial_scale:.2}, font reloaded at size={expected_size}"
@@ -153,7 +154,7 @@ impl App {
             ));
 
             let t0 = Instant::now();
-            let renderer = GpuRenderer::new(&gpu, &mut self.glyphs, &mut self.ui_glyphs);
+            let renderer = GpuRenderer::new(&gpu);
             log(&format!(
                 "renderer init: {:.1}ms",
                 t0.elapsed().as_secs_f64() * 1000.0
@@ -330,8 +331,8 @@ impl App {
         // If the DPI changed, reload fonts before calculating grid dimensions
         // so that cell metrics match the new scale factor.
         let expected_size = self.config.font.size * self.scale_factor as f32;
-        if (self.glyphs.size - expected_size).abs() > 0.1 {
-            self.glyphs = FontSet::load(expected_size, self.config.font.family.as_deref());
+        if (self.font_collection.size - expected_size).abs() > 0.1 {
+            self.font_collection = self.font_collection.resize(expected_size);
             self.ui_glyphs = self.ui_glyphs.resize(expected_size * UI_FONT_SCALE);
             self.rebuild_atlas();
         }

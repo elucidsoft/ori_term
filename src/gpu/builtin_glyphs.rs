@@ -8,8 +8,7 @@ use super::instance_writer::InstanceWriter;
 
 /// Returns `true` if the character should be rendered as a built-in glyph
 /// (bypassing the font pipeline).
-#[cfg(test)]
-fn is_builtin_glyph(c: char) -> bool {
+pub(crate) fn is_builtin_glyph(c: char) -> bool {
     matches!(c,
         '\u{2500}'..='\u{257F}' |  // Box Drawing
         '\u{2580}'..='\u{259F}' |  // Block Elements
@@ -23,7 +22,7 @@ fn is_builtin_glyph(c: char) -> bool {
 ///
 /// Returns `true` if the character was handled.
 #[expect(clippy::many_single_char_names, reason = "Geometric drawing with standard x/y/w/h/c names")]
-pub fn draw_builtin_glyph(
+pub(super) fn draw_builtin_glyph(
     c: char,
     x: f32,
     y: f32,

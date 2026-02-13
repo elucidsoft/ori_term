@@ -335,7 +335,7 @@ impl App {
                 }
             }
             MouseScrollDelta::PixelDelta(pos) => {
-                let cell_h = self.glyphs.cell_height as f64;
+                let cell_h = self.font_collection.cell_height as f64;
                 if cell_h > 0.0 {
                     (pos.y / cell_h).round() as i32
                 } else {

@@ -21,8 +21,8 @@ use crate::tab_bar::TabBarHit;
 impl App {
     /// Computes grid dimensions (cols, rows) for a given window size in physical pixels.
     pub(super) fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
-        let cw = self.glyphs.cell_width;
-        let ch = self.glyphs.cell_height;
+        let cw = self.font_collection.cell_width;
+        let ch = self.font_collection.cell_height;
         let grid_w = (width as usize).saturating_sub(self.scale_px(GRID_PADDING_LEFT));
         let grid_h = (height as usize).saturating_sub(
             self.scale_px(TAB_BAR_HEIGHT)
@@ -251,7 +251,7 @@ impl App {
             &tw.surface,
             &tw.surface_config,
             &frame_params,
-            &mut self.glyphs,
+            &mut self.font_collection,
             &mut self.ui_glyphs,
         );
 

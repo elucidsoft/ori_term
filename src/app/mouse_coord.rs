@@ -24,8 +24,8 @@ impl App {
         if y < grid_top || x < padding_left {
             return None;
         }
-        let cw = self.glyphs.cell_width;
-        let ch = self.glyphs.cell_height;
+        let cw = self.font_collection.cell_width;
+        let ch = self.font_collection.cell_height;
         if cw == 0 || ch == 0 {
             return None;
         }
@@ -37,7 +37,7 @@ impl App {
     /// Determine which side of the cell the cursor is on.
     pub(super) fn pixel_to_side(&self, pos: PhysicalPosition<f64>) -> Side {
         let x = pos.x as usize;
-        let cw = self.glyphs.cell_width;
+        let cw = self.font_collection.cell_width;
         if cw == 0 {
             return Side::Left;
         }

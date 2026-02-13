@@ -3,10 +3,10 @@
 use winit::window::WindowId;
 
 use crate::config::{self, Config};
+use crate::font::FontCollection;
 use crate::keybindings;
 use crate::log;
 use crate::palette;
-use crate::render::FontSet;
 use super::{App, UI_FONT_SCALE};
 
 impl App {
@@ -42,16 +42,23 @@ impl App {
             );
         }
 
-        // Font size or family change
+        // Font size, family, or features change
         let font_changed = (new_config.font.size - self.config.font.size).abs() > f32::EPSILON
-            || new_config.font.family != self.config.font.family;
+            || new_config.font.family != self.config.font.family
+            || new_config.font.features != self.config.font.features;
         if font_changed {
             let scaled_size = new_config.font.size * self.scale_factor as f32;
-            self.glyphs = FontSet::load(scaled_size, new_config.font.family.as_deref());
+            self.font_collection = FontCollection::load(
+                scaled_size,
+                new_config.font.family.as_deref(),
+                &FontCollection::parse_features(&new_config.font.features),
+            );
             self.ui_glyphs = self.ui_glyphs.resize(scaled_size * UI_FONT_SCALE);
             log(&format!(
                 "config reload: font size={}, cell={}x{}",
-                self.glyphs.size, self.glyphs.cell_width, self.glyphs.cell_height
+                self.font_collection.size,
+                self.font_collection.cell_width,
+                self.font_collection.cell_height,
             ));
             self.rebuild_atlas();
             let window_ids: Vec<WindowId> = self.windows.keys().copied().collect();

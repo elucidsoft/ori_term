@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 // Font family definitions
 
-pub(super) struct FontFamily {
+pub(crate) struct FontFamily {
     pub regular: &'static [&'static str],
     pub bold: &'static [&'static str],
     pub italic: &'static [&'static str],
@@ -17,7 +17,7 @@ pub(super) struct FontFamily {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) const FONT_FAMILIES: &[FontFamily] = &[
+pub(crate) const FONT_FAMILIES: &[FontFamily] = &[
     FontFamily {
         regular: &[r"C:\Windows\Fonts\JetBrainsMono-Regular.ttf"],
         bold: &[r"C:\Windows\Fonts\JetBrainsMono-Bold.ttf"],
@@ -57,7 +57,7 @@ pub(super) const FONT_FAMILIES: &[FontFamily] = &[
 ];
 
 #[cfg(not(target_os = "windows"))]
-pub(super) const FONT_FAMILIES: &[FontFamily] = &[
+pub(crate) const FONT_FAMILIES: &[FontFamily] = &[
     FontFamily {
         regular: &[
             "JetBrainsMono-Regular.ttf",
@@ -116,7 +116,7 @@ const FALLBACK_FONT_NAMES: &[&str] = &[
 
 /// Font family names to try via DirectWrite, in priority order.
 #[cfg(target_os = "windows")]
-pub(super) const DWRITE_FAMILIES: &[&str] = &[
+pub(crate) const DWRITE_FAMILIES: &[&str] = &[
     "JetBrains Mono",
     "JetBrainsMono Nerd Font",
     "Cascadia Mono NF",
@@ -192,7 +192,7 @@ pub(super) const UI_FONT_NAMES: &[&str] = &[
 
 /// Resolve a single font variant via DirectWrite by family name + weight + style.
 #[cfg(target_os = "windows")]
-pub(super) fn resolve_font_dwrite(
+pub(crate) fn resolve_font_dwrite(
     family_name: &str,
     weight: dwrote::FontWeight,
     style: dwrote::FontStyle,
@@ -219,7 +219,7 @@ pub(super) fn resolve_font_dwrite(
 /// Bold/Italic/BoldItalic paths are filtered: if DirectWrite returns the same file
 /// as Regular (fuzzy fallback), the variant is treated as unavailable.
 #[cfg(target_os = "windows")]
-pub(super) fn resolve_family_paths_dwrite(family_name: &str) -> Option<[Option<PathBuf>; 4]> {
+pub(crate) fn resolve_family_paths_dwrite(family_name: &str) -> Option<[Option<PathBuf>; 4]> {
     let regular = resolve_font_dwrite(
         family_name,
         dwrote::FontWeight::Regular,
@@ -252,7 +252,7 @@ pub(super) fn resolve_family_paths_dwrite(family_name: &str) -> Option<[Option<P
 
 /// Resolve fallback font paths via DirectWrite, with static paths as additional fallback.
 #[cfg(target_os = "windows")]
-pub(super) fn resolve_fallback_paths_dwrite() -> Vec<PathBuf> {
+pub(crate) fn resolve_fallback_paths_dwrite() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     for name in DWRITE_FALLBACK_FAMILIES {
         if let Some(path) =
@@ -286,7 +286,7 @@ fn linux_font_dirs() -> Vec<PathBuf> {
 
 /// Build a filename → full path index by scanning all font directories once.
 #[cfg(not(target_os = "windows"))]
-pub(super) fn build_font_index() -> HashMap<String, PathBuf> {
+pub(crate) fn build_font_index() -> HashMap<String, PathBuf> {
     let mut index = HashMap::new();
     for dir in linux_font_dirs() {
         index_font_dir(&dir, &mut index);
@@ -314,7 +314,7 @@ fn index_font_dir(dir: &std::path::Path, index: &mut HashMap<String, PathBuf>) {
 
 /// Look up a font variant path by trying multiple candidate filenames.
 #[cfg(not(target_os = "windows"))]
-pub(super) fn find_font_variant_path(
+pub(crate) fn find_font_variant_path(
     names: &[&str],
     index: &HashMap<String, PathBuf>,
 ) -> Option<PathBuf> {
@@ -328,7 +328,7 @@ pub(super) fn find_font_variant_path(
 
 /// Resolve fallback font paths from the pre-built index.
 #[cfg(not(target_os = "windows"))]
-pub(super) fn resolve_fallback_paths(font_index: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
+pub(crate) fn resolve_fallback_paths(font_index: &HashMap<String, PathBuf>) -> Vec<PathBuf> {
     FALLBACK_FONT_NAMES
         .iter()
         .filter_map(|name| font_index.get(*name).cloned())

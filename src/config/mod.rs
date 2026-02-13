@@ -32,6 +32,12 @@ pub struct Config {
 pub struct FontConfig {
     pub size: f32,
     pub family: Option<String>,
+    /// OpenType features to enable/disable during text shaping.
+    ///
+    /// Each string is a 4-character feature tag, optionally prefixed with `-`
+    /// to disable. Examples: `"calt"`, `"liga"`, `"-dlig"`.
+    /// Defaults to `["calt", "liga"]` (contextual alternates + standard ligatures).
+    pub features: Vec<String>,
 }
 
 /// Terminal behavior configuration.
@@ -198,6 +204,7 @@ impl Default for FontConfig {
         Self {
             size: render::FONT_SIZE,
             family: None,
+            features: vec!["calt".into(), "liga".into()],
         }
     }
 }

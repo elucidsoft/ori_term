@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod config;
 pub mod context_menu;
 pub mod drag;
+pub mod font;
 pub mod gpu;
 pub mod grid;
 pub mod icons;

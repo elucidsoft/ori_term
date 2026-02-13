@@ -8,6 +8,7 @@ use winit::window::WindowId;
 use vte::ansi::CursorShape;
 
 use crate::config::AlphaBlending;
+use crate::font::FontCollection;
 use crate::grid::Grid;
 use crate::palette::Palette;
 use crate::render::{FontSet, FontStyle};
@@ -105,10 +106,12 @@ pub struct GpuRenderer {
     buf_fg: Vec<u8>,
     buf_overlay_bg: Vec<u8>,
     buf_overlay_fg: Vec<u8>,
+    /// Column-to-shaped-glyph index map, reused across lines to avoid allocation.
+    pub(super) col_glyph_map: Vec<Option<usize>>,
 }
 
 impl GpuRenderer {
-    pub fn new(gpu: &GpuState, _glyphs: &mut FontSet, _ui_glyphs: &mut FontSet) -> Self {
+    pub fn new(gpu: &GpuState) -> Self {
         let device = &gpu.device;
         let format = gpu.render_format;
 
@@ -174,16 +177,12 @@ impl GpuRenderer {
             buf_fg: Vec::new(),
             buf_overlay_bg: Vec::new(),
             buf_overlay_fg: Vec::new(),
+            col_glyph_map: Vec::new(),
         }
     }
 
     /// Rebuild the atlas after font size change.
-    pub fn rebuild_atlas(
-        &mut self,
-        gpu: &GpuState,
-        _glyphs: &mut FontSet,
-        _ui_glyphs: &mut FontSet,
-    ) {
+    pub fn rebuild_atlas(&mut self, gpu: &GpuState) {
         self.atlas = GlyphAtlas::new(&gpu.device);
         self.cached_frame = None;
         self.atlas_bind_group = Self::create_atlas_bind_group(
@@ -271,10 +270,10 @@ impl GpuRenderer {
         surface: &wgpu::Surface<'_>,
         config: &wgpu::SurfaceConfiguration,
         params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
+        collection: &mut FontCollection,
         ui_glyphs: &mut FontSet,
     ) {
-        self.prepare_frame(gpu, params, glyphs, ui_glyphs);
+        self.prepare_frame(gpu, params, collection, ui_glyphs);
         let Some(prepared) = self.cached_frame.as_ref() else {
             return;
         };
@@ -316,7 +315,7 @@ impl GpuRenderer {
         &mut self,
         gpu: &GpuState,
         params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
+        collection: &mut FontCollection,
         ui_glyphs: &mut FontSet,
     ) {
         // Advance atlas frame counter for LRU page tracking.
@@ -452,8 +451,8 @@ impl GpuRenderer {
         // Switch to transparent for grid content
         bg.opacity = params.opacity;
 
-        // 2. Grid cells (semi-transparent — glass shows through, grid font)
-        self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg);
+        // 2. Grid cells (semi-transparent — glass shows through, shaped font)
+        self.build_grid_instances(&mut bg, &mut fg, params, collection, &gpu.queue, &default_bg);
 
         // 3. Search bar overlay (at bottom of grid, UI font)
         self.build_search_bar_overlay(&mut bg, &mut fg, params, &tc, ui_glyphs, &gpu.queue);

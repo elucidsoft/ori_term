@@ -3,11 +3,13 @@
 use vte::ansi::CursorShape;
 
 use crate::cell::CellFlags;
+use crate::font::{FontCollection, shape_line};
 use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP, StableRowIndex};
-use crate::render::{FontSet, FontStyle};
+use crate::render::FontStyle;
 use crate::search::MatchType;
 use crate::tab_bar::TAB_BAR_HEIGHT;
 use crate::term_mode::TermMode;
+use super::atlas::size_key;
 use super::builtin_glyphs;
 use super::color_util::vte_rgb_to_rgba;
 use super::instance_writer::InstanceWriter;
@@ -20,24 +22,35 @@ impl GpuRenderer {
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
-        glyphs: &mut FontSet,
+        collection: &mut FontCollection,
         queue: &wgpu::Queue,
         default_bg: &[f32; 4],
     ) {
         let grid = params.grid;
         let palette = params.palette;
-        let cw = glyphs.cell_width;
-        let ch = glyphs.cell_height;
-        let baseline = glyphs.baseline;
-        let synthetic_bold = glyphs.needs_synthetic_bold();
+        let cw = collection.cell_width;
+        let ch = collection.cell_height;
+        let baseline = collection.baseline;
+        let synthetic_bold = collection.needs_synthetic_bold();
         let sc = params.scale;
         let x_offset = (GRID_PADDING_LEFT as f32 * sc).round() as usize;
         let y_offset = ((TAB_BAR_HEIGHT + GRID_PADDING_TOP) as f32 * sc).round() as usize;
+        let size_q6 = size_key(collection.size);
 
         let default_bg_u32 = crate::palette::rgb_to_u32(palette.default_bg());
 
         for line in 0..grid.lines {
             let row = grid.visible_row(line);
+
+            // Shape this line: produces glyphs with IDs, positions, and spans.
+            // Combining marks are folded into base glyphs by the shaper.
+            let shaped = shape_line(row.as_slice(), grid.cols, collection);
+            self.col_glyph_map.clear();
+            self.col_glyph_map.resize(grid.cols, None);
+            for (i, g) in shaped.iter().enumerate() {
+                self.col_glyph_map[g.col_start] = Some(i);
+            }
+
             for col in 0..grid.cols {
                 let cell = &row[col];
                 let x0 = (col * cw + x_offset) as f32;
@@ -162,17 +175,32 @@ impl GpuRenderer {
                 }
                 bg.opacity = saved_opacity;
 
-                let style = FontStyle::from_cell_flags(cell.flags);
-                let entry = self.atlas.get_or_insert(cell.c, style, glyphs, queue);
+                // Shaped glyph rendering: look up the pre-shaped glyph for this column.
+                // Columns without a mapped glyph are ligature continuations — skip them.
+                let Some(glyph_idx) = self.col_glyph_map[col] else {
+                    continue;
+                };
+                let glyph = shaped[glyph_idx];
+                let face_idx = glyph.face_idx;
+                let gid = glyph.glyph_id;
+                let entry = self.atlas.get_or_insert_shaped(
+                    gid,
+                    face_idx.0,
+                    size_q6,
+                    || collection.rasterize_glyph(face_idx, gid),
+                    queue,
+                );
 
                 if entry.metrics.width == 0 || entry.metrics.height == 0 {
                     continue;
                 }
 
-                // Glyph position
-                let gx = x0 + entry.metrics.xmin as f32;
-                let gy =
-                    y0 + baseline as f32 - entry.metrics.height as f32 - entry.metrics.ymin as f32;
+                // Glyph position (shaper offsets applied for combining/ligature positioning)
+                let gx = x0 + entry.metrics.xmin as f32 + glyph.x_offset;
+                let gy = y0 + baseline as f32
+                    - entry.metrics.height as f32
+                    - entry.metrics.ymin as f32
+                    + glyph.y_offset;
 
                 // Only invert text color for block cursor (beam/underline don't cover the glyph)
                 let is_block_cursor = is_cursor
@@ -206,41 +234,21 @@ impl GpuRenderer {
                 );
 
                 // Synthetic bold: render glyph again 1px to the right
-                if synthetic_bold && (style == FontStyle::Bold || style == FontStyle::BoldItalic) {
-                    fg.push_glyph(
-                        gx + 1.0,
-                        gy,
-                        entry.metrics.width as f32,
-                        entry.metrics.height as f32,
-                        entry.uv_pos,
-                        entry.uv_size,
-                        glyph_fg,
-                        glyph_bg,
-                        entry.page,
-                    );
-                }
-
-                // Overlay combining marks (zerowidth characters stored in CellExtra)
-                for &zw in cell.zerowidth() {
-                    let zw_entry = self.atlas.get_or_insert(zw, style, glyphs, queue);
-                    if zw_entry.metrics.width == 0 || zw_entry.metrics.height == 0 {
-                        continue;
+                if synthetic_bold {
+                    let style = FontStyle::from_cell_flags(cell.flags);
+                    if style == FontStyle::Bold || style == FontStyle::BoldItalic {
+                        fg.push_glyph(
+                            gx + 1.0,
+                            gy,
+                            entry.metrics.width as f32,
+                            entry.metrics.height as f32,
+                            entry.uv_pos,
+                            entry.uv_size,
+                            glyph_fg,
+                            glyph_bg,
+                            entry.page,
+                        );
                     }
-                    let zx = x0 + zw_entry.metrics.xmin as f32;
-                    let zy = y0 + baseline as f32
-                        - zw_entry.metrics.height as f32
-                        - zw_entry.metrics.ymin as f32;
-                    fg.push_glyph(
-                        zx,
-                        zy,
-                        zw_entry.metrics.width as f32,
-                        zw_entry.metrics.height as f32,
-                        zw_entry.uv_pos,
-                        zw_entry.uv_size,
-                        glyph_fg,
-                        glyph_bg,
-                        zw_entry.page,
-                    );
                 }
             }
         }

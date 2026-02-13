@@ -278,7 +278,7 @@ impl App {
             // Mouse outside grid — auto-scroll
             let y = position.y as usize;
             let grid_top = self.grid_top();
-            let ch = self.glyphs.cell_height;
+            let ch = self.font_collection.cell_height;
             if let Some(tid) = self.active_tab_id(window_id) {
                 if let Some(tab) = self.tabs.get_mut(&tid) {
                     if y < grid_top {

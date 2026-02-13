@@ -1,6 +1,6 @@
 //! Font loading, fallback chain, glyph cache, and text rendering for grid and UI.
 
-mod font_discovery;
+pub(crate) mod font_discovery;
 mod font_loading;
 
 use std::borrow::Cow;
@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use crate::cell::CellFlags;
 
 pub const FONT_SIZE: f32 = 16.0;
-const MIN_FONT_SIZE: f32 = 8.0;
-const MAX_FONT_SIZE: f32 = 32.0;
+pub(crate) const MIN_FONT_SIZE: f32 = 8.0;
+pub(crate) const MAX_FONT_SIZE: f32 = 32.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
@@ -36,7 +36,7 @@ impl FontStyle {
     }
 }
 
-fn parse_font(data: &[u8]) -> Option<fontdue::Font> {
+pub(crate) fn parse_font(data: &[u8]) -> Option<fontdue::Font> {
     fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
 }
 
