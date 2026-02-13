@@ -11,7 +11,6 @@ use crate::tab_bar::{
     CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT,
     TAB_LEFT_MARGIN, TabBarLayout,
 };
-
 use super::App;
 
 impl App {

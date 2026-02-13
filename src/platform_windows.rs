@@ -44,32 +44,6 @@ struct SnapData {
 /// find it. Raw pointers don't implement `Hash`, so we store HWND as `usize`.
 static SNAP_PTRS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
 
-fn snap_ptrs() -> &'static Mutex<HashMap<usize, usize>> {
-    SNAP_PTRS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn get_x_lparam(lp: isize) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    let v = (lp & 0xFFFF) as i16;
-    i32::from(v)
-}
-
-fn get_y_lparam(lp: isize) -> i32 {
-    #[allow(clippy::cast_possible_truncation)]
-    let v = ((lp >> 16) & 0xFFFF) as i16;
-    i32::from(v)
-}
-
-/// Extract HWND from a winit Window.
-fn hwnd_from_window(window: &winit::window::Window) -> Option<HWND> {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let handle = window.window_handle().ok()?;
-    match handle.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as HWND),
-        _ => None,
-    }
-}
-
 /// Install snap support on a borderless window.
 ///
 /// Adds `WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_CAPTION` so that
@@ -201,6 +175,32 @@ pub fn get_current_dpi(window: &winit::window::Window) -> Option<f64> {
         None
     } else {
         Some(dpi as f64 / 96.0)
+    }
+}
+
+fn snap_ptrs() -> &'static Mutex<HashMap<usize, usize>> {
+    SNAP_PTRS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_x_lparam(lp: isize) -> i32 {
+    #[allow(clippy::cast_possible_truncation, reason = "LPARAM low/high word extraction is inherently truncating")]
+    let v = (lp & 0xFFFF) as i16;
+    i32::from(v)
+}
+
+fn get_y_lparam(lp: isize) -> i32 {
+    #[allow(clippy::cast_possible_truncation, reason = "LPARAM low/high word extraction is inherently truncating")]
+    let v = ((lp >> 16) & 0xFFFF) as i16;
+    i32::from(v)
+}
+
+/// Extract HWND from a winit Window.
+fn hwnd_from_window(window: &winit::window::Window) -> Option<HWND> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = window.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as HWND),
+        _ => None,
     }
 }
 

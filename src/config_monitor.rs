@@ -1,3 +1,5 @@
+//! Config file change monitor — watches TOML and sends reload events.
+
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread::JoinHandle;

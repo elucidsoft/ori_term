@@ -66,11 +66,8 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let grid = tab.grid_mut();
-                        let page = grid.lines;
-                        let max = grid.scrollback.len();
-                        grid.display_offset = (grid.display_offset + page).min(max);
-                        tab.grid_dirty = true;
+                        let page = tab.grid().lines;
+                        tab.scroll_page_up(page);
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -84,10 +81,8 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let grid = tab.grid_mut();
-                        let page = grid.lines;
-                        grid.display_offset = grid.display_offset.saturating_sub(page);
-                        tab.grid_dirty = true;
+                        let page = tab.grid().lines;
+                        tab.scroll_page_down(page);
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -101,9 +96,7 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let grid = tab.grid_mut();
-                        grid.display_offset = grid.scrollback.len();
-                        tab.grid_dirty = true;
+                        tab.scroll_to_top();
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -117,8 +110,7 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        tab.grid_mut().display_offset = 0;
-                        tab.grid_dirty = true;
+                        tab.scroll_to_bottom();
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -161,8 +153,7 @@ impl App {
                             }
                         }
                         if let Some(tab) = self.tabs.get_mut(&tid) {
-                            tab.selection = None;
-                            tab.grid_dirty = true;
+                            tab.clear_selection();
                         }
                         if let Some(tw) = self.windows.get(&window_id) {
                             tw.window.request_redraw();
@@ -186,22 +177,7 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let grid = tab.grid_mut();
-                        let sb_len = grid.scrollback.len();
-                        // Current top of viewport as scrollback index.
-                        let viewport_top_sb = sb_len.saturating_sub(grid.display_offset);
-                        // Scan scrollback rows backwards from just above viewport top.
-                        let mut target_sb = None;
-                        for i in (0..viewport_top_sb).rev() {
-                            if grid.scrollback[i].prompt_start {
-                                target_sb = Some(i);
-                                break;
-                            }
-                        }
-                        if let Some(sb_idx) = target_sb {
-                            grid.display_offset = sb_len.saturating_sub(sb_idx);
-                            tab.grid_dirty = true;
-                        }
+                        tab.navigate_to_previous_prompt();
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -215,36 +191,7 @@ impl App {
                     .and_then(TermWindow::active_tab_id);
                 if let Some(tid) = tab_id {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        let grid = tab.grid_mut();
-                        let sb_len = grid.scrollback.len();
-                        // Current bottom of viewport as scrollback index.
-                        let viewport_bottom_sb =
-                            sb_len.saturating_sub(grid.display_offset) + grid.lines;
-                        // Scan scrollback + visible rows forward from below viewport.
-                        let total_rows = sb_len + grid.lines;
-                        let mut target_sb = None;
-                        for i in viewport_bottom_sb..total_rows {
-                            let has_prompt = if i < sb_len {
-                                grid.scrollback[i].prompt_start
-                            } else {
-                                grid.row(i - sb_len).prompt_start
-                            };
-                            if has_prompt {
-                                target_sb = Some(i);
-                                break;
-                            }
-                        }
-                        if let Some(idx) = target_sb {
-                            if idx < sb_len {
-                                grid.display_offset = sb_len.saturating_sub(idx);
-                            } else {
-                                grid.display_offset = 0;
-                            }
-                        } else {
-                            // No prompt below — scroll to live.
-                            grid.display_offset = 0;
-                        }
-                        tab.grid_dirty = true;
+                        tab.navigate_to_next_prompt();
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();

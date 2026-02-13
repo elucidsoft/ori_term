@@ -1,3 +1,5 @@
+//! Selection — 3-point model (anchor, pivot, end) with char/word/line/block modes.
+
 use crate::cell::CellFlags;
 use crate::grid::Grid;
 

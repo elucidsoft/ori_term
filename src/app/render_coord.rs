@@ -8,14 +8,17 @@ use crate::context_menu::ContextAction;
 use crate::gpu::renderer::FrameParams;
 use crate::log;
 use crate::palette;
-use crate::tab::{Tab, TabId};
+use crate::tab::TabId;
+use crate::tab_bar::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
+#[cfg(target_os = "windows")]
 use crate::tab_bar::{
-    CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH, GRID_PADDING_BOTTOM, GRID_PADDING_LEFT,
-    GRID_PADDING_TOP, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TabBarHit,
+    CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH, NEW_TAB_BUTTON_WIDTH, TAB_LEFT_MARGIN,
     TabBarLayout,
 };
+use crate::tab_bar::TabBarHit;
 
 impl App {
+    /// Computes grid dimensions (cols, rows) for a given window size in physical pixels.
     pub(super) fn grid_dims_for_size(&self, width: u32, height: u32) -> (usize, usize) {
         let sf = self.scale_factor;
         let s = |v: usize| -> usize { (v as f64 * sf).round() as usize };
@@ -37,6 +40,7 @@ impl App {
         (cols.max(2), rows.max(1))
     }
 
+    /// Renders a single window, building frame params and dispatching to GPU renderer.
     pub(super) fn render_window(&mut self, window_id: WindowId) {
         // Settings window has its own renderer path
         if self.is_settings_window(window_id) {
@@ -45,28 +49,49 @@ impl App {
         }
 
         // Extract all info we need before borrowing mutably.
-        let (phys, tab_info, active_idx, active_tab_id, is_maximized) = {
+        let (phys, active_idx, active_tab_id, is_maximized) = {
             let tw = match self.windows.get(&window_id) {
                 Some(tw) => tw,
                 None => return,
             };
             let phys = tw.window.inner_size();
-            let tab_info: Vec<(TabId, String)> = tw
-                .tabs
-                .iter()
-                .map(|id| {
-                    let title = self
-                        .tabs
-                        .get(id)
-                        .map_or_else(|| "?".to_string(), Tab::effective_title);
-                    (*id, title)
-                })
-                .collect();
             let active_idx = tw.active_tab;
             let active_tab_id = tw.active_tab_id();
             let is_maximized = tw.is_maximized;
-            (phys, tab_info, active_idx, active_tab_id, is_maximized)
+            (phys, active_idx, active_tab_id, is_maximized)
         };
+
+        // Only rebuild tab bar data (titles + bell badges) when dirty.
+        if self.tab_bar_dirty {
+            let (new_info, new_badges) = if let Some(tw) = self.windows.get(&window_id) {
+                let info: Vec<(TabId, String)> = tw
+                    .tabs
+                    .iter()
+                    .map(|id| {
+                        let title = self
+                            .tabs
+                            .get(id)
+                            .map_or_else(|| "?".to_string(), |t| t.effective_title().into_owned());
+                        (*id, title)
+                    })
+                    .collect();
+                let badges: Vec<bool> = tw
+                    .tabs
+                    .iter()
+                    .map(|id| {
+                        self.tabs.get(id).is_some_and(|t| t.has_bell_badge)
+                            && Some(*id) != active_tab_id
+                    })
+                    .collect();
+                (info, badges)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            self.cached_tab_info = new_info;
+            self.cached_bell_badges = new_badges;
+        }
+        let tab_info = &self.cached_tab_info;
+        let bell_badges = &self.cached_bell_badges;
 
         if phys.width == 0 || phys.height == 0 {
             return;
@@ -130,28 +155,11 @@ impl App {
                         .map(|idx| (idx, px))
                 })
             });
-        let empty_offsets: Vec<f32> = Vec::new();
         let tab_offsets = self
             .tab_anim_offsets
             .get(&window_id)
-            .map_or(empty_offsets.as_slice(), |v| v.as_slice());
+            .map_or(&[][..], |v| v.as_slice());
 
-        // Clear bell badge on the active tab (it's now visible, no need for badge).
-        if let Some(tab_id) = active_tab_id {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.has_bell_badge = false;
-            }
-        }
-
-        // Build bell badges for each tab in this window.
-        let bell_badges: Vec<bool> = if let Some(tw) = self.windows.get(&window_id) {
-            tw.tabs
-                .iter()
-                .map(|id| self.tabs.get(id).is_some_and(|t| t.has_bell_badge))
-                .collect()
-        } else {
-            Vec::new()
-        };
         let any_bell_badge = bell_badges.iter().any(|&b| b);
 
         // Smooth sine pulse for bell badge animation (~0.5 Hz).
@@ -193,13 +201,12 @@ impl App {
                 cursor_shape: tab.cursor_shape,
                 selection: tab.selection.as_ref(),
                 search: tab.search.as_ref(),
-                tab_info: &tab_info,
+                tab_info,
                 active_tab: active_idx,
                 hover_hit: hover,
                 is_maximized,
                 context_menu: self.context_menu.as_ref(),
                 opacity: self.config.window.effective_opacity(),
-                tab_bar_opacity: self.config.window.effective_tab_bar_opacity(),
                 hover_hyperlink: self
                     .hover_hyperlink
                     .as_ref()
@@ -210,7 +217,7 @@ impl App {
                 alpha_blending: self.config.colors.alpha_blending,
                 dragged_tab,
                 tab_offsets,
-                bell_badges: &bell_badges,
+                bell_badges,
                 bell_phase,
                 scale: self.scale_factor as f32,
                 cursor_visible,
@@ -259,6 +266,7 @@ impl App {
         self.tab_bar_dirty = false;
     }
 
+    /// Dispatches context menu action by executing the appropriate app method.
     pub(super) fn dispatch_context_action(
         &mut self,
         action: ContextAction,

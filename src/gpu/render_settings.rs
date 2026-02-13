@@ -1,17 +1,19 @@
 //! Settings window rendering — theme picker with color swatches.
 
-use crate::palette::{BUILTIN_SCHEMES, Palette};
-use crate::render::FontSet;
-
 use super::color_util::{
     darken, lerp_color, lighten, ortho_projection, srgb_to_linear, vte_rgb_to_rgba,
 };
 use super::renderer::{GpuRenderer, InstanceWriter};
 use super::state::GpuState;
+use crate::palette::{Palette, BUILTIN_SCHEMES};
+use crate::render::FontSet;
 
 impl GpuRenderer {
     /// Render the settings window frame.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Renderer function requires full context for drawing"
+    )]
     pub fn draw_settings_frame(
         &mut self,
         gpu: &GpuState,

@@ -1,3 +1,5 @@
+//! Binary entry point for the oriterm terminal emulator.
+
 #![windows_subsystem = "windows"]
 
 fn main() {

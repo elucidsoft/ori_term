@@ -1,3 +1,5 @@
+//! Terminal mode flags — cursor, mouse, keyboard protocol, wrap, etc.
+
 use bitflags::bitflags;
 use vte::ansi::KeyboardModes;
 

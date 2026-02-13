@@ -1,9 +1,12 @@
+//! Terminal grid cell representation with attributes and flags.
+
 use std::sync::Arc;
 
 use bitflags::bitflags;
 use vte::ansi::{Color, Hyperlink, Rgb};
 
 bitflags! {
+    /// Bitflags for cell text attributes and layout hints.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct CellFlags: u16 {
         const BOLD                    = 0b0000_0000_0001;
@@ -26,6 +29,7 @@ bitflags! {
 }
 
 impl CellFlags {
+    /// Combined mask for all underline variants.
     pub const ANY_UNDERLINE: Self = Self::UNDERLINE
         .union(Self::DOUBLE_UNDERLINE)
         .union(Self::UNDERCURL)
@@ -33,6 +37,7 @@ impl CellFlags {
         .union(Self::DASHED_UNDERLINE);
 }
 
+/// Extended cell data stored out-of-line (combining marks, hyperlinks, custom underline color).
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct CellExtra {
     pub zerowidth: Vec<char>,
@@ -53,6 +58,7 @@ impl Clone for CellExtra {
     }
 }
 
+/// A single grid cell with character, colors, attributes, and optional extended data.
 #[derive(Debug, Clone)]
 pub struct Cell {
     pub c: char,
@@ -81,6 +87,29 @@ impl PartialEq for Cell {
 }
 
 impl Cell {
+    // Accessors
+
+    /// Returns the zero-width combining characters for this cell.
+    pub fn zerowidth(&self) -> &[char] {
+        match &self.extra {
+            Some(extra) => &extra.zerowidth,
+            None => &[],
+        }
+    }
+
+    /// Returns the custom underline color if set.
+    pub fn underline_color(&self) -> Option<Color> {
+        self.extra.as_ref().and_then(|e| e.underline_color)
+    }
+
+    /// Returns the hyperlink associated with this cell.
+    pub fn hyperlink(&self) -> Option<&Hyperlink> {
+        self.extra.as_ref().and_then(|e| e.hyperlink.as_ref())
+    }
+
+    // Operations
+
+    /// Resets this cell to match the template, preserving character layout flags.
     pub fn reset(&mut self, template: &Self) {
         self.c = template.c;
         self.fg = template.fg;
@@ -93,13 +122,7 @@ impl Cell {
         self.extra = None;
     }
 
-    pub fn zerowidth(&self) -> &[char] {
-        match &self.extra {
-            Some(extra) => &extra.zerowidth,
-            None => &[],
-        }
-    }
-
+    /// Adds a zero-width combining character to this cell.
     pub fn push_zerowidth(&mut self, c: char) {
         let extra = self
             .extra
@@ -107,6 +130,7 @@ impl Cell {
         Arc::make_mut(extra).zerowidth.push(c);
     }
 
+    /// Sets the custom underline color for this cell.
     pub fn set_underline_color(&mut self, color: Option<Color>) {
         if color.is_none() && self.extra.is_none() {
             return;
@@ -117,10 +141,7 @@ impl Cell {
         Arc::make_mut(extra).underline_color = color;
     }
 
-    pub fn underline_color(&self) -> Option<Color> {
-        self.extra.as_ref().and_then(|e| e.underline_color)
-    }
-
+    /// Sets the hyperlink for this cell.
     pub fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         if hyperlink.is_none() && self.extra.is_none() {
             return;
@@ -131,10 +152,9 @@ impl Cell {
         Arc::make_mut(extra).hyperlink = hyperlink;
     }
 
-    pub fn hyperlink(&self) -> Option<&Hyperlink> {
-        self.extra.as_ref().and_then(|e| e.hyperlink.as_ref())
-    }
+    // Conversion
 
+    /// Converts a Color to an RGB triple, using fallback values for indexed/named colors.
     pub fn to_rgb(color: Color) -> Rgb {
         match color {
             Color::Spec(rgb) => rgb,

@@ -9,6 +9,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId;
 
 use crate::config;
+#[cfg(target_os = "windows")]
 use crate::drag::DragPhase;
 use crate::key_encoding::{self, KeyEventType};
 use crate::keybindings;
@@ -65,8 +66,11 @@ impl ApplicationHandler<TermEvent> for App {
                         tab.has_bell_badge = true;
                         self.tab_bar_dirty = true;
                     }
-                    // Drain pending notifications and log them.
-                    for notif in tab.pending_notifications.drain(..) {
+                    // Active tab never needs a bell badge (user can see it).
+                    if is_active && tab.has_bell_badge {
+                        tab.has_bell_badge = false;
+                    }
+                    for notif in tab.drain_notifications() {
                         if notif.title.is_empty() {
                             log(&format!("notification: {}", notif.body));
                         } else {
@@ -299,13 +303,10 @@ impl ApplicationHandler<TermEvent> for App {
                     // Scroll to live on press (not release).
                     if is_pressed {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
-                            if tab.grid().display_offset != 0 || tab.selection.is_some() {
-                                tab.grid_dirty = true;
+                            if tab.grid().display_offset != 0 {
+                                tab.scroll_to_bottom();
                             }
-                            tab.grid_mut().display_offset = 0;
-                            if tab.selection.is_some() {
-                                tab.selection = None;
-                            }
+                            tab.clear_selection();
                         }
                     }
 

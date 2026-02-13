@@ -7,7 +7,6 @@ use crate::render::{FontSet, FontStyle};
 use crate::search::MatchType;
 use crate::tab_bar::{GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
 use crate::term_mode::TermMode;
-
 use super::color_util::vte_rgb_to_rgba;
 use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
 

@@ -1,3 +1,5 @@
+//! Keybinding system — map key+modifiers to actions.
+
 use serde::{Deserialize, Serialize};
 use winit::keyboard::{Key, NamedKey};
 

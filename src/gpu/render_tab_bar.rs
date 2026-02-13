@@ -1,14 +1,14 @@
 //! Tab bar instance building — inactive/active tabs, close buttons, window controls.
 
 use super::color_util::{
-    CONTROL_CLOSE_HOVER_BG, CONTROL_CLOSE_HOVER_FG, TabBarColors, lerp_color, lighten,
+    lerp_color, lighten, TabBarColors, CONTROL_CLOSE_HOVER_BG, CONTROL_CLOSE_HOVER_FG,
 };
 use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
 use crate::render::FontSet;
 use crate::tab_bar::{
-    CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH, DROPDOWN_BUTTON_WIDTH,
-    ICON_SIZE, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN, TAB_PADDING, TAB_TOP_MARGIN,
-    TabBarHit, TabBarLayout,
+    TabBarHit, TabBarLayout, CLOSE_BUTTON_RIGHT_PAD, CLOSE_BUTTON_WIDTH, CONTROLS_ZONE_WIDTH,
+    DROPDOWN_BUTTON_WIDTH, ICON_SIZE, NEW_TAB_BUTTON_WIDTH, TAB_BAR_HEIGHT, TAB_LEFT_MARGIN,
+    TAB_PADDING, TAB_TOP_MARGIN,
 };
 #[cfg(target_os = "windows")]
 use crate::tab_bar::CONTROL_BUTTON_WIDTH;
@@ -24,10 +24,10 @@ impl GpuRenderer {
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
+        tc: &TabBarColors,
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) {
-        let tc = TabBarColors::from_palette(params.palette);
         let w = params.width as f32;
         let s = params.scale;
         let tab_bar_h = TAB_BAR_HEIGHT as f32 * s;
@@ -99,7 +99,7 @@ impl GpuRenderer {
                 cell_h,
                 title,
                 tc.inactive_text,
-                &tc,
+                tc,
                 i,
                 params,
                 glyphs,
@@ -128,7 +128,7 @@ impl GpuRenderer {
                     cell_h,
                     title,
                     tc.text_fg,
-                    &tc,
+                    tc,
                     params.active_tab,
                     params,
                     glyphs,
@@ -192,11 +192,14 @@ impl GpuRenderer {
         // Window control buttons
         let controls_zone_w = (CONTROLS_ZONE_WIDTH as f32 * s) as usize;
         let controls_start = (params.width as usize).saturating_sub(controls_zone_w) as f32;
-        self.build_window_controls(bg, controls_start, params, &tc);
+        self.build_window_controls(bg, controls_start, params, tc);
     }
 
     /// Render a single tab's text content and close button.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Tab rendering requires full context for layout and styling"
+    )]
     pub(super) fn render_tab_content(
         &mut self,
         bg: &mut InstanceWriter,

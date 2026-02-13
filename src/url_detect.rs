@@ -1,3 +1,5 @@
+//! Implicit URL detection in grid text using regex patterns.
+
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -28,6 +30,9 @@ impl DetectedUrl {
 }
 
 /// Cache of detected URLs keyed by the first absolute row of the logical line.
+///
+/// Lazily computes URLs for logical lines (sequences of wrapped rows) and caches
+/// them to avoid redundant regex matching on hover/click.
 #[derive(Default)]
 pub struct UrlDetectCache {
     /// Logical line start row -> detected URLs for that logical line.
@@ -37,15 +42,18 @@ pub struct UrlDetectCache {
 }
 
 impl UrlDetectCache {
-    /// Find a URL at (`abs_row`, `col`), computing and caching the logical line
-    /// if needed. Returns the URL string and its segments.
+    /// Finds a URL at the specified grid position, computing and caching the logical line if needed.
+    ///
+    /// Returns the URL string and its segments if a URL is found at this position.
     pub fn url_at(&mut self, grid: &Grid, abs_row: usize, col: usize) -> Option<DetectedUrl> {
         let line_start = self.ensure_logical_line(grid, abs_row);
         let urls = self.lines.get(&line_start)?;
         urls.iter().find(|u| u.contains(abs_row, col)).cloned()
     }
 
-    /// Ensure the logical line containing `abs_row` is computed and cached.
+    /// Ensures the logical line containing the row is computed and cached.
+    ///
+    /// Returns the absolute row index of the logical line start.
     fn ensure_logical_line(&mut self, grid: &Grid, abs_row: usize) -> usize {
         if let Some(&ls) = self.row_to_line.get(&abs_row) {
             return ls;
@@ -64,14 +72,15 @@ impl UrlDetectCache {
         line_start
     }
 
-    /// Invalidate the entire cache (call after PTY output, scroll, resize).
+    /// Invalidates the entire cache (call after PTY output, scroll, resize).
     pub fn invalidate(&mut self) {
         self.lines.clear();
         self.row_to_line.clear();
     }
 }
 
-/// Check if a row's content continues onto the next row.
+/// Checks if a row's content continues onto the next row.
+///
 /// True when WRAPLINE is set (terminal auto-wrap) OR the row is completely
 /// filled with non-space content (application-driven wrapping, e.g. a CLI
 /// that explicitly breaks long URLs at the terminal width).
@@ -84,7 +93,7 @@ fn row_continues(row: &crate::grid::row::Row) -> bool {
     last.flags.contains(CellFlags::WRAPLINE) || (last.c != '\0' && last.c != ' ')
 }
 
-/// Walk backwards to find the start of contiguous text for URL detection.
+/// Walks backwards to find the start of contiguous text for URL detection.
 fn logical_line_start(grid: &Grid, abs_row: usize) -> usize {
     let mut r = abs_row;
     while r > 0 {
@@ -101,7 +110,7 @@ fn logical_line_start(grid: &Grid, abs_row: usize) -> usize {
     r
 }
 
-/// Walk forwards to find the end of contiguous text for URL detection.
+/// Walks forwards to find the end of contiguous text for URL detection.
 fn logical_line_end(grid: &Grid, abs_row: usize) -> usize {
     let total = grid.scrollback.len() + grid.lines;
     let mut r = abs_row;
@@ -120,7 +129,7 @@ static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?:https?|ftp|file)://[^\s<>\[\]'"]+"#).expect("URL regex is valid")
 });
 
-/// Trim trailing punctuation from a URL, preserving balanced parentheses.
+/// Trims trailing punctuation from a URL, preserving balanced parentheses.
 fn trim_url_trailing(url: &str) -> &str {
     let mut s = url;
     loop {
@@ -141,11 +150,11 @@ fn trim_url_trailing(url: &str) -> &str {
     s
 }
 
-/// Detect URLs across a logical line spanning `line_start..=line_end` (absolute rows).
+/// Detects URLs across a logical line spanning `line_start..=line_end` (absolute rows).
 ///
 /// Concatenates text from all rows, runs the regex, then maps byte spans
 /// back to per-row segments.
-#[allow(clippy::string_slice)]
+#[expect(clippy::string_slice, reason = "char-to-byte offset mapping is validated")]
 fn detect_urls_in_logical_line(
     grid: &Grid,
     line_start: usize,

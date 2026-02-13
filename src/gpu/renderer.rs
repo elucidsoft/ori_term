@@ -22,7 +22,7 @@ use crate::term_mode::TermMode;
 use super::atlas::GlyphAtlas;
 #[cfg(target_os = "windows")]
 use super::color_util::u32_to_rgba;
-use super::color_util::{ortho_projection, palette_to_rgba};
+use super::color_util::{ortho_projection, vte_rgb_to_rgba, TabBarColors};
 use super::pipeline::{self, INSTANCE_STRIDE};
 use super::state::GpuState;
 
@@ -43,7 +43,6 @@ pub struct FrameParams<'a> {
     pub is_maximized: bool,
     pub context_menu: Option<&'a crate::context_menu::MenuOverlay>,
     pub opacity: f32,
-    pub tab_bar_opacity: f32,
     pub hover_hyperlink: Option<&'a str>,
     pub hover_url_range: Option<&'a [(usize, usize, usize)]>,
     pub minimum_contrast: f32,
@@ -78,11 +77,10 @@ struct PreparedFrame {
     bg_count: u32,
     fg_buffer: wgpu::Buffer,
     fg_count: u32,
-    overlay_bg_buffer: wgpu::Buffer,
+    overlay_bg_buffer: Option<wgpu::Buffer>,
     overlay_bg_count: u32,
-    overlay_fg_buffer: wgpu::Buffer,
+    overlay_fg_buffer: Option<wgpu::Buffer>,
     overlay_fg_count: u32,
-    has_overlay: bool,
 }
 
 /// The GPU renderer: owns pipelines, atlas, bind groups.
@@ -101,6 +99,11 @@ pub struct GpuRenderer {
     cached_frame: Option<PreparedFrame>,
     /// Tracks which window was last rendered; invalidates cache on window switch.
     last_rendered_window: Option<WindowId>,
+    // Reusable byte buffers for instance building — avoids per-frame heap allocation.
+    buf_bg: Vec<u8>,
+    buf_fg: Vec<u8>,
+    buf_overlay_bg: Vec<u8>,
+    buf_overlay_fg: Vec<u8>,
 }
 
 impl GpuRenderer {
@@ -178,6 +181,10 @@ impl GpuRenderer {
             render_format: format,
             cached_frame: None,
             last_rendered_window: None,
+            buf_bg: Vec::new(),
+            buf_fg: Vec::new(),
+            buf_overlay_bg: Vec::new(),
+            buf_overlay_fg: Vec::new(),
         }
     }
 
@@ -335,6 +342,9 @@ impl GpuRenderer {
             &params.minimum_contrast.to_ne_bytes(),
         );
 
+        // Compute tab bar colors once — used by tab bar, dragged tab, and search bar.
+        let tc = TabBarColors::from_palette(params.palette);
+
         // Damage tracking: reuse cached frame (GPU buffers + all) when nothing changed.
         let needs_rebuild =
             params.grid_dirty || params.tab_bar_dirty || self.cached_frame.is_none();
@@ -345,15 +355,23 @@ impl GpuRenderer {
             // rebuilding it is cheap; the expensive part (grid + tab bar +
             // buffer creation) is skipped entirely.
             let needs_overlay = params.dragged_tab.is_some()
-                || self.cached_frame.as_ref().is_some_and(|f| f.has_overlay);
+                || params.context_menu.is_some()
+                || self
+                    .cached_frame
+                    .as_ref()
+                    .is_some_and(|f| f.overlay_bg_buffer.is_some());
             if needs_overlay {
-                // Build overlay instances (borrows &mut self for atlas access)
-                let mut overlay_bg_w = InstanceWriter::new();
-                let mut overlay_fg_w = InstanceWriter::new();
+                // Build overlay instances (borrows &mut self for atlas access).
+                // Reuse byte buffers from previous frame to avoid heap allocation.
+                let mut overlay_bg_w =
+                    InstanceWriter::from_buffer(std::mem::take(&mut self.buf_overlay_bg));
+                let mut overlay_fg_w =
+                    InstanceWriter::from_buffer(std::mem::take(&mut self.buf_overlay_fg));
                 self.build_dragged_tab_overlay(
                     &mut overlay_bg_w,
                     &mut overlay_fg_w,
                     params,
+                    &tc,
                     ui_glyphs,
                     &gpu.queue,
                 );
@@ -373,46 +391,59 @@ impl GpuRenderer {
 
                 if let Some(ref mut cached) = self.cached_frame {
                     if has_overlay {
-                        let new_bg = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("overlay_bg"),
-                            size: (overlay_bg_bytes.len() as u64).max(INSTANCE_STRIDE),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        if !overlay_bg_bytes.is_empty() {
-                            gpu.queue.write_buffer(&new_bg, 0, overlay_bg_bytes);
-                        }
-                        let new_fg = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("overlay_fg"),
-                            size: (overlay_fg_bytes.len() as u64).max(INSTANCE_STRIDE),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        if !overlay_fg_bytes.is_empty() {
-                            gpu.queue.write_buffer(&new_fg, 0, overlay_fg_bytes);
-                        }
-                        cached.overlay_bg_buffer = new_bg;
-                        cached.overlay_fg_buffer = new_fg;
+                        // Reuse existing GPU buffer if it fits, else create a new one.
+                        cached.overlay_bg_buffer = Some(reuse_or_create_buffer(
+                            &gpu.device,
+                            &gpu.queue,
+                            cached.overlay_bg_buffer.take(),
+                            overlay_bg_bytes,
+                            "overlay_bg",
+                        ));
+                        cached.overlay_fg_buffer = Some(reuse_or_create_buffer(
+                            &gpu.device,
+                            &gpu.queue,
+                            cached.overlay_fg_buffer.take(),
+                            overlay_fg_bytes,
+                            "overlay_fg",
+                        ));
+                    } else {
+                        cached.overlay_bg_buffer = None;
+                        cached.overlay_fg_buffer = None;
                     }
                     cached.overlay_bg_count = overlay_bg_count;
                     cached.overlay_fg_count = overlay_fg_count;
-                    cached.has_overlay = has_overlay;
                 }
+
+                // Reclaim byte buffers for next frame.
+                self.buf_overlay_bg = overlay_bg_w.into_buffer();
+                self.buf_overlay_fg = overlay_fg_w.into_buffer();
             }
             return;
         }
 
-        // Build instance data.
+        // Extract old GPU buffers for reuse before building new instance data.
+        let old = self.cached_frame.take();
+        let (old_bg_buf, old_fg_buf, old_overlay_bg_buf, old_overlay_fg_buf) = match old {
+            Some(f) => (
+                Some(f.bg_buffer),
+                Some(f.fg_buffer),
+                f.overlay_bg_buffer,
+                f.overlay_fg_buffer,
+            ),
+            None => (None, None, None, None),
+        };
+
+        // Build instance data — reuse byte buffers from previous frame.
         // Tab bar and window border are fully opaque (opacity=1.0).
         // Grid cells use the configured opacity for transparency.
-        let mut bg = InstanceWriter::new();
-        let mut fg = InstanceWriter::new();
+        let mut bg = InstanceWriter::from_buffer(std::mem::take(&mut self.buf_bg));
+        let mut fg = InstanceWriter::from_buffer(std::mem::take(&mut self.buf_fg));
 
         // Default background color
-        let default_bg = palette_to_rgba(params.palette.default_bg());
+        let default_bg = vte_rgb_to_rgba(params.palette.default_bg());
 
         // 1. Tab bar (always fully opaque — individual tabs carry their own alpha)
-        self.build_tab_bar_instances(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
+        self.build_tab_bar_instances(&mut bg, &mut fg, params, &tc, ui_glyphs, &gpu.queue);
 
         // Switch to transparent for grid content
         bg.opacity = params.opacity;
@@ -421,7 +452,7 @@ impl GpuRenderer {
         self.build_grid_instances(&mut bg, &mut fg, params, glyphs, &gpu.queue, &default_bg);
 
         // 3. Search bar overlay (at bottom of grid, UI font)
-        self.build_search_bar_overlay(&mut bg, &mut fg, params, ui_glyphs, &gpu.queue);
+        self.build_search_bar_overlay(&mut bg, &mut fg, params, &tc, ui_glyphs, &gpu.queue);
 
         // 4. Window border (opaque, Windows only — Linux WM draws its own)
         bg.opacity = 1.0;
@@ -436,12 +467,15 @@ impl GpuRenderer {
         }
 
         // 5. Overlay pass (drawn after main bg+fg — dragged tab + dropdown)
-        let mut overlay_bg_w = InstanceWriter::new();
-        let mut overlay_fg_w = InstanceWriter::new();
+        let mut overlay_bg_w =
+            InstanceWriter::from_buffer(std::mem::take(&mut self.buf_overlay_bg));
+        let mut overlay_fg_w =
+            InstanceWriter::from_buffer(std::mem::take(&mut self.buf_overlay_fg));
         self.build_dragged_tab_overlay(
             &mut overlay_bg_w,
             &mut overlay_fg_w,
             params,
+            &tc,
             ui_glyphs,
             &gpu.queue,
         );
@@ -458,78 +492,46 @@ impl GpuRenderer {
 
         if bg_bytes.is_empty() && fg_bytes.is_empty() {
             self.cached_frame = None;
+            self.buf_bg = bg.into_buffer();
+            self.buf_fg = fg.into_buffer();
+            self.buf_overlay_bg = overlay_bg_w.into_buffer();
+            self.buf_overlay_fg = overlay_fg_w.into_buffer();
             return;
         }
 
         let bg_count = bg.count();
         let fg_count = fg.count();
-        let overlay_bg_count = overlay_bg_w.count();
-        let overlay_fg_count = overlay_fg_w.count();
-        let has_overlay =
-            !overlay_bg_w.as_bytes().is_empty() || !overlay_fg_w.as_bytes().is_empty();
-
-        // Create and upload GPU buffers
-        let bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("bg_instances"),
-            size: (bg_bytes.len() as u64).max(INSTANCE_STRIDE),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !bg_bytes.is_empty() {
-            gpu.queue.write_buffer(&bg_buffer, 0, bg_bytes);
-        }
-
-        let fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("fg_instances"),
-            size: (fg_bytes.len() as u64).max(INSTANCE_STRIDE),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        if !fg_bytes.is_empty() {
-            gpu.queue.write_buffer(&fg_buffer, 0, fg_bytes);
-        }
-
         let overlay_bg_bytes = overlay_bg_w.as_bytes();
         let overlay_fg_bytes = overlay_fg_w.as_bytes();
+        let overlay_bg_count = overlay_bg_w.count();
+        let overlay_fg_count = overlay_fg_w.count();
+        let has_overlay = !overlay_bg_bytes.is_empty() || !overlay_fg_bytes.is_empty();
 
-        let overlay_bg_buffer;
-        let overlay_fg_buffer;
-        if has_overlay {
-            overlay_bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("overlay_bg"),
-                size: (overlay_bg_bytes.len() as u64).max(INSTANCE_STRIDE),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            if !overlay_bg_bytes.is_empty() {
-                gpu.queue
-                    .write_buffer(&overlay_bg_buffer, 0, overlay_bg_bytes);
-            }
-            overlay_fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("overlay_fg"),
-                size: (overlay_fg_bytes.len() as u64).max(INSTANCE_STRIDE),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            if !overlay_fg_bytes.is_empty() {
-                gpu.queue
-                    .write_buffer(&overlay_fg_buffer, 0, overlay_fg_bytes);
-            }
+        // Reuse GPU buffers from previous frame when capacity suffices.
+        let bg_buffer =
+            reuse_or_create_buffer(&gpu.device, &gpu.queue, old_bg_buf, bg_bytes, "bg_instances");
+        let fg_buffer =
+            reuse_or_create_buffer(&gpu.device, &gpu.queue, old_fg_buf, fg_bytes, "fg_instances");
+
+        let (overlay_bg_buffer, overlay_fg_buffer) = if has_overlay {
+            let bg_buf = reuse_or_create_buffer(
+                &gpu.device,
+                &gpu.queue,
+                old_overlay_bg_buf,
+                overlay_bg_bytes,
+                "overlay_bg",
+            );
+            let fg_buf = reuse_or_create_buffer(
+                &gpu.device,
+                &gpu.queue,
+                old_overlay_fg_buf,
+                overlay_fg_bytes,
+                "overlay_fg",
+            );
+            (Some(bg_buf), Some(fg_buf))
         } else {
-            // Dummy — never used
-            overlay_bg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: INSTANCE_STRIDE,
-                usage: wgpu::BufferUsages::VERTEX,
-                mapped_at_creation: false,
-            });
-            overlay_fg_buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: INSTANCE_STRIDE,
-                usage: wgpu::BufferUsages::VERTEX,
-                mapped_at_creation: false,
-            });
-        }
+            (None, None)
+        };
 
         self.cached_frame = Some(PreparedFrame {
             default_bg,
@@ -542,8 +544,13 @@ impl GpuRenderer {
             overlay_bg_count,
             overlay_fg_buffer,
             overlay_fg_count,
-            has_overlay,
         });
+
+        // Reclaim byte buffers for next frame.
+        self.buf_bg = bg.into_buffer();
+        self.buf_fg = fg.into_buffer();
+        self.buf_overlay_bg = overlay_bg_w.into_buffer();
+        self.buf_overlay_fg = overlay_fg_w.into_buffer();
     }
 
     /// Issue the render pass draw calls to the given texture view.
@@ -593,18 +600,20 @@ impl GpuRenderer {
         }
 
         // Overlay pass (dropdown menu on top of everything)
-        if p.has_overlay {
+        if let Some(ref buf) = p.overlay_bg_buffer {
             if p.overlay_bg_count > 0 {
                 rpass.set_pipeline(&self.bg_pipeline);
                 rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                rpass.set_vertex_buffer(0, p.overlay_bg_buffer.slice(..));
+                rpass.set_vertex_buffer(0, buf.slice(..));
                 rpass.draw(0..4, 0..p.overlay_bg_count);
             }
+        }
+        if let Some(ref buf) = p.overlay_fg_buffer {
             if p.overlay_fg_count > 0 {
                 rpass.set_pipeline(&self.fg_pipeline);
                 rpass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 rpass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                rpass.set_vertex_buffer(0, p.overlay_fg_buffer.slice(..));
+                rpass.set_vertex_buffer(0, buf.slice(..));
                 rpass.draw(0..4, 0..p.overlay_fg_count);
             }
         }
@@ -713,8 +722,6 @@ impl GpuRenderer {
         frame.present();
     }
 
-    // --- Text rendering helpers ---
-
     /// Push glyph instances for a text string at the given pixel position.
     pub(super) fn push_text_instances(
         &mut self,
@@ -787,7 +794,38 @@ impl GpuRenderer {
     }
 }
 
-// --- Instance data serialization ---
+/// Reuse an existing GPU buffer if it has enough capacity, otherwise create a new one.
+///
+/// When `existing` is `Some` and its size >= the data length, writes data
+/// into the existing buffer via `queue.write_buffer()` (no allocation).
+/// Otherwise creates a fresh buffer.
+fn reuse_or_create_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    existing: Option<wgpu::Buffer>,
+    data: &[u8],
+    label: &str,
+) -> wgpu::Buffer {
+    let needed = (data.len() as u64).max(INSTANCE_STRIDE);
+    if let Some(buf) = existing {
+        if buf.size() >= needed {
+            if !data.is_empty() {
+                queue.write_buffer(&buf, 0, data);
+            }
+            return buf;
+        }
+    }
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: needed,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if !data.is_empty() {
+        queue.write_buffer(&buf, 0, data);
+    }
+    buf
+}
 
 /// Writes cell instance data to a byte buffer without unsafe code.
 pub(super) struct InstanceWriter {
@@ -801,6 +839,20 @@ impl InstanceWriter {
             data: Vec::with_capacity(4096),
             opacity: 1.0,
         }
+    }
+
+    /// Reuse an existing byte buffer, clearing its contents but keeping its allocation.
+    pub(super) fn from_buffer(mut buf: Vec<u8>) -> Self {
+        buf.clear();
+        Self {
+            data: buf,
+            opacity: 1.0,
+        }
+    }
+
+    /// Consume the writer, returning the underlying byte buffer for reuse.
+    pub(super) fn into_buffer(self) -> Vec<u8> {
+        self.data
     }
 
     /// Push a colored background rectangle (no texture, sharp corners).

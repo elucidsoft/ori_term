@@ -1,3 +1,5 @@
+//! Terminal grid with scrollback, cursor, and reflow support.
+
 pub mod cursor;
 pub mod row;
 
@@ -61,7 +63,6 @@ impl Grid {
         stops
     }
 
-    // --- Row access ---
 
     pub fn row(&self, line: usize) -> &Row {
         &self.rows[line]
@@ -71,7 +72,6 @@ impl Grid {
         &mut self.rows[line]
     }
 
-    // --- Viewport rows for rendering ---
 
     pub fn visible_row(&self, line: usize) -> &Row {
         if self.display_offset == 0 {
@@ -93,6 +93,14 @@ impl Grid {
         &self.rows[offset_line as usize]
     }
 
+    /// Convert a viewport line to an absolute row index.
+    ///
+    /// Absolute indexing: scrollback\[0\] is the oldest row, then visible rows
+    /// follow. This accounts for the current `display_offset` (scroll position).
+    pub fn viewport_to_absolute(&self, line: usize) -> usize {
+        self.scrollback.len().saturating_sub(self.display_offset) + line
+    }
+
     /// Access a row by absolute index (scrollback row 0 = oldest).
     pub fn absolute_row(&self, abs_row: usize) -> Option<&Row> {
         let sb_len = self.scrollback.len();
@@ -103,7 +111,6 @@ impl Grid {
         }
     }
 
-    // --- Character output ---
 
     pub fn put_char(&mut self, c: char) {
         if self.cursor.input_needs_wrap {
@@ -217,7 +224,6 @@ impl Grid {
         }
     }
 
-    // --- Line operations ---
 
     pub fn newline(&mut self) {
         self.cursor.input_needs_wrap = false;
@@ -240,7 +246,7 @@ impl Grid {
         }
     }
 
-    #[allow(clippy::else_if_without_else)]
+    #[allow(clippy::else_if_without_else, reason = "No else needed for boundary condition")]
     pub fn reverse_index(&mut self) {
         if self.cursor.row == self.scroll_top {
             self.scroll_down(1);
@@ -253,7 +259,6 @@ impl Grid {
         self.newline();
     }
 
-    // --- Scrolling ---
 
     pub fn scroll_up(&mut self, count: usize) {
         self.scroll_up_in_region(self.scroll_top, self.scroll_bottom, count);
@@ -263,7 +268,7 @@ impl Grid {
         self.scroll_down_in_region(self.scroll_top, self.scroll_bottom, count);
     }
 
-    #[allow(clippy::else_if_without_else)]
+    #[allow(clippy::else_if_without_else, reason = "Conditional offset update, no else needed")]
     fn scroll_up_in_region(&mut self, top: usize, bottom: usize, count: usize) {
         if top > bottom || bottom >= self.lines {
             return;
@@ -311,9 +316,8 @@ impl Grid {
         }
     }
 
-    // --- Erase operations ---
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, reason = "VTE trait requires consuming enum parameter")]
     pub fn erase_display(&mut self, mode: ClearMode) {
         let template = &self.cursor.template;
         match mode {
@@ -352,7 +356,7 @@ impl Grid {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, reason = "VTE trait requires consuming enum parameter")]
     pub fn erase_line(&mut self, mode: LineClearMode) {
         let template = &self.cursor.template;
         let row = self.cursor.row;
@@ -384,7 +388,6 @@ impl Grid {
         }
     }
 
-    // --- Insert / Delete ---
 
     pub fn insert_blank_chars(&mut self, count: usize) {
         let row = self.cursor.row;
@@ -434,7 +437,6 @@ impl Grid {
         self.scroll_up_in_region(row, self.scroll_bottom, count);
     }
 
-    // --- Cursor positioning ---
 
     pub fn goto(&mut self, row: usize, col: usize) {
         self.cursor.row = row.min(self.lines.saturating_sub(1));
@@ -472,7 +474,6 @@ impl Grid {
         self.cursor.input_needs_wrap = false;
     }
 
-    // --- Cursor save / restore ---
 
     pub fn save_cursor(&mut self) {
         self.saved_cursor = Some(self.cursor.clone());
@@ -487,7 +488,6 @@ impl Grid {
         }
     }
 
-    // --- Scroll region ---
 
     pub fn set_scroll_region(&mut self, top: usize, bottom: Option<usize>) {
         let bottom = bottom.unwrap_or_else(|| self.lines.saturating_sub(1));
@@ -505,7 +505,6 @@ impl Grid {
         self.scroll_bottom
     }
 
-    // --- Tab stops ---
 
     pub fn set_tab_stop(&mut self) {
         if self.cursor.col < self.cols {
@@ -513,7 +512,7 @@ impl Grid {
         }
     }
 
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value, reason = "VTE trait requires consuming enum parameter")]
     pub fn clear_tab_stops(&mut self, mode: TabulationClearMode) {
         match mode {
             TabulationClearMode::Current => {
@@ -550,7 +549,6 @@ impl Grid {
         }
     }
 
-    // --- Resize ---
 
     /// Resize the grid to new dimensions.
     ///
@@ -669,7 +667,7 @@ impl Grid {
     /// (wrapping) columns, inspired by Ghostty's reflow approach. Iterates all
     /// cells from all rows (scrollback + visible) and writes them into new
     /// output rows at the target width.
-    #[allow(clippy::else_if_without_else)]
+    #[allow(clippy::else_if_without_else, reason = "Wrapped row conditional, no else needed")]
     fn reflow_cols(&mut self, new_cols: usize) {
         let old_cols = self.cols;
         if old_cols == new_cols || new_cols == 0 {
@@ -861,7 +859,6 @@ impl Grid {
         trimmed
     }
 
-    // --- Utility ---
 
     pub fn clear_all(&mut self) {
         let template = Cell::default();

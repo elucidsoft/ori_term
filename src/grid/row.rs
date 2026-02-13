@@ -1,3 +1,5 @@
+//! A single row in the terminal grid, storing cells and metadata.
+
 use std::ops::{Index, IndexMut};
 
 use crate::cell::{Cell, CellFlags};
@@ -11,6 +13,7 @@ pub struct Row {
 }
 
 impl Row {
+    /// Creates a new row with the given number of columns.
     pub fn new(cols: usize) -> Self {
         Self {
             inner: vec![Cell::default(); cols],
@@ -19,14 +22,37 @@ impl Row {
         }
     }
 
+    /// Returns the number of columns in this row.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Returns true if this row has zero columns.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
+    /// Returns an iterator over the cells in this row.
+    pub fn iter(&self) -> std::slice::Iter<'_, Cell> {
+        self.inner.iter()
+    }
+
+    /// Returns a mutable iterator over the cells in this row.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
+        self.inner.iter_mut()
+    }
+
+    /// Direct access to the inner cell vector.
+    pub fn cells(&self) -> &[Cell] {
+        &self.inner
+    }
+
+    /// Direct mutable access to the inner cell vector.
+    pub fn cells_mut(&mut self) -> &mut Vec<Cell> {
+        &mut self.inner
+    }
+
+    /// Resets all cells in this row to the template cell, clearing content.
     pub fn reset(&mut self, template: &Cell) {
         for cell in &mut self.inner {
             cell.reset(template);
@@ -34,23 +60,18 @@ impl Row {
         self.occ = 0;
     }
 
-    pub fn iter(&self) -> std::slice::Iter<'_, Cell> {
-        self.inner.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Cell> {
-        self.inner.iter_mut()
-    }
-
+    /// Truncates the row to the specified number of columns.
     pub fn truncate(&mut self, cols: usize) {
         self.inner.truncate(cols);
         self.occ = self.occ.min(cols);
     }
 
+    /// Grows the row to the specified number of columns, filling with default cells.
     pub fn grow(&mut self, cols: usize) {
         self.inner.resize(cols, Cell::default());
     }
 
+    /// Resizes the row to the specified number of columns.
     pub fn resize(&mut self, cols: usize) {
         if cols < self.inner.len() {
             self.truncate(cols);
@@ -78,7 +99,7 @@ impl Row {
         0
     }
 
-    /// Split off cells from `at` onward, returning them. The row is truncated.
+    /// Splits off cells from `at` onward, returning them. The row is truncated.
     pub fn split_off(&mut self, at: usize) -> Vec<Cell> {
         if at >= self.inner.len() {
             return Vec::new();
@@ -88,26 +109,15 @@ impl Row {
         split
     }
 
-    /// Append cells to the end of the row.
+    /// Appends cells to the end of the row.
     pub fn append(&mut self, cells: &[Cell]) {
         let start = self.inner.len();
         self.inner.extend_from_slice(cells);
-        // Update occ if we appended non-blank content
         for (i, c) in cells.iter().enumerate() {
             if c.c != ' ' && c.c != '\0' {
                 self.occ = self.occ.max(start + i + 1);
             }
         }
-    }
-
-    /// Direct access to the inner cell vector.
-    pub fn cells(&self) -> &[Cell] {
-        &self.inner
-    }
-
-    /// Direct mutable access to the inner cell vector.
-    pub fn cells_mut(&mut self) -> &mut Vec<Cell> {
-        &mut self.inner
     }
 }
 

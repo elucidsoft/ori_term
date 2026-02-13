@@ -16,8 +16,9 @@ use crate::render::FontSet;
 use crate::tab::TabId;
 use crate::tab_bar::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP, TAB_BAR_HEIGHT};
 use crate::window::TermWindow;
-
-use super::{App, RESIZE_BORDER, UI_FONT_SCALE, apply_window_effects};
+#[cfg(target_os = "windows")]
+use super::RESIZE_BORDER;
+use super::{App, UI_FONT_SCALE, apply_window_effects};
 
 impl App {
     /// Begin a window drag.
@@ -73,7 +74,7 @@ impl App {
 
         for &tab_id in &tw.tabs.clone() {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.selection = None;
+                tab.clear_selection();
                 tab.resize(cols, rows, pixel_w, pixel_h);
                 tab.grid_dirty = true;
             }
@@ -359,7 +360,7 @@ impl App {
 
         for &tab_id in &tw.tabs {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.selection = None;
+                tab.clear_selection();
                 tab.resize(cols, rows, pixel_w, pixel_h);
                 tab.grid_dirty = true;
             }

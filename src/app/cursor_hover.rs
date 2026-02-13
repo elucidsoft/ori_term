@@ -12,12 +12,12 @@ use crate::tab_bar::{
 };
 use crate::term_mode::TermMode;
 use crate::window::TermWindow;
-
 use super::{App, RESIZE_BORDER};
 
 impl App {
-    /// Detect if cursor is in the resize border zone. Returns the resize direction
-    /// if so, or None if the cursor is in the client area.
+    /// Detects if cursor is in the resize border zone.
+    ///
+    /// Returns the resize direction if so, or None if the cursor is in the client area.
     pub(super) fn resize_direction_at(
         &self,
         window_id: WindowId,
@@ -53,7 +53,14 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Handles cursor movement, hover effects, URL detection, and drag updates.
+    ///
+    /// Updates cursor icon for resize edges and hyperlinks, tracks mouse reporting,
+    /// updates selection drag, handles tab bar hover, and manages tab drag state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cursor dispatch handles multiple concerns: hyperlink hover, mouse reporting, selection drag, tab bar hover, and tab drag state machine"
+    )]
     pub(super) fn handle_cursor_moved(
         &mut self,
         window_id: WindowId,
@@ -256,9 +263,8 @@ impl App {
                             None => None,
                         };
 
-                        if let (Some(new_end), Some(sel)) = (new_end, &mut tab.selection) {
-                            sel.end = new_end;
-                            tab.grid_dirty = true;
+                        if let Some(new_end) = new_end {
+                            tab.update_selection_end(new_end);
                         }
                     }
                     if let Some(tw) = self.windows.get(&window_id) {
@@ -278,10 +284,7 @@ impl App {
                     if y < grid_top {
                         // Above grid: scroll up into history
                         if let Some(tab) = self.tabs.get_mut(&tid) {
-                            let grid = tab.grid_mut();
-                            let max = grid.scrollback.len();
-                            grid.display_offset = (grid.display_offset + 1).min(max);
-                            tab.grid_dirty = true;
+                            tab.scroll_lines(1);
                         }
                     }
                     // Below grid: scroll down toward live
@@ -290,9 +293,7 @@ impl App {
                         let ch = self.glyphs.cell_height;
                         let grid_bottom = grid_top + tab.grid().lines * ch;
                         if y >= grid_bottom && tab.grid().display_offset > 0 {
-                            tab.grid_mut().display_offset =
-                                tab.grid().display_offset.saturating_sub(1);
-                            tab.grid_dirty = true;
+                            tab.scroll_lines(-1);
                         }
                     }
                     if let Some(tw) = self.windows.get(&window_id) {

@@ -11,7 +11,7 @@ use crate::tab_bar::{
 };
 
 use super::color_util::{
-    TabBarColors, UI_BG, UI_BG_HOVER, UI_SEPARATOR, UI_TEXT, UI_TEXT_DIM, lighten,
+    lighten, TabBarColors, UI_BG, UI_BG_HOVER, UI_SEPARATOR, UI_TEXT, UI_TEXT_DIM,
 };
 use super::renderer::{FrameParams, GpuRenderer, InstanceWriter};
 
@@ -21,6 +21,7 @@ impl GpuRenderer {
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
+        tc: &TabBarColors,
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) {
@@ -34,7 +35,6 @@ impl GpuRenderer {
         };
 
         let s = params.scale;
-        let tc = TabBarColors::from_palette(params.palette);
         let layout = TabBarLayout::compute(
             params.tab_info.len(),
             params.width as usize,
@@ -54,7 +54,7 @@ impl GpuRenderer {
 
         // Tab content (text + close button)
         self.render_tab_content(
-            bg, fg, drag_x, tab_w, cell_h, title, tc.text_fg, &tc, drag_idx, params, glyphs, queue,
+            bg, fg, drag_x, tab_w, cell_h, title, tc.text_fg, tc, drag_idx, params, glyphs, queue,
         );
 
         // + and dropdown buttons — rendered in overlay during drag so they
@@ -225,6 +225,7 @@ impl GpuRenderer {
         bg: &mut InstanceWriter,
         fg: &mut InstanceWriter,
         params: &FrameParams<'_>,
+        tc: &TabBarColors,
         glyphs: &mut FontSet,
         queue: &wgpu::Queue,
     ) {
@@ -240,8 +241,6 @@ impl GpuRenderer {
 
         let bar_h = cell_h as f32 + 12.0 * sc; // cell height + padding
         let bar_y = h - bar_h;
-
-        let tc = TabBarColors::from_palette(params.palette);
 
         // Bar background
         bg.push_rect(0.0, bar_y, w, bar_h, tc.bar_bg);
@@ -283,28 +282,29 @@ impl GpuRenderer {
         let cursor_x = query_x + glyphs.text_advance(&search.query);
         bg.push_rect(cursor_x, text_y, 2.0 * sc, cell_h as f32, tc.text_fg);
 
-        // Match count on the right
-        let count_text = if search.matches.is_empty() {
-            if search.query.is_empty() {
-                String::new()
-            } else {
-                "No matches".to_owned()
+        // Match count on the right — avoid heap allocation by using a stack buffer.
+        if search.matches.is_empty() {
+            if !search.query.is_empty() {
+                let text = "No matches";
+                let count_w = glyphs.text_advance(text);
+                let count_x = w - count_w - 12.0 * sc;
+                self.push_text_instances(
+                    fg, text, count_x, text_y, tc.inactive_text, glyphs, queue,
+                );
             }
         } else {
-            format!("{} of {}", search.focused + 1, search.matches.len())
-        };
-
-        if !count_text.is_empty() {
-            let count_w = glyphs.text_advance(&count_text);
+            let mut buf = [0u8; 32];
+            let len = {
+                use std::io::Write;
+                let mut cursor = &mut buf[..];
+                let _ = write!(cursor, "{} of {}", search.focused + 1, search.matches.len());
+                32 - cursor.len()
+            };
+            let text = std::str::from_utf8(&buf[..len]).unwrap_or("");
+            let count_w = glyphs.text_advance(text);
             let count_x = w - count_w - 12.0 * sc;
             self.push_text_instances(
-                fg,
-                &count_text,
-                count_x,
-                text_y,
-                tc.inactive_text,
-                glyphs,
-                queue,
+                fg, text, count_x, text_y, tc.inactive_text, glyphs, queue,
             );
         }
     }

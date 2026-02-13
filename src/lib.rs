@@ -1,4 +1,5 @@
-// Terminal emulator modules
+//! GPU-accelerated terminal emulator library.
+
 pub mod app;
 pub mod cell;
 pub mod clipboard;
@@ -28,6 +29,7 @@ pub mod platform_windows;
 
 use std::io::Write;
 
+/// Returns the path to the debug log file.
 pub fn log_path() -> std::path::PathBuf {
     std::env::current_exe()
         .unwrap_or_default()
@@ -51,6 +53,7 @@ fn log_writer() -> &'static std::sync::Mutex<std::io::BufWriter<std::fs::File>> 
     })
 }
 
+/// Writes a log message to the debug log file.
 pub fn log(msg: &str) {
     if let Ok(mut w) = log_writer().lock() {
         let _ = w.write_all(msg.as_bytes());

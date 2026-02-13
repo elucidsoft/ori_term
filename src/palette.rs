@@ -1,3 +1,5 @@
+//! Color palette management — 270-entry RGB table plus color scheme definitions.
+
 use vte::ansi::{Color, NamedColor, Rgb};
 
 use crate::cell::CellFlags;

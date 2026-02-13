@@ -1,3 +1,5 @@
+//! GPU pipeline creation and WGSL shader source for background and foreground rendering.
+
 /// Instance data stride in bytes: 80 bytes per cell instance.
 ///
 /// Layout:
@@ -63,8 +65,6 @@ pub fn instance_buffer_layout() -> wgpu::VertexBufferLayout<'static> {
         attributes: &INSTANCE_ATTRS,
     }
 }
-
-// --- WGSL Shaders ---
 
 const BG_SHADER_SRC: &str = "
 struct Uniforms {
@@ -183,8 +183,6 @@ struct VertexOutput {
     @location(1) fg_color: vec4<f32>,
     @location(2) @interpolate(flat) bg_color: vec4<f32>,
 }
-
-// --- Color helper functions (ported from Ghostty's GLSL) ---
 
 // sRGB → linear (exact IEC 61966-2-1 transfer)
 fn linearize_scalar(v: f32) -> f32 {
@@ -339,8 +337,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(color.rgb * a, a) * color.a;
 }
 ";
-
-// --- Pipeline creation ---
 
 /// Uniform bind group layout: group(0) binding(0) = projection + rendering params.
 ///

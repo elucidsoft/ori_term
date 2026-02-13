@@ -1,3 +1,5 @@
+//! Window wrapper for terminal surface and tab management.
+
 use std::sync::Arc;
 
 use winit::window::Window;
@@ -17,6 +19,7 @@ pub struct TermWindow {
 }
 
 impl TermWindow {
+    // Constructors
     pub fn new(window: Arc<Window>, gpu: &GpuState) -> Option<Self> {
         let (surface, config) = gpu.create_surface(&window)?;
         Some(Self {
@@ -30,6 +33,16 @@ impl TermWindow {
         })
     }
 
+    // Accessors
+    pub fn active_tab_id(&self) -> Option<TabId> {
+        self.tabs.get(self.active_tab).copied()
+    }
+
+    pub fn tab_index(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|t| *t == id)
+    }
+
+    // Public operations
     pub fn resize_surface(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -37,10 +50,6 @@ impl TermWindow {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(device, &self.surface_config);
-    }
-
-    pub fn active_tab_id(&self) -> Option<TabId> {
-        self.tabs.get(self.active_tab).copied()
     }
 
     pub fn add_tab(&mut self, id: TabId) {
@@ -62,9 +71,5 @@ impl TermWindow {
             }
         }
         self.tabs.is_empty()
-    }
-
-    pub fn tab_index(&self, id: TabId) -> Option<usize> {
-        self.tabs.iter().position(|t| *t == id)
     }
 }

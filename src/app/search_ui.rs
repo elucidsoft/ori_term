@@ -3,11 +3,9 @@
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowId;
 
-use crate::search::SearchState;
+use super::App;
 use crate::tab::TabId;
 use crate::window::TermWindow;
-
-use super::App;
 
 impl App {
     pub(super) fn open_search(&mut self, window_id: WindowId) {
@@ -20,8 +18,7 @@ impl App {
             None => return,
         };
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            tab.search = Some(SearchState::new());
-            tab.grid_dirty = true;
+            tab.open_search();
         }
         self.search_active = Some(window_id);
         if let Some(tw) = self.windows.get(&window_id) {
@@ -36,8 +33,7 @@ impl App {
             .and_then(TermWindow::active_tab_id);
         if let Some(tid) = tab_id {
             if let Some(tab) = self.tabs.get_mut(&tid) {
-                tab.search = None;
-                tab.grid_dirty = true;
+                tab.close_search();
             }
         }
         self.search_active = None;
@@ -117,12 +113,7 @@ impl App {
 
     pub(super) fn update_search(&mut self, tab_id: TabId) {
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            // Take search out temporarily to avoid borrow conflict with grid
-            if let Some(mut search) = tab.search.take() {
-                search.update_query(tab.grid());
-                tab.search = Some(search);
-                tab.grid_dirty = true;
-            }
+            tab.update_search_query();
         }
         self.scroll_to_search_match(tab_id);
     }

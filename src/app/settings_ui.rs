@@ -3,13 +3,16 @@
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
+use super::App;
 use crate::log;
 use crate::palette::{BUILTIN_SCHEMES, ColorScheme};
 use crate::window::TermWindow;
 
-use super::App;
-
 impl App {
+    pub(super) fn is_settings_window(&self, window_id: WindowId) -> bool {
+        self.settings_window == Some(window_id)
+    }
+
     pub(super) fn open_settings_window(&mut self, event_loop: &ActiveEventLoop) {
         // If already open, focus it
         if let Some(wid) = self.settings_window {
@@ -72,10 +75,6 @@ impl App {
         if let Some(wid) = self.settings_window.take() {
             self.windows.remove(&wid);
         }
-    }
-
-    pub(super) fn is_settings_window(&self, window_id: WindowId) -> bool {
-        self.settings_window == Some(window_id)
     }
 
     pub(super) fn render_settings_window(&mut self, window_id: WindowId) {
@@ -142,8 +141,11 @@ impl App {
     pub(super) fn apply_scheme_to_all_tabs(&mut self, scheme: &'static ColorScheme) {
         self.active_scheme = scheme.name;
         for tab in self.tabs.values_mut() {
-            tab.palette.set_scheme(scheme);
-            tab.palette.apply_overrides(&self.config.colors);
+            tab.apply_color_config(
+                Some(scheme),
+                &self.config.colors,
+                self.config.behavior.bold_is_bright,
+            );
         }
         // Persist the scheme change
         scheme.name.clone_into(&mut self.config.colors.scheme);

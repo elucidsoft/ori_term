@@ -1,3 +1,6 @@
+//! Font loading, fallback chain, glyph cache, and text rendering for grid and UI.
+
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::cell::CellFlags;
@@ -6,7 +9,7 @@ pub const FONT_SIZE: f32 = 16.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 
-// --- Font style types ---
+// Font style types
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
@@ -31,7 +34,7 @@ impl FontStyle {
     }
 }
 
-// --- Font family definitions ---
+// Font family definitions
 
 struct FontFamily {
     regular: &'static [&'static str],
@@ -136,7 +139,7 @@ const FALLBACK_FONT_NAMES: &[&str] = &[
     "DejaVuSans.ttf",
 ];
 
-// --- DirectWrite font resolution (Windows) ---
+// DirectWrite font resolution (Windows)
 
 /// Font family names to try via DirectWrite, in priority order.
 #[cfg(target_os = "windows")]
@@ -295,7 +298,7 @@ fn resolve_fallback_paths_dwrite() -> Vec<std::path::PathBuf> {
     paths
 }
 
-// --- Font discovery helpers ---
+// Font discovery helpers
 
 #[cfg(not(target_os = "windows"))]
 fn linux_font_dirs() -> Vec<std::path::PathBuf> {
@@ -365,7 +368,7 @@ fn parse_font(data: &[u8]) -> Option<fontdue::Font> {
     fontdue::Font::from_bytes(data, fontdue::FontSettings::default()).ok()
 }
 
-// --- FontSet ---
+// FontSet
 
 pub struct FontSet {
     /// Loaded font objects. Index 0 (Regular) is always `Some`.
@@ -594,13 +597,13 @@ impl FontSet {
     /// Truncate a string to fit within `max_width` pixels, appending an
     /// ellipsis only if the full text overflows. Uses per-glyph advance
     /// widths for accuracy with proportional fonts.
-    pub fn truncate_to_pixel_width(&mut self, text: &str, max_width: f32) -> String {
-        // Check if the full text fits — no truncation needed
+    pub fn truncate_to_pixel_width<'t>(&mut self, text: &'t str, max_width: f32) -> Cow<'t, str> {
+        // Check if the full text fits — no truncation needed.
         if self.text_advance(text) <= max_width {
-            return text.to_string();
+            return Cow::Borrowed(text);
         }
 
-        // Need to truncate: find the cut point leaving room for ellipsis
+        // Need to truncate: find the cut point leaving room for ellipsis.
         let ellipsis = '\u{2026}';
         let ellipsis_w = self.char_advance(ellipsis);
         let target = (max_width - ellipsis_w).max(0.0);
@@ -611,12 +614,12 @@ impl FontSet {
             let cw = self.char_advance(ch);
             if width + cw > target {
                 result.push(ellipsis);
-                return result;
+                return Cow::Owned(result);
             }
             width += cw;
             result.push(ch);
         }
-        result
+        Cow::Owned(result)
     }
 
     /// Try to load a font family via DirectWrite by family name.

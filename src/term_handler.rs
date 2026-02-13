@@ -1,8 +1,10 @@
+//! VTE escape sequence handler implementation.
+
 use std::io::Write;
 use std::time::Instant;
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use unicode_width::UnicodeWidthChar;
 use vte::ansi::{
     Attr, CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, Hyperlink,
@@ -31,6 +33,7 @@ pub struct GraphemeState {
     base_col: usize,
 }
 
+/// VTE Handler implementation that dispatches escape sequences to grid operations.
 pub struct TermHandler<'a> {
     grid: &'a mut Grid,
     alt_grid: &'a mut Grid,

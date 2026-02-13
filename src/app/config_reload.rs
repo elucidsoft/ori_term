@@ -7,10 +7,13 @@ use crate::keybindings;
 use crate::log;
 use crate::palette;
 use crate::render::FontSet;
-
 use super::{App, UI_FONT_SCALE};
 
 impl App {
+    /// Applies a reloaded configuration to all windows and tabs.
+    ///
+    /// Reloads the config file, applies color scheme, font, cursor style, and keybinding changes,
+    /// and marks all windows dirty for redraw.
     pub(super) fn apply_config_reload(&mut self) {
         let new_config = match Config::try_load() {
             Ok(c) => c,
@@ -20,19 +23,23 @@ impl App {
             }
         };
 
-        // Color scheme
+        // Color scheme + overrides
         let scheme_changed = new_config.colors.scheme != self.config.colors.scheme;
-        if scheme_changed {
-            if let Some(scheme) = palette::find_scheme(&new_config.colors.scheme) {
-                self.active_scheme = scheme.name;
-                for tab in self.tabs.values_mut() {
-                    tab.palette.set_scheme(scheme);
-                }
+        let scheme = if scheme_changed {
+            let s = palette::find_scheme(&new_config.colors.scheme);
+            if let Some(s) = s {
+                self.active_scheme = s.name;
             }
-        }
-        // Re-apply color overrides (always — they may have changed independently)
+            s
+        } else {
+            None
+        };
         for tab in self.tabs.values_mut() {
-            tab.palette.apply_overrides(&new_config.colors);
+            tab.apply_color_config(
+                scheme,
+                &new_config.colors,
+                new_config.behavior.bold_is_bright,
+            );
         }
 
         // Font size or family change
@@ -58,17 +65,10 @@ impl App {
         }
 
         // Cursor style
-        let new_cursor = config::parse_cursor_style(&new_config.terminal.cursor_style);
         if new_config.terminal.cursor_style != self.config.terminal.cursor_style {
+            let new_cursor = config::parse_cursor_style(&new_config.terminal.cursor_style);
             for tab in self.tabs.values_mut() {
-                tab.cursor_shape = new_cursor;
-            }
-        }
-
-        // Bold is bright
-        if new_config.behavior.bold_is_bright != self.config.behavior.bold_is_bright {
-            for tab in self.tabs.values_mut() {
-                tab.palette.bold_is_bright = new_config.behavior.bold_is_bright;
+                tab.set_cursor_shape(new_cursor);
             }
         }
 

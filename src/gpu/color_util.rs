@@ -125,11 +125,6 @@ pub(super) fn vte_rgb_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
     ]
 }
 
-/// Convert palette `default_bg()` to RGBA (linear).
-pub(super) fn palette_to_rgba(rgb: vte::ansi::Rgb) -> [f32; 4] {
-    vte_rgb_to_rgba(rgb)
-}
-
 /// Convert a u32 color (0x00RRGGBB) to [f32; 4] RGBA in **linear** space.
 #[cfg(target_os = "windows")]
 pub(super) fn u32_to_rgba(c: u32) -> [f32; 4] {
@@ -198,7 +193,7 @@ pub(super) fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
 }
 
 /// Convert linear RGB to `OKLab` (L, a, b).
-#[allow(clippy::excessive_precision)]
+#[allow(clippy::excessive_precision, reason = "OKLab matrix coefficients require full precision")]
 fn to_oklab(c: [f32; 4]) -> [f32; 3] {
     let l_ = (0.4122214708 * c[0] + 0.5363325363 * c[1] + 0.0514459929 * c[2]).cbrt();
     let m_ = (0.2119034982 * c[0] + 0.6806995451 * c[1] + 0.1073969566 * c[2]).cbrt();
@@ -211,7 +206,7 @@ fn to_oklab(c: [f32; 4]) -> [f32; 3] {
 }
 
 /// Convert `OKLab` (L, a, b) back to linear RGB with alpha=1, clamped to sRGB gamut.
-#[allow(clippy::excessive_precision)]
+#[allow(clippy::excessive_precision, reason = "OKLab matrix coefficients require full precision")]
 fn from_oklab(lab: [f32; 3]) -> [f32; 4] {
     let l_ = lab[0] + 0.3963377774 * lab[1] + 0.2158037573 * lab[2];
     let m_ = lab[0] - 0.1055613458 * lab[1] - 0.0638541728 * lab[2];

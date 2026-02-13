@@ -1,5 +1,6 @@
 //! Mouse input handling — clicks, drags, scrolling.
 
+use std::io::Write as _;
 use std::time::Instant;
 
 use winit::dpi::PhysicalPosition;
@@ -63,14 +64,14 @@ impl App {
 
     /// Convert a viewport line to an absolute row index.
     pub(super) fn viewport_to_absolute(grid: &crate::grid::Grid, line: usize) -> usize {
-        grid.scrollback.len().saturating_sub(grid.display_offset) + line
+        grid.viewport_to_absolute(line)
     }
 
     /// Open a URL in the default browser. Only allows safe schemes.
     ///
     /// On Windows, uses `ShellExecuteW` directly (like Windows Terminal and
     /// `WezTerm`) instead of `cmd /C start` which mangles `&` and `%` in URLs.
-    #[allow(unsafe_code)]
+    #[allow(unsafe_code, reason = "ShellExecuteW FFI requires unsafe")]
     pub(super) fn open_url(uri: &str) {
         let allowed = uri.starts_with("http://")
             || uri.starts_with("https://")
@@ -179,22 +180,46 @@ impl App {
 
         if tab.mode.contains(TermMode::SGR_MOUSE) {
             // SGR encoding: CSI < code ; col+1 ; line+1 M/m
-            let suffix = if pressed { 'M' } else { 'm' };
-            let seq = format!("\x1b[<{code};{};{}{suffix}", col + 1, line + 1);
-            tab.send_pty(seq.as_bytes());
+            let suffix = if pressed { b'M' } else { b'm' };
+            let mut buf = [0u8; 32];
+            let mut cursor = std::io::Cursor::new(&mut buf[..]);
+            let _ = write!(cursor, "\x1b[<{code};{};{}", col + 1, line + 1);
+            let pos = cursor.position() as usize;
+            buf[pos] = suffix;
+            tab.send_pty(&buf[..=pos]);
         } else if tab.mode.contains(TermMode::UTF8_MOUSE) {
-            // UTF-8 encoding: like normal but coordinates are UTF-8 encoded
-            let encode_utf8 = |v: u32| -> Vec<u8> {
-                let mut buf = [0u8; 4];
-                let c = char::from_u32(v).unwrap_or(' ');
-                let s = c.encode_utf8(&mut buf);
-                s.as_bytes().to_vec()
+            // UTF-8 encoding: like normal but coordinates are UTF-8 encoded.
+            // Coordinates are limited to valid Unicode scalar values (max U+10FFFF).
+            let encode_utf8 = |v: u32, out: &mut [u8; 4]| -> usize {
+                if let Some(c) = char::from_u32(v) {
+                    c.encode_utf8(out).len()
+                } else {
+                    0
+                }
             };
-            let mut seq = vec![0x1b, b'[', b'M'];
-            seq.extend_from_slice(&encode_utf8(u32::from(code) + 32));
-            seq.extend_from_slice(&encode_utf8(col as u32 + 1 + 32));
-            seq.extend_from_slice(&encode_utf8(line as u32 + 1 + 32));
-            tab.send_pty(&seq);
+            let code_val = u32::from(code) + 32;
+            let col_val = col as u32 + 1 + 32;
+            let line_val = line as u32 + 1 + 32;
+            // Skip report if any coordinate exceeds Unicode scalar range.
+            if col_val > 0x10_FFFF || line_val > 0x10_FFFF {
+                return;
+            }
+            let mut seq = [0u8; 15]; // ESC[M + up to 3×4 UTF-8 bytes
+            seq[0] = 0x1b;
+            seq[1] = b'[';
+            seq[2] = b'M';
+            let mut pos = 3;
+            let mut tmp = [0u8; 4];
+            let n = encode_utf8(code_val, &mut tmp);
+            seq[pos..pos + n].copy_from_slice(&tmp[..n]);
+            pos += n;
+            let n = encode_utf8(col_val, &mut tmp);
+            seq[pos..pos + n].copy_from_slice(&tmp[..n]);
+            pos += n;
+            let n = encode_utf8(line_val, &mut tmp);
+            seq[pos..pos + n].copy_from_slice(&tmp[..n]);
+            pos += n;
+            tab.send_pty(&seq[..pos]);
         } else {
             // Normal encoding: ESC [ M Cb Cx Cy (clamp coords to 223 max)
             let cb = 32 + code;
@@ -205,7 +230,7 @@ impl App {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, reason = "event dispatch table with inline handlers")]
     pub(super) fn handle_mouse_input(
         &mut self,
         window_id: WindowId,
@@ -342,8 +367,7 @@ impl App {
                                 }
                             }
                             if let Some(tab) = self.tabs.get_mut(&tid) {
-                                tab.selection = None;
-                                tab.grid_dirty = true;
+                                tab.clear_selection();
                             }
                             if let Some(tw) = self.windows.get(&window_id) {
                                 tw.window.request_redraw();
@@ -525,8 +549,7 @@ impl App {
                     if let Some(tid) = tab_id {
                         if let Some(tab) = self.tabs.get_mut(&tid) {
                             if tab.selection.as_ref().is_some_and(Selection::is_empty) {
-                                tab.selection = None;
-                                tab.grid_dirty = true;
+                                tab.clear_selection();
                             } else if self.config.behavior.copy_on_select {
                                 if let Some(ref sel) = tab.selection {
                                     let text = selection::extract_text(tab.grid(), sel);
@@ -653,13 +676,11 @@ impl App {
         if shift {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 if tab.selection.is_some() {
-                    if let Some(ref mut sel) = tab.selection {
-                        sel.end = SelectionPoint {
-                            row: abs_row,
-                            col,
-                            side,
-                        };
-                    }
+                    tab.update_selection_end(SelectionPoint {
+                        row: abs_row,
+                        col,
+                        side,
+                    });
                     self.left_mouse_down = true;
                     if let Some(tw) = self.windows.get(&window_id) {
                         tw.window.request_redraw();
@@ -722,8 +743,9 @@ impl App {
         };
 
         if let Some(tab) = self.tabs.get_mut(&tab_id) {
-            tab.selection = new_selection;
-            tab.grid_dirty = true;
+            if let Some(sel) = new_selection {
+                tab.set_selection(sel);
+            }
         }
         self.left_mouse_down = true;
 
@@ -812,16 +834,7 @@ impl App {
 
         // Normal scrollback
         if let Some(tab) = self.tabs.get_mut(&tid) {
-            let grid = tab.grid_mut();
-            if lines > 0 {
-                // Scroll up (into history)
-                let max = grid.scrollback.len();
-                grid.display_offset = (grid.display_offset + lines as usize).min(max);
-            } else {
-                // Scroll down (toward live)
-                grid.display_offset = grid.display_offset.saturating_sub((-lines) as usize);
-            }
-            tab.grid_dirty = true;
+            tab.scroll_lines(lines);
         }
         if let Some(tw) = self.windows.get(&window_id) {
             tw.window.request_redraw();

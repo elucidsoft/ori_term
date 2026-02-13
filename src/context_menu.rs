@@ -9,8 +9,6 @@
 use crate::palette::BUILTIN_SCHEMES;
 use crate::render::FontSet;
 
-// ── Menu styling constants (Chrome-inspired, in logical pixels) ─────────────
-
 /// Corner radius for the menu popup.
 const MENU_RADIUS: f32 = 8.0;
 /// Vertical padding inside the menu (top and bottom).
@@ -104,6 +102,35 @@ pub struct MenuOverlay {
 }
 
 impl MenuOverlay {
+    /// Rendering constants (scaled).
+    pub fn menu_radius(&self) -> f32 {
+        MENU_RADIUS * self.scale
+    }
+    pub fn menu_padding_y(&self) -> f32 {
+        MENU_PADDING_Y * self.scale
+    }
+    pub fn item_padding_x(&self) -> f32 {
+        ITEM_PADDING_X * self.scale
+    }
+    pub fn item_hover_radius(&self) -> f32 {
+        ITEM_HOVER_RADIUS * self.scale
+    }
+    pub fn item_hover_inset(&self) -> f32 {
+        ITEM_HOVER_INSET * self.scale
+    }
+    pub fn separator_thickness(&self) -> f32 {
+        SEPARATOR_THICKNESS * self.scale
+    }
+    pub fn separator_margin_x(&self) -> f32 {
+        SEPARATOR_MARGIN_X * self.scale
+    }
+
+    /// Returns true if the given physical pixel position is inside the menu.
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        let (mx, my) = self.position;
+        px >= mx && px <= mx + self.width && py >= my && py <= my + self.height
+    }
+
     /// Compute layout dimensions. Call once after creating the overlay.
     pub fn layout(&mut self, glyphs: &mut FontSet) {
         let s = self.scale;
@@ -161,38 +188,7 @@ impl MenuOverlay {
             MenuEntry::Separator => None,
         }
     }
-
-    /// Returns true if the given physical pixel position is inside the menu.
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        let (mx, my) = self.position;
-        px >= mx && px <= mx + self.width && py >= my && py <= my + self.height
-    }
-
-    /// Rendering constants (scaled).
-    pub fn menu_radius(&self) -> f32 {
-        MENU_RADIUS * self.scale
-    }
-    pub fn menu_padding_y(&self) -> f32 {
-        MENU_PADDING_Y * self.scale
-    }
-    pub fn item_padding_x(&self) -> f32 {
-        ITEM_PADDING_X * self.scale
-    }
-    pub fn item_hover_radius(&self) -> f32 {
-        ITEM_HOVER_RADIUS * self.scale
-    }
-    pub fn item_hover_inset(&self) -> f32 {
-        ITEM_HOVER_INSET * self.scale
-    }
-    pub fn separator_thickness(&self) -> f32 {
-        SEPARATOR_THICKNESS * self.scale
-    }
-    pub fn separator_margin_x(&self) -> f32 {
-        SEPARATOR_MARGIN_X * self.scale
-    }
 }
-
-// ── Menu builders ───────────────────────────────────────────────────────────
 
 /// Build the tab right-click menu.
 pub fn build_tab_menu(position: (f32, f32), tab_index: usize, scale: f32) -> MenuOverlay {

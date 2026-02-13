@@ -51,7 +51,7 @@ pub(super) const SCROLL_LINES: usize = 3;
 /// UI font scale relative to grid font (tab bar, search bar, menus).
 pub(super) const UI_FONT_SCALE: f32 = 0.75;
 
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools, reason = "App state needs multiple flag fields")]
 pub struct App {
     pub(super) config: Config,
     pub(super) windows: HashMap<WindowId, TermWindow>,
@@ -112,6 +112,9 @@ pub struct App {
     pub(super) pending_redraw: HashSet<WindowId>,
     /// Path to written shell integration scripts (None when disabled).
     pub(super) shell_integration_dir: Option<PathBuf>,
+    /// Cached tab bar data — rebuilt only when `tab_bar_dirty`.
+    pub(super) cached_tab_info: Vec<(TabId, String)>,
+    pub(super) cached_bell_badges: Vec<bool>,
 }
 
 impl App {
@@ -243,6 +246,8 @@ impl App {
             prev_cursor_visible: true,
             pending_redraw: HashSet::new(),
             shell_integration_dir,
+            cached_tab_info: Vec::new(),
+            cached_bell_badges: Vec::new(),
         };
 
         event_loop.run_app(&mut app)?;

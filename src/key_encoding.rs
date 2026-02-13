@@ -1,3 +1,5 @@
+//! Key event encoding for terminal input (legacy xterm, Kitty protocol).
+
 use bitflags::bitflags;
 use winit::keyboard::{Key, KeyLocation, NamedKey};
 
@@ -12,6 +14,7 @@ pub enum KeyEventType {
 }
 
 bitflags! {
+    /// Keyboard modifiers for key events.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Modifiers: u8 {
         const SHIFT   = 0b0001;
@@ -22,7 +25,8 @@ bitflags! {
 }
 
 impl Modifiers {
-    /// Encode as xterm modifier parameter (1 + bitmask).
+    /// Encodes as xterm modifier parameter (1 + bitmask).
+    ///
     /// Returns 0 when no modifiers are active (caller should omit the parameter).
     fn xterm_param(self) -> u8 {
         if self.is_empty() { 0 } else { self.bits() + 1 }
@@ -60,9 +64,7 @@ pub fn encode_key(
     encode_legacy(key, mods, mode, text)
 }
 
-// ---------------------------------------------------------------------------
 // Legacy (xterm-style) encoding
-// ---------------------------------------------------------------------------
 
 /// Named key with a letter terminator (SS3 / CSI variant).
 struct LetterKey {
@@ -259,9 +261,7 @@ fn ctrl_key_byte(s: &str) -> Option<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // APP_KEYPAD numpad encoding (SS3 sequences)
-// ---------------------------------------------------------------------------
 
 fn encode_numpad_app(key: &Key) -> Option<Vec<u8>> {
     let code = match key {
@@ -288,9 +288,7 @@ fn encode_numpad_app(key: &Key) -> Option<Vec<u8>> {
     Some(vec![0x1b, b'O', code])
 }
 
-// ---------------------------------------------------------------------------
 // Kitty keyboard protocol (CSI u)
-// ---------------------------------------------------------------------------
 
 /// Kitty-defined codepoints for functional keys.
 fn kitty_codepoint(key: NamedKey) -> Option<u32> {
@@ -407,18 +405,18 @@ fn encode_kitty(
     let mod_param = mods.xterm_param();
 
     // Kitty event types: 1=press (default, omitted), 2=repeat, 3=release.
-    let event_suffix = if report_events {
+    let event_suffix: &str = if report_events {
         match event_type {
-            KeyEventType::Press => String::new(),
-            KeyEventType::Repeat => ":2".to_owned(),
-            KeyEventType::Release => ":3".to_owned(),
+            KeyEventType::Press => "",
+            KeyEventType::Repeat => ":2",
+            KeyEventType::Release => ":3",
         }
     } else {
         // Without REPORT_EVENT_TYPES, release events should not be sent.
         if event_type == KeyEventType::Release {
             return Vec::new();
         }
-        String::new()
+        ""
     };
 
     // Build CSI u sequence.
@@ -429,10 +427,6 @@ fn encode_kitty(
         format!("\x1b[{codepoint}u").into_bytes()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -498,7 +492,7 @@ mod tests {
         )
     }
 
-    // === Ctrl+letter C0 codes ===
+    // Ctrl+letter C0 codes
 
     #[test]
     fn ctrl_a() {
@@ -530,7 +524,7 @@ mod tests {
         assert_eq!(r, vec![0x00]);
     }
 
-    // === Alt prefix ===
+    // Alt prefix
 
     #[test]
     fn alt_a() {
@@ -548,7 +542,7 @@ mod tests {
         assert_eq!(r, vec![0x1b, 0x01]);
     }
 
-    // === Modifier-encoded named keys ===
+    // Modifier-encoded named keys
 
     #[test]
     fn ctrl_up() {
@@ -600,7 +594,7 @@ mod tests {
         assert_eq!(r, b"\x1b[5;5~");
     }
 
-    // === APP_CURSOR mode ===
+    // APP_CURSOR mode
 
     #[test]
     fn app_cursor_up_no_mods() {
@@ -623,7 +617,7 @@ mod tests {
         assert_eq!(r, b"\x1b[1;5A");
     }
 
-    // === Unmodified basic keys ===
+    // Unmodified basic keys
 
     #[test]
     fn enter() {
@@ -677,7 +671,7 @@ mod tests {
         );
     }
 
-    // === Plain text fallback ===
+    // Plain text fallback
 
     #[test]
     fn plain_text() {
@@ -690,7 +684,7 @@ mod tests {
         assert_eq!(r, b"x");
     }
 
-    // === APP_KEYPAD numpad ===
+    // APP_KEYPAD numpad
 
     #[test]
     fn numpad_5_app_keypad() {
@@ -732,7 +726,7 @@ mod tests {
         assert_eq!(r, b"5");
     }
 
-    // === Kitty keyboard protocol ===
+    // Kitty keyboard protocol
 
     #[test]
     fn kitty_escape() {
@@ -786,7 +780,7 @@ mod tests {
         assert_eq!(r, b"\x1b[9;2u");
     }
 
-    // === Kitty event types ===
+    // Kitty event types
 
     #[test]
     fn kitty_release_without_report_events() {
@@ -822,7 +816,7 @@ mod tests {
         assert_eq!(r, b"\x1b[97;1:2u");
     }
 
-    // === Legacy release produces nothing ===
+    // Legacy release produces nothing
 
     #[test]
     fn legacy_release_empty() {

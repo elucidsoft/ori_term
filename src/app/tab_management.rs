@@ -54,13 +54,13 @@ impl App {
 
         self.tabs.insert(tab_id, tab);
 
-        // Apply the active color scheme, color overrides, and behavior settings to the new tab
+        // Apply the active color scheme, color overrides, and behavior settings to the new tab.
         if let Some(t) = self.tabs.get_mut(&tab_id) {
-            if let Some(scheme) = palette::find_scheme(self.active_scheme) {
-                t.palette.set_scheme(scheme);
-            }
-            t.palette.apply_overrides(&self.config.colors);
-            t.palette.bold_is_bright = self.config.behavior.bold_is_bright;
+            t.apply_color_config(
+                palette::find_scheme(self.active_scheme),
+                &self.config.colors,
+                self.config.behavior.bold_is_bright,
+            );
         }
 
         self.tab_bar_dirty = true;
@@ -147,9 +147,11 @@ impl App {
         };
         self.tabs.insert(tab_id, tab);
         if let Some(t) = self.tabs.get_mut(&tab_id) {
-            if let Some(scheme) = palette::find_scheme(self.active_scheme) {
-                t.palette.set_scheme(scheme);
-            }
+            t.apply_color_config(
+                palette::find_scheme(self.active_scheme),
+                &self.config.colors,
+                self.config.behavior.bold_is_bright,
+            );
         }
         if let Some(tw) = self.windows.get_mut(&window_id) {
             tw.add_tab(tab_id);

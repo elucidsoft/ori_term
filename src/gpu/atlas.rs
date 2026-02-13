@@ -1,3 +1,5 @@
+//! Row-packed glyph atlas for GPU texture storage.
+
 use std::collections::HashMap;
 
 use crate::icons::Icon;
@@ -46,6 +48,7 @@ pub struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
+    // Constructors
     pub fn new(device: &wgpu::Device) -> Self {
         let width = 1024;
         let height = 1024;
@@ -80,6 +83,17 @@ impl GlyphAtlas {
         }
     }
 
+    // Accessors
+    pub fn view(&self) -> &wgpu::TextureView {
+        &self.view
+    }
+
+    /// Get a glyph entry if it already exists in the atlas.
+    pub fn get(&self, ch: char, style: FontStyle, font_size: f32) -> Option<&AtlasEntry> {
+        self.entries.get(&(ch, style, size_key(font_size)))
+    }
+
+    // Public operations
     /// Look up a glyph in the atlas, inserting it if missing.
     ///
     /// Rasterizes the glyph via `FontSet` and uploads the bitmap to the GPU texture.
@@ -151,15 +165,6 @@ impl GlyphAtlas {
             .expect("icon entry just inserted")
     }
 
-    /// Get a glyph entry if it already exists in the atlas.
-    pub fn get(&self, ch: char, style: FontStyle, font_size: f32) -> Option<&AtlasEntry> {
-        self.entries.get(&(ch, style, size_key(font_size)))
-    }
-
-    pub fn view(&self) -> &wgpu::TextureView {
-        &self.view
-    }
-
     /// Pre-populate the atlas with ASCII printable characters.
     pub fn precache_ascii(&mut self, glyphs: &mut FontSet, queue: &wgpu::Queue) {
         for ch in ' '..='~' {
@@ -177,6 +182,7 @@ impl GlyphAtlas {
         self.row_tallest = 0;
     }
 
+    // Private helpers
     /// Allocate atlas space, upload bitmap, and return the entry.
     fn upload_bitmap(
         &mut self,

@@ -1,3 +1,5 @@
+//! Search functionality — plain text and regex search across grid content.
+
 use crate::cell::CellFlags;
 use crate::grid::Grid;
 
@@ -18,7 +20,7 @@ pub struct SearchMatch {
     pub end_col: usize,
 }
 
-/// State for an active search session.
+/// State for an active search session, including query, matches, and navigation.
 #[derive(Default)]
 pub struct SearchState {
     pub query: String,
@@ -29,6 +31,7 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    /// Creates a new empty search state.
     pub fn new() -> Self {
         Self::default()
     }
@@ -125,23 +128,21 @@ pub(crate) fn extract_row_text(row: &crate::grid::row::Row) -> (String, Vec<usiz
             continue;
         }
         let c = if cell.c == '\0' { ' ' } else { cell.c };
-        let char_idx = text.len();
         text.push(c);
         col_map.push(col);
-        // Append zero-width chars (they don't occupy columns)
         for &zw in cell.zerowidth() {
             text.push(zw);
         }
-        // We don't push to col_map for zero-width chars since they share
-        // the same column as their base character.
-        let _ = char_idx;
     }
     (text, col_map)
 }
 
 /// Find all matches in the grid for the given query.
 /// Returns matches sorted by position (earliest first).
-#[allow(clippy::string_slice)]
+#[expect(
+    clippy::string_slice,
+    reason = "Slicing is safe after find() returns valid byte positions"
+)]
 fn find_matches(
     grid: &Grid,
     query: &str,

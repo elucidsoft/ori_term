@@ -14,7 +14,7 @@ use crate::log;
 
 /// Shells we know how to inject integration scripts into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::enum_variant_names)]
+#[allow(clippy::enum_variant_names, reason = "Shell, PowerShell is clearer than Power")]
 pub enum Shell {
     Bash,
     Zsh,
@@ -143,7 +143,7 @@ pub fn setup_injection(
             let zsh_dir = integration_dir.join("zsh");
 
             // Save the original ZDOTDIR so our .zshenv can restore it.
-            #[allow(clippy::else_if_without_else)]
+            #[allow(clippy::else_if_without_else, reason = "HOME fallback is optional")]
             if let Ok(zdotdir) = std::env::var("ZDOTDIR") {
                 cmd.env("ORITERM_ZSH_ZDOTDIR", zdotdir);
             } else if let Ok(home) = std::env::var("HOME") {
@@ -199,23 +199,6 @@ pub fn setup_injection(
     }
 }
 
-/// Convert a Windows path (e.g. `C:\Users\X\file`) to a WSL path
-/// (`/mnt/c/Users/X/file`).
-#[allow(dead_code)]
-fn windows_to_wsl_path(path: &str) -> String {
-    // Handle paths like C:\foo\bar or C:/foo/bar
-    let path = path.replace('\\', "/");
-    let bytes = path.as_bytes();
-    if bytes.len() >= 2 && bytes[1] == b':' {
-        let drive = (bytes[0] as char).to_ascii_lowercase();
-        // Safe: index 2 is right after the ASCII ':' byte.
-        let rest = std::str::from_utf8(&bytes[2..]).unwrap_or_default();
-        return format!("/mnt/{drive}{rest}");
-    }
-    // Already a Unix-style path or relative — return as-is.
-    path
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,13 +240,4 @@ mod tests {
         assert_eq!(detect_shell("nu"), None);
     }
 
-    #[test]
-    fn windows_to_wsl_path_drive() {
-        assert_eq!(windows_to_wsl_path(r"C:\foo\bar\baz"), "/mnt/c/foo/bar/baz");
-    }
-
-    #[test]
-    fn windows_to_wsl_path_unix() {
-        assert_eq!(windows_to_wsl_path("/home/user/file"), "/home/user/file");
-    }
 }

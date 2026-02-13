@@ -1,3 +1,5 @@
+//! Chrome-style tab drag state machine (pending → dragging → torn-off).
+
 use winit::dpi::PhysicalPosition;
 use winit::window::WindowId;
 

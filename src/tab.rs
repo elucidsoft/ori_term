@@ -1,3 +1,6 @@
+//! Tab state: grid, PTY, VTE parser, and shell integration.
+
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::thread;
@@ -7,11 +10,12 @@ use vte::Perform;
 use vte::ansi::{CharsetIndex, CursorShape, KeyboardModes, StandardCharset};
 use winit::event_loop::EventLoopProxy;
 
+use crate::config::ColorConfig;
 use crate::grid::Grid;
 use crate::log;
-use crate::palette::Palette;
+use crate::palette::{ColorScheme, Palette};
 use crate::search::SearchState;
-use crate::selection::Selection;
+use crate::selection::{Selection, SelectionPoint};
 use crate::shell_integration;
 use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
@@ -185,7 +189,7 @@ impl Perform for RawInterceptor<'_> {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[allow(clippy::struct_excessive_bools, reason = "Tab state needs multiple flag fields")]
 pub struct Tab {
     pub id: TabId,
     primary_grid: Grid,
@@ -440,6 +444,122 @@ impl Tab {
         }
     }
 
+    /// Scroll up by `page_size` lines (into history).
+    pub fn scroll_page_up(&mut self, page_size: usize) {
+        let grid = self.grid_mut();
+        let max = grid.scrollback.len();
+        grid.display_offset = (grid.display_offset + page_size).min(max);
+        self.grid_dirty = true;
+    }
+
+    /// Scroll down by `page_size` lines (toward live).
+    pub fn scroll_page_down(&mut self, page_size: usize) {
+        let grid = self.grid_mut();
+        grid.display_offset = grid.display_offset.saturating_sub(page_size);
+        self.grid_dirty = true;
+    }
+
+    /// Scroll to the top of scrollback history.
+    pub fn scroll_to_top(&mut self) {
+        let grid = self.grid_mut();
+        grid.display_offset = grid.scrollback.len();
+        self.grid_dirty = true;
+    }
+
+    /// Scroll to the live (bottom) position.
+    pub fn scroll_to_bottom(&mut self) {
+        let grid = self.grid_mut();
+        grid.display_offset = 0;
+        self.grid_dirty = true;
+    }
+
+    /// Clear the current selection.
+    pub fn clear_selection(&mut self) {
+        if self.selection.is_some() {
+            self.selection = None;
+            self.grid_dirty = true;
+        }
+    }
+
+    /// Replace the current selection.
+    pub fn set_selection(&mut self, sel: Selection) {
+        self.selection = Some(sel);
+        self.grid_dirty = true;
+    }
+
+    /// Update the end point of the current selection (drag tracking).
+    pub fn update_selection_end(&mut self, end: SelectionPoint) {
+        if let Some(ref mut sel) = self.selection {
+            sel.end = end;
+            self.grid_dirty = true;
+        }
+    }
+
+    /// Navigate to the previous shell prompt (OSC 133 marker) in scrollback.
+    pub fn navigate_to_previous_prompt(&mut self) {
+        let grid = self.grid_mut();
+        let sb_len = grid.scrollback.len();
+        // Current top of viewport as scrollback index.
+        let viewport_top_sb = sb_len.saturating_sub(grid.display_offset);
+        // Scan scrollback rows backwards from just above viewport top.
+        let mut target_sb = None;
+        for i in (0..viewport_top_sb).rev() {
+            if grid.scrollback[i].prompt_start {
+                target_sb = Some(i);
+                break;
+            }
+        }
+        if let Some(sb_idx) = target_sb {
+            grid.display_offset = sb_len.saturating_sub(sb_idx);
+            self.grid_dirty = true;
+        }
+    }
+
+    /// Navigate to the next shell prompt (OSC 133 marker) below the viewport.
+    pub fn navigate_to_next_prompt(&mut self) {
+        let grid = self.grid_mut();
+        let sb_len = grid.scrollback.len();
+        // Current bottom of viewport as absolute index.
+        let viewport_bottom_sb = sb_len.saturating_sub(grid.display_offset) + grid.lines;
+        // Scan forward from below viewport.
+        let total_rows = sb_len + grid.lines;
+        let mut target_sb = None;
+        for i in viewport_bottom_sb..total_rows {
+            let has_prompt = if i < sb_len {
+                grid.scrollback[i].prompt_start
+            } else {
+                grid.row(i - sb_len).prompt_start
+            };
+            if has_prompt {
+                target_sb = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = target_sb {
+            if idx < sb_len {
+                grid.display_offset = sb_len.saturating_sub(idx);
+            } else {
+                grid.display_offset = 0;
+            }
+        } else {
+            // No prompt below — scroll to live.
+            grid.display_offset = 0;
+        }
+        self.grid_dirty = true;
+    }
+
+    /// Scroll by `delta` lines: positive = up (into history), negative = down.
+    pub fn scroll_lines(&mut self, delta: i32) {
+        let grid = self.grid_mut();
+        if delta > 0 {
+            let max = grid.scrollback.len();
+            grid.display_offset = (grid.display_offset + delta as usize).min(max);
+        } else {
+            grid.display_offset = grid.display_offset.saturating_sub((-delta) as usize);
+        }
+        self.grid_dirty = true;
+    }
+
     pub fn process_output(&mut self, data: &[u8]) {
         self.grid_dirty = true;
 
@@ -509,16 +629,62 @@ impl Tab {
         });
     }
 
+    /// Drain pending OSC 9/99/777 notifications, returning them to the caller.
+    pub fn drain_notifications(&mut self) -> Vec<Notification> {
+        std::mem::take(&mut self.pending_notifications)
+    }
+
+    /// Apply color scheme, overrides, and bold-is-bright in one call.
+    pub fn apply_color_config(
+        &mut self,
+        scheme: Option<&ColorScheme>,
+        colors: &ColorConfig,
+        bold_is_bright: bool,
+    ) {
+        if let Some(scheme) = scheme {
+            self.palette.set_scheme(scheme);
+        }
+        self.palette.apply_overrides(colors);
+        self.palette.bold_is_bright = bold_is_bright;
+    }
+
+    /// Set the cursor shape (block, underline, bar).
+    pub fn set_cursor_shape(&mut self, shape: CursorShape) {
+        self.cursor_shape = shape;
+    }
+
+    /// Open a new search session, replacing any existing one.
+    pub fn open_search(&mut self) {
+        self.search = Some(SearchState::new());
+        self.grid_dirty = true;
+    }
+
+    /// Close the active search session.
+    pub fn close_search(&mut self) {
+        self.search = None;
+        self.grid_dirty = true;
+    }
+
+    /// Update the search query. Handles the borrow-checker dance of
+    /// borrowing `self.grid()` while mutating `self.search`.
+    pub fn update_search_query(&mut self) {
+        if let Some(mut search) = self.search.take() {
+            search.update_query(self.grid());
+            self.search = Some(search);
+            self.grid_dirty = true;
+        }
+    }
+
     /// Return the display title for the tab bar. If the shell explicitly set a
     /// title via OSC 0/2, use that. Otherwise derive a short path from CWD.
-    pub fn effective_title(&self) -> String {
+    pub fn effective_title(&self) -> Cow<'_, str> {
         if self.has_explicit_title {
-            return self.title.clone();
+            return Cow::Borrowed(&self.title);
         }
         if let Some(ref cwd) = self.cwd {
-            return short_path(cwd);
+            return Cow::Owned(short_path(cwd));
         }
-        self.title.clone()
+        Cow::Borrowed(&self.title)
     }
 }
 
