@@ -108,6 +108,10 @@ pub struct GpuRenderer {
     buf_overlay_fg: Vec<u8>,
     /// Column-to-shaped-glyph index map, reused across lines to avoid allocation.
     pub(super) col_glyph_map: Vec<Option<usize>>,
+    /// Scratch buffer for shaped glyphs, reused across lines to avoid allocation.
+    pub(super) shaped_scratch: Vec<crate::font::ShapedGlyph>,
+    /// Scratch buffer for shaping runs, reused across lines to avoid allocation.
+    pub(super) runs_scratch: Vec<crate::font::ShapingRun>,
 }
 
 impl GpuRenderer {
@@ -178,6 +182,8 @@ impl GpuRenderer {
             buf_overlay_bg: Vec::new(),
             buf_overlay_fg: Vec::new(),
             col_glyph_map: Vec::new(),
+            shaped_scratch: Vec::new(),
+            runs_scratch: Vec::new(),
         }
     }
 

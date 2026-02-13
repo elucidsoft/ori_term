@@ -3,7 +3,7 @@
 use vte::ansi::CursorShape;
 
 use crate::cell::CellFlags;
-use crate::font::{FontCollection, shape_line};
+use crate::font::{FontCollection, prepare_line, shape_prepared_runs};
 use crate::grid::{GRID_PADDING_LEFT, GRID_PADDING_TOP, StableRowIndex};
 use crate::render::FontStyle;
 use crate::search::MatchType;
@@ -39,12 +39,17 @@ impl GpuRenderer {
 
         let default_bg_u32 = crate::palette::rgb_to_u32(palette.default_bg());
 
+        // Ensure all font variants and fallbacks are loaded before creating faces.
+        collection.ensure_all_loaded();
+        let faces = collection.create_shaping_faces();
+
         for line in 0..grid.lines {
             let row = grid.visible_row(line);
 
-            // Shape this line: produces glyphs with IDs, positions, and spans.
-            // Combining marks are folded into base glyphs by the shaper.
-            let shaped = shape_line(row.as_slice(), grid.cols, collection);
+            // Segment and shape this line using pre-created faces and scratch buffers.
+            prepare_line(row.as_slice(), grid.cols, collection, &mut self.runs_scratch);
+            shape_prepared_runs(&self.runs_scratch, &faces, collection, &mut self.shaped_scratch);
+            let shaped = &self.shaped_scratch;
             self.col_glyph_map.clear();
             self.col_glyph_map.resize(grid.cols, None);
             for (i, g) in shaped.iter().enumerate() {
@@ -185,7 +190,7 @@ impl GpuRenderer {
                 let gid = glyph.glyph_id;
                 let entry = self.atlas.get_or_insert_shaped(
                     gid,
-                    face_idx.0,
+                    face_idx,
                     size_q6,
                     || collection.rasterize_glyph(face_idx, gid),
                     queue,

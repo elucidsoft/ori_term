@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use crate::font::FaceIdx;
 use crate::icons::Icon;
 use crate::render::{FontSet, FontStyle};
 
@@ -20,7 +21,7 @@ const MAX_PAGES: u32 = 4;
 type GlyphKey = (char, FontStyle, u32);
 
 /// Cache key for shaped glyphs: glyph ID + face index + size (26.6 fixed-point).
-type ShapedGlyphKey = (u16, u16, u32);
+type ShapedGlyphKey = (u16, FaceIdx, u32);
 
 /// Convert a font size in points to a 26.6 fixed-point size key.
 ///
@@ -312,7 +313,7 @@ impl GlyphAtlas {
     pub fn get_or_insert_shaped(
         &mut self,
         glyph_id: u16,
-        face_idx: u16,
+        face_idx: FaceIdx,
         size_q6: u32,
         rasterize: impl FnOnce() -> Option<(fontdue::Metrics, Vec<u8>)>,
         queue: &wgpu::Queue,

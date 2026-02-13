@@ -203,6 +203,17 @@ impl FontCollection {
         }
     }
 
+    /// Eagerly load all font variants and fallbacks.
+    ///
+    /// Call before `create_shaping_faces()` + `find_face_loaded()` to ensure
+    /// all faces are available without `&mut self`.
+    pub fn ensure_all_loaded(&mut self) {
+        for idx in 0..4 {
+            self.ensure_primary_loaded(idx);
+        }
+        self.ensure_fallbacks_loaded();
+    }
+
     /// Find which face covers a given character for the given style.
     pub fn find_face_for_char(&mut self, ch: char, style: FontStyle) -> FaceIdx {
         let idx = style as usize;
@@ -233,6 +244,36 @@ impl FontCollection {
         }
 
         // 4. Return primary Regular (.notdef)
+        FaceIdx(0)
+    }
+
+    /// Find which face covers a character (immutable — requires prior `ensure_all_loaded()`).
+    ///
+    /// Same logic as `find_face_for_char` but takes `&self`. Only valid after
+    /// all font variants and fallbacks have been loaded.
+    pub fn find_face_loaded(&self, ch: char, style: FontStyle) -> FaceIdx {
+        let idx = style as usize;
+
+        if let Some(ref fd) = self.primary[idx] {
+            if fd.raster.lookup_glyph_index(ch) != 0 {
+                return FaceIdx(idx as u16);
+            }
+        }
+
+        if style != FontStyle::Regular {
+            if let Some(ref fd) = self.primary[0] {
+                if fd.raster.lookup_glyph_index(ch) != 0 {
+                    return FaceIdx(0);
+                }
+            }
+        }
+
+        for (i, fb) in self.fallbacks.iter().enumerate() {
+            if fb.raster.lookup_glyph_index(ch) != 0 {
+                return FaceIdx((4 + i) as u16);
+            }
+        }
+
         FaceIdx(0)
     }
 

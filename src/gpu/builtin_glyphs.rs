@@ -6,18 +6,6 @@
 
 use super::instance_writer::InstanceWriter;
 
-/// Returns `true` if the character should be rendered as a built-in glyph
-/// (bypassing the font pipeline).
-pub(crate) fn is_builtin_glyph(c: char) -> bool {
-    matches!(c,
-        '\u{2500}'..='\u{257F}' |  // Box Drawing
-        '\u{2580}'..='\u{259F}' |  // Block Elements
-        '\u{2800}'..='\u{28FF}' |  // Braille Patterns
-        '\u{E0A0}'..='\u{E0A3}' |  // Powerline
-        '\u{E0B0}'..='\u{E0D4}'    // Powerline Extra
-    )
-}
-
 /// Render a built-in glyph as geometric primitives into the instance buffer.
 ///
 /// Returns `true` if the character was handled.
@@ -665,6 +653,7 @@ fn draw_triangle_left_thin(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::is_builtin_glyph;
 
     #[test]
     fn is_builtin_box_drawing_range() {

@@ -86,6 +86,18 @@ impl PartialEq for Cell {
     }
 }
 
+/// Returns `true` if the character should be rendered as a built-in glyph
+/// (bypassing the font pipeline).
+pub fn is_builtin_glyph(c: char) -> bool {
+    matches!(c,
+        '\u{2500}'..='\u{257F}' |  // Box Drawing
+        '\u{2580}'..='\u{259F}' |  // Block Elements
+        '\u{2800}'..='\u{28FF}' |  // Braille Patterns
+        '\u{E0A0}'..='\u{E0A3}' |  // Powerline
+        '\u{E0B0}'..='\u{E0D4}'    // Powerline Extra
+    )
+}
+
 impl Cell {
     // Accessors
 

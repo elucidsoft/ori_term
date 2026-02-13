@@ -8,7 +8,7 @@ mod collection;
 mod shaper;
 
 pub use collection::FontCollection;
-pub use shaper::shape_line;
+pub use shaper::{ShapingRun, prepare_line, shape_line, shape_prepared_runs};
 
 use crate::render::FontStyle;
 

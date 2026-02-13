@@ -1,39 +1,63 @@
 //! Text shaping via `rustybuzz` — segments grid rows into runs, shapes each run,
 //! and maps shaped glyphs back to grid columns.
 
-use crate::cell::{Cell, CellFlags};
-use crate::gpu::builtin_glyphs;
+use crate::cell::{Cell, CellFlags, is_builtin_glyph};
 use crate::render::FontStyle;
 
 use super::{FaceIdx, FontCollection, ShapedGlyph};
 
-/// Shape a line of grid cells into positioned glyphs.
+/// Shape a line of grid cells into positioned glyphs (convenience wrapper).
 ///
-/// Call `prepare_line()` first (needs `&mut FontCollection` for lazy face loading),
-/// then `shape_prepared()` (needs only `&FontCollection` + the rustybuzz faces).
-/// This two-phase design avoids the borrow conflict between `create_shaping_faces()`
-/// (borrows `FontCollection` data immutably) and `find_face_for_char()` (needs `&mut`).
+/// For hot-path usage, prefer the two-phase API: call `prepare_line()` then
+/// `shape_prepared_runs()` with pre-created faces and reusable scratch buffers.
 pub fn shape_line(
     row: &[Cell],
     cols: usize,
     collection: &mut FontCollection,
 ) -> Vec<ShapedGlyph> {
-    // Phase 1: segment runs (may trigger lazy font loading via &mut)
-    let runs = segment_runs(row, cols, collection);
+    collection.ensure_all_loaded();
 
-    // Phase 2: create transient faces and shape (only &self borrows)
+    let mut runs = Vec::new();
+    prepare_line(row, cols, collection, &mut runs);
+
     let faces = collection.create_shaping_faces();
     let mut result = Vec::new();
-
-    for run in &runs {
-        shape_run(run, &faces, collection, &mut result);
-    }
-
+    shape_prepared_runs(&runs, &faces, collection, &mut result);
     result
 }
 
+/// Phase 1: Segment a row of cells into shaping runs (immutable).
+///
+/// Requires `FontCollection::ensure_all_loaded()` to have been called first.
+/// Clears and fills `runs_out`. Call once per line before `shape_prepared_runs()`.
+pub fn prepare_line(
+    row: &[Cell],
+    cols: usize,
+    collection: &FontCollection,
+    runs_out: &mut Vec<ShapingRun>,
+) {
+    runs_out.clear();
+    segment_runs(row, cols, collection, runs_out);
+}
+
+/// Phase 2: Shape pre-segmented runs using pre-created faces.
+///
+/// Clears and fills `output`. Faces should be created once per frame via
+/// `FontCollection::create_shaping_faces()`.
+pub fn shape_prepared_runs(
+    runs: &[ShapingRun],
+    faces: &[Option<rustybuzz::Face<'_>>],
+    collection: &FontCollection,
+    output: &mut Vec<ShapedGlyph>,
+) {
+    output.clear();
+    for run in runs {
+        shape_run(run, faces, collection, output);
+    }
+}
+
 /// A contiguous run of characters sharing the same face and style.
-struct ShapingRun {
+pub struct ShapingRun {
     /// Text to shape (base chars + combining marks).
     text: String,
     /// Face index for this run.
@@ -52,9 +76,9 @@ struct ShapingRun {
 fn segment_runs(
     row: &[Cell],
     cols: usize,
-    collection: &mut FontCollection,
-) -> Vec<ShapingRun> {
-    let mut runs: Vec<ShapingRun> = Vec::new();
+    collection: &FontCollection,
+    runs: &mut Vec<ShapingRun>,
+) {
     let mut col = 0;
 
     while col < cols {
@@ -67,13 +91,13 @@ fn segment_runs(
         }
 
         // Run boundaries: space, null, built-in glyphs
-        if cell.c == ' ' || cell.c == '\0' || builtin_glyphs::is_builtin_glyph(cell.c) {
+        if cell.c == ' ' || cell.c == '\0' || is_builtin_glyph(cell.c) {
             col += 1;
             continue;
         }
 
         let style = FontStyle::from_cell_flags(cell.flags);
-        let face_idx = collection.find_face_for_char(cell.c, style);
+        let face_idx = collection.find_face_loaded(cell.c, style);
 
         // Check if we can extend the current run (same face)
         let extend = runs.last().is_some_and(|r: &ShapingRun| r.face_idx == face_idx);
@@ -116,8 +140,6 @@ fn segment_runs(
 
         col += if cell.flags.contains(CellFlags::WIDE_CHAR) { 2 } else { 1 };
     }
-
-    runs
 }
 
 /// Shape a single run and append results to the output vec.
@@ -176,12 +198,10 @@ fn emit_unshaped_fallback(
 ) {
     let mut col = run.col_start;
     for ch in run.text.chars() {
-        // Skip combining marks (zero-width) for column counting
-        if unicode_width::UnicodeWidthChar::width(ch) == Some(0) {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w == 0 {
             continue;
         }
-
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
         output.push(ShapedGlyph {
             glyph_id: 0,
             face_idx: run.face_idx,
@@ -236,5 +256,26 @@ mod tests {
         let cells = make_cells("   ");
         let shaped = shape_line(&cells, cells.len(), &mut fc);
         assert!(shaped.is_empty(), "spaces produce no shaped glyphs");
+    }
+
+    #[test]
+    fn two_phase_api_matches_convenience() {
+        let mut fc = FontCollection::load(FONT_SIZE, None, &[]);
+        let cells = make_cells("Hello World");
+
+        let one_shot = shape_line(&cells, cells.len(), &mut fc);
+
+        let mut runs = Vec::new();
+        let mut output = Vec::new();
+        prepare_line(&cells, cells.len(), &mut fc, &mut runs);
+        let faces = fc.create_shaping_faces();
+        shape_prepared_runs(&runs, &faces, &fc, &mut output);
+
+        assert_eq!(one_shot.len(), output.len());
+        for (a, b) in one_shot.iter().zip(output.iter()) {
+            assert_eq!(a.glyph_id, b.glyph_id);
+            assert_eq!(a.col_start, b.col_start);
+            assert_eq!(a.col_span, b.col_span);
+        }
     }
 }
