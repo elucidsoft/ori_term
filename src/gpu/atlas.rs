@@ -231,11 +231,6 @@ impl GlyphAtlas {
         &self.view
     }
 
-    /// Get a glyph entry if it already exists in the atlas.
-    pub fn get(&self, ch: char, style: FontStyle, font_size: f32) -> Option<&AtlasEntry> {
-        self.entries.get(&(ch, style, size_key(font_size)))
-    }
-
     /// Look up a glyph in the atlas, inserting it if missing.
     ///
     /// Rasterizes the glyph via `FontSet` and uploads the bitmap to the GPU texture.
@@ -248,6 +243,10 @@ impl GlyphAtlas {
         queue: &wgpu::Queue,
     ) -> &AtlasEntry {
         let key = (ch, style, size_key(glyphs.size));
+
+        // Cache miss: rasterize, upload, insert.
+        // Uses `contains_key` (returns bool) instead of `get` (returns ref)
+        // to avoid holding an immutable borrow across the miss path.
         if !self.entries.contains_key(&key) {
             glyphs.ensure(ch, style);
             if let Some((metrics, bitmap)) = glyphs.get(ch, style) {
@@ -265,14 +264,12 @@ impl GlyphAtlas {
             }
         }
 
-        // Mark the page as recently used.
-        if let Some(entry) = self.entries.get(&key) {
-            if let Some(page) = self.pages.get_mut(entry.page as usize) {
-                page.last_used_frame = self.frame_counter;
-            }
+        // Single lookup for both hit and miss paths: get entry + mark LRU.
+        let entry = self.entries.get(&key).expect("glyph entry just inserted");
+        if let Some(page) = self.pages.get_mut(entry.page as usize) {
+            page.last_used_frame = self.frame_counter;
         }
-
-        self.entries.get(&key).expect("glyph entry just inserted")
+        entry
     }
 
     /// Look up an icon in the atlas, rasterizing and inserting it if missing.

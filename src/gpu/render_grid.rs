@@ -151,9 +151,16 @@ impl GpuRenderer {
 
                 // Built-in glyph rendering (pixel-perfect, no font glyph).
                 // Covers box drawing, block elements, braille, and Powerline.
+                // Temporarily force opacity=1.0 so built-in glyphs match atlas
+                // text brightness. The bg writer premultiplies color by opacity,
+                // but text glyphs on the fg writer are fully opaque.
+                let saved_opacity = bg.opacity;
+                bg.opacity = 1.0;
                 if builtin_glyphs::draw_builtin_glyph(cell.c, x0, y0, cell_w, ch as f32, fg_rgba, bg) {
+                    bg.opacity = saved_opacity;
                     continue;
                 }
+                bg.opacity = saved_opacity;
 
                 let style = FontStyle::from_cell_flags(cell.flags);
                 let entry = self.atlas.get_or_insert(cell.c, style, glyphs, queue);

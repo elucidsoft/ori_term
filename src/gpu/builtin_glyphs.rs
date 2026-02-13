@@ -269,8 +269,8 @@ fn draw_box_drawing(
     // Draw each segment.
     draw_h_segment(left, cx, x, cy, thin, thick, fg, bg);
     draw_h_segment(right, x + w, cx, cy, thin, thick, fg, bg);
-    draw_v_segment(up, cy, y, cx, thin, thick, w, fg, bg);
-    draw_v_segment(down, y + h, cy, cx, thin, thick, w, fg, bg);
+    draw_v_segment(up, cy, y, cx, thin, thick, fg, bg);
+    draw_v_segment(down, y + h, cy, cx, thin, thick, fg, bg);
 
     true
 }
@@ -319,7 +319,6 @@ fn draw_v_segment(
     cx: f32,
     thin: f32,
     thick: f32,
-    _cell_w: f32,
     fg: [f32; 4],
     bg: &mut InstanceWriter,
 ) {
@@ -368,22 +367,22 @@ fn draw_rounded_corner(
         '\u{256D}' => {
             // Arc down and right → ┌
             draw_h_segment(Weight::Light, x + w, cx, cy, thin, thick, fg, bg);
-            draw_v_segment(Weight::Light, y + h, cy, cx, thin, thick, w, fg, bg);
+            draw_v_segment(Weight::Light, y + h, cy, cx, thin, thick, fg, bg);
         }
         '\u{256E}' => {
             // Arc down and left → ┐
             draw_h_segment(Weight::Light, cx, x, cy, thin, thick, fg, bg);
-            draw_v_segment(Weight::Light, y + h, cy, cx, thin, thick, w, fg, bg);
+            draw_v_segment(Weight::Light, y + h, cy, cx, thin, thick, fg, bg);
         }
         '\u{256F}' => {
             // Arc up and left → ┘
             draw_h_segment(Weight::Light, cx, x, cy, thin, thick, fg, bg);
-            draw_v_segment(Weight::Light, cy, y, cx, thin, thick, w, fg, bg);
+            draw_v_segment(Weight::Light, cy, y, cx, thin, thick, fg, bg);
         }
         '\u{2570}' => {
             // Arc up and right → └
             draw_h_segment(Weight::Light, x + w, cx, cy, thin, thick, fg, bg);
-            draw_v_segment(Weight::Light, cy, y, cx, thin, thick, w, fg, bg);
+            draw_v_segment(Weight::Light, cy, y, cx, thin, thick, fg, bg);
         }
         _ => return false,
     }
