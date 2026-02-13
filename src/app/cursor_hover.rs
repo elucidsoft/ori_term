@@ -238,7 +238,8 @@ impl App {
                         #[cfg(target_os = "windows")]
                         {
                             self.setup_merge_detection(source_wid);
-                            self.torn_off_pending = Some((source_wid, tab_id));
+                            self.torn_off_pending =
+                                Some((source_wid, tab_id, mouse_off));
                         }
                         self.drag = None;
                         self.start_window_drag(source_wid, position);
@@ -284,7 +285,8 @@ impl App {
                         #[cfg(target_os = "windows")]
                         {
                             self.setup_merge_detection(wid);
-                            self.torn_off_pending = Some((wid, tab_id));
+                            self.torn_off_pending =
+                                Some((wid, tab_id, mouse_off));
                         }
                         self.start_window_drag(wid, position);
                         log(&format!(

@@ -118,7 +118,9 @@ pub struct App {
     pub(super) cached_bell_badges: Vec<bool>,
     /// Torn-off tab pending OS drag completion for post-drag merge check.
     #[cfg(target_os = "windows")]
-    pub(super) torn_off_pending: Option<(WindowId, TabId)>,
+    /// Torn-off tab pending OS drag completion for post-drag merge check.
+    /// Fields: `(window_id, tab_id, mouse_offset_in_tab)`.
+    pub(super) torn_off_pending: Option<(WindowId, TabId, f64)>,
 }
 
 impl App {

@@ -242,6 +242,7 @@ impl App {
     pub(super) fn setup_merge_detection(&self, drag_wid: WindowId) {
         let sf = self.scale_factor;
         let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round() as i32;
+        let controls_w = (CONTROLS_ZONE_WIDTH as f64 * sf).round() as i32;
 
         let mut rects = Vec::new();
         for (&wid, tw) in &self.windows {
@@ -251,7 +252,9 @@ impl App {
             if let Some((l, t, r, _b)) =
                 crate::platform_windows::visible_frame_bounds(&tw.window)
             {
-                rects.push([l, t, r, t + tab_bar_h]);
+                // Exclude controls zone (minimize/maximize/close buttons) so
+                // dragging over controls doesn't falsely trigger a merge.
+                rects.push([l, t, r - controls_w, t + tab_bar_h]);
             }
         }
 
@@ -306,9 +309,10 @@ impl App {
     /// inside the target's narrow tab bar zone.
     #[cfg(target_os = "windows")]
     pub(super) fn check_torn_off_merge(&mut self) {
+        use crate::drag::{DragPhase, DragState};
         use crate::log;
 
-        let Some((torn_wid, tab_id)) = self.torn_off_pending else {
+        let Some((torn_wid, tab_id, mouse_offset)) = self.torn_off_pending else {
             return;
         };
         let Some(tw) = self.windows.get(&torn_wid) else {
@@ -326,7 +330,7 @@ impl App {
         // the proposed window rect captured at that moment — the window has
         // since snapped back after ReleaseCapture, making current positions
         // unreliable.
-        let merge_proposed = self
+        let merge_data = self
             .windows
             .get(&torn_wid)
             .and_then(|tw| crate::platform_windows::take_merge_detected(&tw.window));
@@ -335,14 +339,20 @@ impl App {
         let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
         let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
 
-        let target = if let Some((pl, pt, pr, _pb)) = merge_proposed {
+        let target = if let Some(ref md) = merge_data {
             // WM_MOVING detected overlap — find target using the proposed rect
             // (the position the OS was about to place the window).
             log(&format!(
-                "merge-check: WM_MOVING triggered, proposed=({pl},{pt},{pr})"
+                "merge-check: WM_MOVING triggered, proposed=({},{},{})",
+                md.proposed_left, md.proposed_top, md.proposed_right,
             ));
             self.find_merge_target_by_proposed_rect(
-                torn_wid, pl, pt, pr, tab_bar_h, controls_w,
+                torn_wid,
+                md.proposed_left,
+                md.proposed_top,
+                md.proposed_right,
+                tab_bar_h,
+                controls_w,
             )
         } else {
             // Normal drag end — use window-to-window tab bar overlap.
@@ -376,6 +386,25 @@ impl App {
                 ttw.window.focus_window();
             }
             self.render_window(target_wid);
+
+            // Chrome-style seamless drag: if the merge was triggered by
+            // WM_MOVING (user is still holding the mouse button), start a
+            // DraggingInBar state so the user can continue dragging the tab
+            // within the target window (or tear off again) without releasing.
+            if merge_data.is_some() {
+                let cursor_pos = merge_data
+                    .as_ref()
+                    .map(|md| {
+                        PhysicalPosition::new(md.cursor_x as f64, md.cursor_y as f64)
+                    })
+                    .unwrap_or_default();
+                let mut drag = DragState::new(tab_id, target_wid, cursor_pos);
+                drag.phase = DragPhase::DraggingInBar;
+                drag.mouse_offset_in_tab = mouse_offset;
+                self.drag = Some(drag);
+                self.left_mouse_down = true;
+                log("merge: seamless drag active in target window");
+            }
         } else {
             // No merge target found — ensure the torn-off window is visible.
             // WM_MOVING may have hidden it via raw Win32 ShowWindow(SW_HIDE),
@@ -427,6 +456,7 @@ impl App {
                 (p.x as f64, p.y as f64, p.x as f64 + s.width as f64)
             };
 
+            // Strict overlap — matches the WM_MOVING check that triggered this.
             let tgt_bar_top = wy;
             let tgt_bar_bot = wy + tab_bar_h;
             let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
@@ -495,8 +525,10 @@ impl App {
 
             let torn_bar_top = tt as f64;
             let torn_bar_bot = tt as f64 + tab_bar_h;
-            let tgt_bar_top = wy;
-            let tgt_bar_bot = wy + tab_bar_h;
+            // Generous vertical tolerance: allow 1 tab bar height of slack
+            // so side-approach merges work at slightly different Y positions.
+            let tgt_bar_top = wy - tab_bar_h;
+            let tgt_bar_bot = wy + tab_bar_h * 2.0;
             let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
 
             let tgt_right = wr - controls_w;

@@ -58,7 +58,9 @@ struct SnapData {
     merge_proposed_left: AtomicI32,
     merge_proposed_top: AtomicI32,
     merge_proposed_right: AtomicI32,
-    merge_proposed_bottom: AtomicI32,
+    /// Screen cursor position at the moment of overlap (for post-merge drag).
+    merge_cursor_x: AtomicI32,
+    merge_cursor_y: AtomicI32,
     /// Tab bar rects of other windows for live merge detection during OS drag.
     /// Each entry: `[left, top, right, tab_bar_bottom]` in screen coordinates.
     /// Populated before `drag_window()`, checked in `WM_MOVING`.
@@ -123,7 +125,8 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
             merge_proposed_left: AtomicI32::new(0),
             merge_proposed_top: AtomicI32::new(0),
             merge_proposed_right: AtomicI32::new(0),
-            merge_proposed_bottom: AtomicI32::new(0),
+            merge_cursor_x: AtomicI32::new(0),
+            merge_cursor_y: AtomicI32::new(0),
             merge_rects: Mutex::new(Vec::new()),
         });
         let data_ptr = Box::into_raw(data);
@@ -194,22 +197,32 @@ pub fn take_drag_ended(window: &winit::window::Window) -> Option<(i32, i32)> {
     }
 }
 
+/// Data captured by `WM_MOVING` when tab bar overlap is detected.
+pub struct MergeDetection {
+    /// Proposed window rect (outer bounds) at the moment of overlap.
+    pub proposed_left: i32,
+    pub proposed_top: i32,
+    pub proposed_right: i32,
+    /// Screen cursor position at the moment of overlap (for post-merge drag).
+    pub cursor_x: i32,
+    pub cursor_y: i32,
+}
+
 /// If `WM_MOVING` detected tab bar overlap during the OS drag, return the
-/// proposed window rect at the moment of detection and clear the flag.
+/// proposed window rect and cursor position at the moment of detection.
 ///
-/// This rect is the position the OS was about to place the window — captured
-/// BEFORE `ReleaseCapture()` ends the move loop. After that, the window snaps
-/// back and positions are unreliable.
-///
-/// Returns `(left, top, right, bottom)` in screen coordinates.
-pub fn take_merge_detected(window: &winit::window::Window) -> Option<(i32, i32, i32, i32)> {
+/// These are captured BEFORE `ReleaseCapture()` ends the move loop. After
+/// that, the window snaps back and positions are unreliable.
+pub fn take_merge_detected(window: &winit::window::Window) -> Option<MergeDetection> {
     let data = snap_data_for_window(window)?;
     if data.merge_detected.swap(false, Ordering::Relaxed) {
-        let l = data.merge_proposed_left.load(Ordering::Relaxed);
-        let t = data.merge_proposed_top.load(Ordering::Relaxed);
-        let r = data.merge_proposed_right.load(Ordering::Relaxed);
-        let b = data.merge_proposed_bottom.load(Ordering::Relaxed);
-        Some((l, t, r, b))
+        Some(MergeDetection {
+            proposed_left: data.merge_proposed_left.load(Ordering::Relaxed),
+            proposed_top: data.merge_proposed_top.load(Ordering::Relaxed),
+            proposed_right: data.merge_proposed_right.load(Ordering::Relaxed),
+            cursor_x: data.merge_cursor_x.load(Ordering::Relaxed),
+            cursor_y: data.merge_cursor_y.load(Ordering::Relaxed),
+        })
     } else {
         None
     }
@@ -467,19 +480,27 @@ unsafe extern "system" fn subclass_proc(
                     let drag_bar_bot = proposed.top + data.caption_height;
                     if let Ok(rects) = data.merge_rects.lock() {
                         for &[cl, ct, cr, ctb] in rects.iter() {
+                            // Strict tab-bar-to-tab-bar overlap — no tolerance.
+                            // Tolerance here would cause immediate merge-back
+                            // after tear-off (the torn-off window is only ~40px
+                            // below the source, within any tolerance zone).
                             let y_overlap = proposed.top < ctb && drag_bar_bot > ct;
                             let x_overlap = proposed.right > cl && proposed.left < cr;
                             if y_overlap && x_overlap {
-                                // Store the proposed rect — after ReleaseCapture
-                                // the window snaps back and positions are invalid.
+                                // Store the proposed rect and cursor — after
+                                // ReleaseCapture the window snaps back and
+                                // positions are invalid.
                                 data.merge_proposed_left
                                     .store(proposed.left, Ordering::Relaxed);
                                 data.merge_proposed_top
                                     .store(proposed.top, Ordering::Relaxed);
                                 data.merge_proposed_right
                                     .store(proposed.right, Ordering::Relaxed);
-                                data.merge_proposed_bottom
-                                    .store(proposed.bottom, Ordering::Relaxed);
+                                let mut pt =
+                                    windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                                GetCursorPos(&raw mut pt);
+                                data.merge_cursor_x.store(pt.x, Ordering::Relaxed);
+                                data.merge_cursor_y.store(pt.y, Ordering::Relaxed);
                                 data.merge_detected.store(true, Ordering::Relaxed);
                                 // Hide window before ending loop (Chrome does this
                                 // to prevent snap-back visual artifact).
