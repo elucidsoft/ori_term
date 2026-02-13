@@ -8,7 +8,7 @@
 //! This is the standard approach used by Chrome, `WezTerm`, and Windows Terminal.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::{HWND, LRESULT, RECT};
@@ -30,6 +30,40 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const SUBCLASS_ID: usize = 0xBEEF;
 
+/// Configuration for an OS drag session, passed to `begin_os_drag()`.
+pub struct OsDragConfig {
+    /// Cursor-to-window-origin offset at the moment the drag started.
+    /// `WM_MOVING` corrects the proposed rect every frame: `pos = cursor - grab_offset`.
+    pub grab_offset: (i32, i32),
+    /// Tab bar zones of other windows in screen coordinates.
+    /// Each entry: `[left, top, right, tab_bar_bottom]`.
+    /// Cursor-based merge: if `GetCursorPos()` falls within a zone, merge is triggered.
+    pub merge_rects: Vec<[i32; 4]>,
+    /// Number of `WM_MOVING` frames to skip merge detection after tear-off.
+    /// Position correction still runs on every frame.
+    pub skip_count: i32,
+}
+
+/// Result of an OS drag session, consumed by `take_os_drag_result()`.
+pub enum OsDragResult {
+    /// OS drag ended normally (user released mouse). Cursor at end position.
+    DragEnded { cursor: (i32, i32) },
+    /// `WM_MOVING` detected cursor in a merge target's tab bar zone.
+    /// Window was hidden + `ReleaseCapture` called. Cursor captured at detection.
+    MergeDetected { cursor: (i32, i32) },
+}
+
+/// Mutable state for an active OS drag session, stored behind `Mutex` in `SnapData`.
+///
+/// Created by `begin_os_drag()`, consumed by `WM_MOVING`/`WM_EXITSIZEMOVE` handlers,
+/// and read by `take_os_drag_result()`.
+struct OsDragState {
+    grab_offset: (i32, i32),
+    merge_rects: Vec<[i32; 4]>,
+    skip_remaining: i32,
+    result: Option<OsDragResult>,
+}
+
 struct SnapData {
     resize_border: i32,
     caption_height: i32,
@@ -39,32 +73,9 @@ struct SnapData {
     /// `ScaleFactorChanged`.  The app reads this in `handle_resize` to update
     /// `self.scale_factor`.  0 means no DPI change has been received yet.
     last_dpi: AtomicU32,
-    /// True when this window is mid-tear-off OS drag (`drag_window()`).
-    is_torn_off: AtomicBool,
-    /// Set by `WM_EXITSIZEMOVE` when `is_torn_off` is true — signals that the
-    /// OS move loop ended and the app should check for merge targets.
-    drag_ended: AtomicBool,
-    /// Screen cursor X at the moment the OS drag ended.
-    end_cursor_x: AtomicI32,
-    /// Screen cursor Y at the moment the OS drag ended.
-    end_cursor_y: AtomicI32,
-    /// Set by `WM_MOVING` when tab bar overlap is detected. Signals that
-    /// `merge_proposed_*` contain the proposed window rect at the moment of
-    /// overlap (before the window snaps back after `ReleaseCapture`).
-    merge_detected: AtomicBool,
-    /// Proposed window rect at the moment `WM_MOVING` detected overlap.
-    /// This is the rect the OS was about to move the window to — it's the
-    /// true position before snap-back invalidates everything.
-    merge_proposed_left: AtomicI32,
-    merge_proposed_top: AtomicI32,
-    merge_proposed_right: AtomicI32,
-    /// Screen cursor position at the moment of overlap (for post-merge drag).
-    merge_cursor_x: AtomicI32,
-    merge_cursor_y: AtomicI32,
-    /// Tab bar rects of other windows for live merge detection during OS drag.
-    /// Each entry: `[left, top, right, tab_bar_bottom]` in screen coordinates.
-    /// Populated before `drag_window()`, checked in `WM_MOVING`.
-    merge_rects: Mutex<Vec<[i32; 4]>>,
+    /// Active OS drag session state. `Some` while `drag_window()` is in progress,
+    /// `None` otherwise. Replaces the previous 13 atomics.
+    os_drag: Mutex<Option<OsDragState>>,
 }
 
 /// Global map from HWND (as usize) → `SnapData` pointer so `set_client_rects` can
@@ -117,17 +128,7 @@ pub fn enable_snap(window: &winit::window::Window, resize_border: i32, caption_h
             caption_height,
             client_rects: Mutex::new(Vec::new()),
             last_dpi: AtomicU32::new(0),
-            is_torn_off: AtomicBool::new(false),
-            drag_ended: AtomicBool::new(false),
-            end_cursor_x: AtomicI32::new(0),
-            end_cursor_y: AtomicI32::new(0),
-            merge_detected: AtomicBool::new(false),
-            merge_proposed_left: AtomicI32::new(0),
-            merge_proposed_top: AtomicI32::new(0),
-            merge_proposed_right: AtomicI32::new(0),
-            merge_cursor_x: AtomicI32::new(0),
-            merge_cursor_y: AtomicI32::new(0),
-            merge_rects: Mutex::new(Vec::new()),
+            os_drag: Mutex::new(None),
         });
         let data_ptr = Box::into_raw(data);
         SetWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID, data_ptr as usize);
@@ -167,79 +168,47 @@ pub fn get_current_dpi(window: &winit::window::Window) -> Option<f64> {
     }
 }
 
-/// Mark a window as mid-tear-off OS drag.
+/// Begin an OS drag session for tab tear-off or single-tab window drag.
 ///
-/// When `torn_off` is true, `WM_EXITSIZEMOVE` will capture the cursor position
-/// so the app can check for merge targets after the OS drag loop ends.
-pub fn set_torn_off(window: &winit::window::Window, torn_off: bool) {
+/// Stores `OsDragState` so the `WM_MOVING` handler can correct window position
+/// and detect cursor-based merges. Call this before `drag_window()`.
+pub fn begin_os_drag(window: &winit::window::Window, config: OsDragConfig) {
     let Some(data) = snap_data_for_window(window) else {
         return;
     };
-    data.is_torn_off.store(torn_off, Ordering::Relaxed);
-    if !torn_off {
-        data.drag_ended.store(false, Ordering::Relaxed);
+    if let Ok(mut lock) = data.os_drag.lock() {
+        *lock = Some(OsDragState {
+            grab_offset: config.grab_offset,
+            merge_rects: config.merge_rects,
+            skip_remaining: config.skip_count,
+            result: None,
+        });
     }
 }
 
-/// If the OS drag loop ended for a torn-off window, return the cursor
-/// screen position at drag end and clear the flag.
+/// If an OS drag session completed (either normal end or merge detection),
+/// return the result and clear the drag state.
 ///
-/// Returns `None` if no drag-end has been signaled yet.
-pub fn take_drag_ended(window: &winit::window::Window) -> Option<(i32, i32)> {
+/// Returns `None` if no drag session is active or it hasn't ended yet.
+pub fn take_os_drag_result(window: &winit::window::Window) -> Option<OsDragResult> {
     let data = snap_data_for_window(window)?;
-    if data.drag_ended.swap(false, Ordering::Relaxed) {
-        data.is_torn_off.store(false, Ordering::Relaxed);
-        let x = data.end_cursor_x.load(Ordering::Relaxed);
-        let y = data.end_cursor_y.load(Ordering::Relaxed);
-        Some((x, y))
-    } else {
-        None
-    }
+    let mut lock = data.os_drag.lock().ok()?;
+    let state = lock.as_mut()?;
+    let result = state.result.take()?;
+    // Drag session is complete — clear the entire state.
+    *lock = None;
+    Some(result)
 }
 
-/// Data captured by `WM_MOVING` when tab bar overlap is detected.
-pub struct MergeDetection {
-    /// Proposed window rect (outer bounds) at the moment of overlap.
-    pub proposed_left: i32,
-    pub proposed_top: i32,
-    pub proposed_right: i32,
-    /// Screen cursor position at the moment of overlap (for post-merge drag).
-    pub cursor_x: i32,
-    pub cursor_y: i32,
-}
-
-/// If `WM_MOVING` detected tab bar overlap during the OS drag, return the
-/// proposed window rect and cursor position at the moment of detection.
-///
-/// These are captured BEFORE `ReleaseCapture()` ends the move loop. After
-/// that, the window snaps back and positions are unreliable.
-pub fn take_merge_detected(window: &winit::window::Window) -> Option<MergeDetection> {
-    let data = snap_data_for_window(window)?;
-    if data.merge_detected.swap(false, Ordering::Relaxed) {
-        Some(MergeDetection {
-            proposed_left: data.merge_proposed_left.load(Ordering::Relaxed),
-            proposed_top: data.merge_proposed_top.load(Ordering::Relaxed),
-            proposed_right: data.merge_proposed_right.load(Ordering::Relaxed),
-            cursor_x: data.merge_cursor_x.load(Ordering::Relaxed),
-            cursor_y: data.merge_cursor_y.load(Ordering::Relaxed),
-        })
-    } else {
-        None
+/// Get the current screen cursor position via Win32 `GetCursorPos`.
+#[allow(unsafe_code)]
+pub fn cursor_screen_pos() -> (i32, i32) {
+    let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+    // SAFETY: Standard Win32 API call with valid output pointer.
+    unsafe {
+        GetCursorPos(&raw mut pt);
     }
-}
-
-/// Set the merge candidate rects for live overlap detection during OS drag.
-///
-/// Each rect is `[left, top, right, tab_bar_bottom]` in screen coordinates
-/// (DWM visible bounds). Called before `drag_window()` to populate the
-/// `WM_MOVING` handler with target tab bar regions.
-pub fn set_merge_rects(window: &winit::window::Window, rects: Vec<[i32; 4]>) {
-    let Some(data) = snap_data_for_window(window) else {
-        return;
-    };
-    if let Ok(mut lock) = data.merge_rects.lock() {
-        *lock = rects;
-    }
+    (pt.x, pt.y)
 }
 
 /// Returns the visible frame bounds of a window, excluding the invisible
@@ -472,36 +441,39 @@ unsafe extern "system" fn subclass_proc(
 
             WM_MOVING => {
                 let data = &*(ref_data as *const SnapData);
-                if data.is_torn_off.load(Ordering::Relaxed) {
-                    // Chrome-style live merge: check if the dragged window's tab
-                    // bar overlaps any other window's tab bar. If so, end the OS
-                    // move loop immediately — the app will merge on WM_EXITSIZEMOVE.
-                    let proposed = &*(lparam as *const RECT);
-                    let drag_bar_bot = proposed.top + data.caption_height;
-                    if let Ok(rects) = data.merge_rects.lock() {
-                        for &[cl, ct, cr, ctb] in rects.iter() {
-                            // Strict tab-bar-to-tab-bar overlap — no tolerance.
-                            // Tolerance here would cause immediate merge-back
-                            // after tear-off (the torn-off window is only ~40px
-                            // below the source, within any tolerance zone).
-                            let y_overlap = proposed.top < ctb && drag_bar_bot > ct;
-                            let x_overlap = proposed.right > cl && proposed.left < cr;
-                            if y_overlap && x_overlap {
-                                // Store the proposed rect and cursor — after
-                                // ReleaseCapture the window snaps back and
-                                // positions are invalid.
-                                data.merge_proposed_left
-                                    .store(proposed.left, Ordering::Relaxed);
-                                data.merge_proposed_top
-                                    .store(proposed.top, Ordering::Relaxed);
-                                data.merge_proposed_right
-                                    .store(proposed.right, Ordering::Relaxed);
-                                let mut pt =
-                                    windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
-                                GetCursorPos(&raw mut pt);
-                                data.merge_cursor_x.store(pt.x, Ordering::Relaxed);
-                                data.merge_cursor_y.store(pt.y, Ordering::Relaxed);
-                                data.merge_detected.store(true, Ordering::Relaxed);
+                if let Ok(mut lock) = data.os_drag.lock() {
+                    if let Some(state) = lock.as_mut() {
+                        let proposed = &mut *(lparam as *mut RECT);
+                        let w = proposed.right - proposed.left;
+                        let h = proposed.bottom - proposed.top;
+
+                        // 1. Always correct position (Chrome pattern).
+                        // winit's drag_window() doesn't accept a drag_offset,
+                        // so the OS picks up whatever offset exists. We
+                        // compensate by correcting the proposed rect every
+                        // frame: window origin = cursor - grab_offset.
+                        let mut pt =
+                            windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                        GetCursorPos(&raw mut pt);
+                        let (gx, gy) = state.grab_offset;
+                        proposed.left = pt.x - gx;
+                        proposed.top = pt.y - gy;
+                        proposed.right = proposed.left + w;
+                        proposed.bottom = proposed.top + h;
+
+                        // 2. Skip merge check only (position still corrected).
+                        if state.skip_remaining > 0 {
+                            state.skip_remaining -= 1;
+                            return DefSubclassProc(hwnd, msg, wparam, lparam);
+                        }
+
+                        // 3. Cursor-based merge (Chrome's DoesTabStripContain).
+                        // Check if the cursor falls within any target tab bar zone.
+                        for &[cl, ct, cr, ctb] in &state.merge_rects {
+                            if pt.x >= cl && pt.x < cr && pt.y >= ct && pt.y < ctb {
+                                state.result = Some(OsDragResult::MergeDetected {
+                                    cursor: (pt.x, pt.y),
+                                });
                                 // Hide window before ending loop (Chrome does this
                                 // to prevent snap-back visual artifact).
                                 ShowWindow(hwnd, SW_HIDE);
@@ -515,29 +487,20 @@ unsafe extern "system" fn subclass_proc(
             }
 
             WM_EXITSIZEMOVE => {
-                use std::io::Write;
                 let data = &*(ref_data as *const SnapData);
-                let was_torn_off = data.is_torn_off.load(Ordering::Relaxed);
-                if was_torn_off {
-                    // OS drag loop ended for a torn-off tab — capture cursor
-                    // position so the app can check for merge targets.
-                    let mut pt = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
-                    GetCursorPos(&raw mut pt);
-                    data.end_cursor_x.store(pt.x, Ordering::Relaxed);
-                    data.end_cursor_y.store(pt.y, Ordering::Relaxed);
-                    data.drag_ended.store(true, Ordering::Relaxed);
-                }
-                // Debug: log WM_EXITSIZEMOVE from WndProc.
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open("oriterm_debug.log")
-                {
-                    let _ = writeln!(
-                        f,
-                        "WM_EXITSIZEMOVE: is_torn_off={was_torn_off}, hwnd={:#x}",
-                        hwnd as usize,
-                    );
+                if let Ok(mut lock) = data.os_drag.lock() {
+                    if let Some(state) = lock.as_mut() {
+                        // Only store DragEnded if WM_MOVING didn't already set a
+                        // MergeDetected result.
+                        if state.result.is_none() {
+                            let mut pt =
+                                windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+                            GetCursorPos(&raw mut pt);
+                            state.result = Some(OsDragResult::DragEnded {
+                                cursor: (pt.x, pt.y),
+                            });
+                        }
+                    }
                 }
                 DefSubclassProc(hwnd, msg, wparam, lparam)
             }

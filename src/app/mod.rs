@@ -116,11 +116,19 @@ pub struct App {
     /// Cached tab bar data — rebuilt only when `tab_bar_dirty`.
     pub(super) cached_tab_info: Vec<(TabId, String)>,
     pub(super) cached_bell_badges: Vec<bool>,
-    /// Torn-off tab pending OS drag completion for post-drag merge check.
     #[cfg(target_os = "windows")]
     /// Torn-off tab pending OS drag completion for post-drag merge check.
     /// Fields: `(window_id, tab_id, mouse_offset_in_tab)`.
     pub(super) torn_off_pending: Option<(WindowId, TabId, f64)>,
+    #[cfg(target_os = "windows")]
+    /// Suppresses the next mouse release after a merge-during-drag.
+    /// The OS modal move loop may deliver a stale `WM_LBUTTONUP` after
+    /// `ReleaseCapture()` that would otherwise clear the drag state.
+    pub(super) merge_drag_suppress_release: bool,
+    /// Chrome-style vertical detach magnetism (pixels). After a merge, extra
+    /// Y tolerance is added to the tear-off check so the cursor needs to
+    /// travel further before tearing off again. Cleared when the drag ends.
+    pub(super) tear_off_magnetism: f64,
 }
 
 impl App {
@@ -255,6 +263,9 @@ impl App {
             cached_bell_badges: Vec::new(),
             #[cfg(target_os = "windows")]
             torn_off_pending: None,
+            #[cfg(target_os = "windows")]
+            merge_drag_suppress_release: false,
+            tear_off_magnetism: 0.0,
         };
 
         event_loop.run_app(&mut app)?;

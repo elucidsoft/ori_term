@@ -30,13 +30,17 @@ impl App {
         window_w - controls_w - new_tab_w - dropdown_w - tab_width
     }
 
+    /// Tear off a tab into a new single-tab window.
+    ///
+    /// Creates the window, positions it under the cursor, renders and shows it.
+    /// Returns `(new_window_id, grab_offset)` so the caller can start the OS drag.
+    /// Does NOT call `begin_os_drag` or `drag_window` — the caller handles that.
     pub(super) fn tear_off_tab(
         &mut self,
         tab_id: TabId,
         source_wid: WindowId,
-        cursor: PhysicalPosition<f64>,
         event_loop: &ActiveEventLoop,
-    ) {
+    ) -> Option<(WindowId, (i32, i32))> {
         // Remove tab from source window and clear drag overlay so the source
         // window doesn't render a ghost of the dragged tab.
         if let Some(tw) = self.windows.get_mut(&source_wid) {
@@ -46,55 +50,75 @@ impl App {
             tw.window.request_redraw();
         }
 
-        // Compute screen-space cursor position from source window
+        // The grab offset: where the cursor should appear within the new
+        // window's client area. Accounts for the left margin (the tab in the
+        // new single-tab window starts at TAB_LEFT_MARGIN, not at x=0) and
+        // preserves the original Y click position so the cursor stays at the
+        // exact spot the user grabbed.
+        let left_margin = self.scale_px(TAB_LEFT_MARGIN) as f64;
+        let offset_in_tab = self.drag.as_ref().map_or(75.0, |d| d.mouse_offset_in_tab);
+        let grab_x = left_margin + offset_in_tab;
+        let grab_y = self.drag.as_ref().map_or(
+            TAB_BAR_HEIGHT as f64 * self.scale_factor / 2.0,
+            |d| d.origin.y,
+        );
+
+        // Use the actual screen cursor position (Win32 GetCursorPos) rather
+        // than computing from outer_position + client coords. This avoids
+        // any coordinate system discrepancy from DWM invisible borders.
+        #[cfg(target_os = "windows")]
+        let screen_cursor = {
+            let (sx, sy) = crate::platform_windows::cursor_screen_pos();
+            Some((sx, sy))
+        };
+        #[cfg(not(target_os = "windows"))]
         let screen_cursor = self
             .windows
             .get(&source_wid)
             .and_then(|tw| tw.window.outer_position().ok())
-            .map(|wp| (wp.x + cursor.x as i32, wp.y + cursor.y as i32));
+            .map(|wp| {
+                let pos = self
+                    .cursor_pos
+                    .get(&source_wid)
+                    .copied()
+                    .unwrap_or(PhysicalPosition::new(0.0, 0.0));
+                (wp.x + pos.x as i32, wp.y + pos.y as i32)
+            });
 
-        // The grab offset: where the cursor will be within the new window.
-        // Use mouse_offset_in_tab so the window appears with the cursor at the
-        // exact spot the user grabbed the tab.
-        let grab_x = self.drag.as_ref().map_or(75.0, |d| d.mouse_offset_in_tab);
-        let grab_y = TAB_BAR_HEIGHT as f64 * self.scale_factor / 2.0;
+        let grab_offset = (grab_x as i32, grab_y as i32);
 
         // Create new frameless window at cursor position (hidden until first frame)
-        if let Some(new_wid) = self.create_window(event_loop, None, false) {
-            if let Some(tw) = self.windows.get_mut(&new_wid) {
-                tw.add_tab(tab_id);
-                // Position so cursor is at grab_offset within the client area.
-                // No title bar offset needed — frameless window has no OS decoration.
-                if let Some((sx, sy)) = screen_cursor {
-                    let win_x = sx - grab_x as i32;
-                    let win_y = sy - grab_y as i32;
-                    tw.window
-                        .set_outer_position(PhysicalPosition::new(win_x, win_y));
-                }
+        let new_wid = self.create_window(event_loop, None, false)?;
+        if let Some(tw) = self.windows.get_mut(&new_wid) {
+            tw.add_tab(tab_id);
+            // Position so cursor is at grab_offset within the client area.
+            // No title bar offset needed — frameless window has no OS decoration.
+            if let Some((sx, sy)) = screen_cursor {
+                let win_x = sx - grab_offset.0;
+                let win_y = sy - grab_offset.1;
+                tw.window
+                    .set_outer_position(PhysicalPosition::new(win_x, win_y));
             }
-            // Render new window first (hidden), then show it, then render
-            // source window LAST so its frame is the final presented one and
-            // `last_rendered_window` points to the source — avoiding cache
-            // invalidation delays on Windows where request_redraw may be
-            // deferred while the torn-off window has mouse capture.
-            self.render_window(new_wid);
-            if let Some(tw) = self.windows.get(&new_wid) {
-                tw.window.set_visible(true);
-            }
-            self.tab_bar_dirty = true;
-            self.render_window(source_wid);
+        }
+        // Render new window first (hidden), then show it, then render
+        // source window LAST so its frame is the final presented one and
+        // `last_rendered_window` points to the source — avoiding cache
+        // invalidation delays on Windows where request_redraw may be
+        // deferred while the torn-off window has mouse capture.
+        self.render_window(new_wid);
+        if let Some(tw) = self.windows.get(&new_wid) {
+            tw.window.set_visible(true);
+        }
+        self.tab_bar_dirty = true;
+        self.render_window(source_wid);
 
-            // Update drag.source_window to the torn-off window so the
-            // release handler uses the correct window id.
-            if let Some(ref mut drag) = self.drag {
-                drag.source_window = new_wid;
-            }
-
-            // The OS drag loop takes over from here. Merge check
-            // happens in check_torn_off_merge() after WM_EXITSIZEMOVE.
+        // Update drag.source_window to the torn-off window so the
+        // release handler uses the correct window id.
+        if let Some(ref mut drag) = self.drag {
+            drag.source_window = new_wid;
         }
 
-        // If source window is empty, close it
+        // If source window is empty, close it.
         let source_empty = self
             .windows
             .get(&source_wid)
@@ -102,6 +126,64 @@ impl App {
         if source_empty {
             self.windows.remove(&source_wid);
         }
+
+        Some((new_wid, grab_offset))
+    }
+
+    /// Unified entry point for starting an OS tab drag with merge detection.
+    ///
+    /// Collects merge rects from other windows, configures the `WM_MOVING` handler
+    /// via `begin_os_drag()`, sets `torn_off_pending`, and calls `drag_window()`.
+    /// Used by both single-tab drag and multi-tab tear-off paths.
+    #[cfg(target_os = "windows")]
+    pub(super) fn begin_os_tab_drag(
+        &mut self,
+        wid: WindowId,
+        tab_id: TabId,
+        mouse_offset: f64,
+        grab_offset: (i32, i32),
+        skip_count: i32,
+    ) {
+        let merge_rects = self.collect_merge_rects(wid);
+        if let Some(tw) = self.windows.get(&wid) {
+            crate::platform_windows::begin_os_drag(
+                &tw.window,
+                crate::platform_windows::OsDragConfig {
+                    grab_offset,
+                    merge_rects,
+                    skip_count,
+                },
+            );
+        }
+        self.torn_off_pending = Some((wid, tab_id, mouse_offset));
+        if let Some(tw) = self.windows.get(&wid) {
+            let _ = tw.window.drag_window();
+        }
+    }
+
+    /// Collect tab bar zones from all windows except `exclude` for merge detection.
+    ///
+    /// Each zone is `[left, top, right, tab_bar_bottom]` in screen coordinates.
+    /// The controls zone (minimize/maximize/close) is excluded from the right
+    /// side so dragging over window controls doesn't trigger a merge.
+    #[cfg(target_os = "windows")]
+    fn collect_merge_rects(&self, exclude: WindowId) -> Vec<[i32; 4]> {
+        let sf = self.scale_factor;
+        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round() as i32;
+        let controls_w = (CONTROLS_ZONE_WIDTH as f64 * sf).round() as i32;
+
+        let mut rects = Vec::new();
+        for (&wid, tw) in &self.windows {
+            if wid == exclude {
+                continue;
+            }
+            if let Some((l, t, r, _b)) =
+                crate::platform_windows::visible_frame_bounds(&tw.window)
+            {
+                rects.push([l, t, r - controls_w, t + tab_bar_h]);
+            }
+        }
+        rects
     }
 
     /// Move a tab from one window to another at the given index.
@@ -231,39 +313,6 @@ impl App {
         }
     }
 
-    /// Populate merge candidate rects and mark the window as torn-off for live
-    /// merge detection during the OS drag loop.
-    ///
-    /// Collects tab bar rects (DWM visible bounds) from all other windows and
-    /// stores them in the dragged window's `SnapData`. The `WM_MOVING` handler
-    /// checks these during the OS move loop and ends the loop early when the
-    /// dragged window's tab bar overlaps a candidate.
-    #[cfg(target_os = "windows")]
-    pub(super) fn setup_merge_detection(&self, drag_wid: WindowId) {
-        let sf = self.scale_factor;
-        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round() as i32;
-        let controls_w = (CONTROLS_ZONE_WIDTH as f64 * sf).round() as i32;
-
-        let mut rects = Vec::new();
-        for (&wid, tw) in &self.windows {
-            if wid == drag_wid {
-                continue;
-            }
-            if let Some((l, t, r, _b)) =
-                crate::platform_windows::visible_frame_bounds(&tw.window)
-            {
-                // Exclude controls zone (minimize/maximize/close buttons) so
-                // dragging over controls doesn't falsely trigger a merge.
-                rects.push([l, t, r - controls_w, t + tab_bar_h]);
-            }
-        }
-
-        if let Some(tw) = self.windows.get(&drag_wid) {
-            crate::platform_windows::set_torn_off(&tw.window, true);
-            crate::platform_windows::set_merge_rects(&tw.window, rects);
-        }
-    }
-
     pub(super) fn window_containing_tab(&self, tab_id: TabId) -> Option<WindowId> {
         self.windows
             .iter()
@@ -297,16 +346,46 @@ impl App {
         raw.min(tw.tabs.len())
     }
 
+    /// Find a merge target using cursor screen coordinates (Chrome pattern).
+    ///
+    /// Checks if the cursor falls within any other window's tab bar zone,
+    /// expanded by `magnetism` pixels vertically (Chrome's `kVerticalDetachMagnetism`).
+    /// Returns `(target_window_id, cursor_screen_x)` for drop index calculation.
+    #[cfg(target_os = "windows")]
+    fn find_merge_target(
+        &self,
+        exclude: WindowId,
+        cursor: (i32, i32),
+        magnetism: i32,
+    ) -> Option<(WindowId, f64)> {
+        let (cx, cy) = cursor;
+        let sf = self.scale_factor;
+        let tab_bar_h = (TAB_BAR_HEIGHT as f64 * sf).round() as i32;
+        let controls_w = (CONTROLS_ZONE_WIDTH as f64 * sf).round() as i32;
+
+        for (&wid, tw) in &self.windows {
+            if wid == exclude {
+                continue;
+            }
+            if let Some((l, t, r, _b)) =
+                crate::platform_windows::visible_frame_bounds(&tw.window)
+            {
+                let in_x = cx >= l && cx < r - controls_w;
+                let in_y = cy >= t - magnetism && cy < t + tab_bar_h + magnetism;
+                if in_x && in_y {
+                    return Some((wid, cx as f64));
+                }
+            }
+        }
+        None
+    }
+
     /// Check if a torn-off tab's OS drag ended and merge into a target window.
     ///
-    /// Called from `about_to_wait()` each event loop iteration. When the OS move
-    /// loop (`drag_window()`) ends, `WM_EXITSIZEMOVE` captures the cursor position.
-    /// If the torn-off window's tab bar overlaps another window's tab bar, merge
-    /// the tab into that window. Otherwise the window stays where the OS placed it.
-    ///
-    /// Uses window-to-window tab bar overlap rather than cursor position because
-    /// the cursor is at the grab offset within the torn-off window, not necessarily
-    /// inside the target's narrow tab bar zone.
+    /// Called from `about_to_wait()` each event loop iteration. Uses cursor-based
+    /// merge detection: if the cursor is within another window's tab bar zone
+    /// (± magnetism), merge the tab into that window. Otherwise the window stays
+    /// where the OS placed it.
     #[cfg(target_os = "windows")]
     pub(super) fn check_torn_off_merge(&mut self) {
         use crate::drag::{DragPhase, DragState};
@@ -320,44 +399,39 @@ impl App {
             self.torn_off_pending = None;
             return;
         };
-        let Some((cx, cy)) = crate::platform_windows::take_drag_ended(&tw.window) else {
+        let Some(result) = crate::platform_windows::take_os_drag_result(&tw.window) else {
             return;
         };
         self.torn_off_pending = None;
-        log(&format!("merge-check: drag ended at cursor ({cx}, {cy})"));
-
-        // Check if WM_MOVING detected overlap during the drag. If so, use
-        // the proposed window rect captured at that moment — the window has
-        // since snapped back after ReleaseCapture, making current positions
-        // unreliable.
-        let merge_data = self
-            .windows
-            .get(&torn_wid)
-            .and_then(|tw| crate::platform_windows::take_merge_detected(&tw.window));
 
         let sf = self.scale_factor;
-        let tab_bar_h = TAB_BAR_HEIGHT as f64 * sf;
-        let controls_w = CONTROLS_ZONE_WIDTH as f64 * sf;
+        // Chrome's kVerticalDetachMagnetism = 15 DIPs.
+        let magnetism = (15.0 * sf).round() as i32;
 
-        let target = if let Some(ref md) = merge_data {
-            // WM_MOVING detected overlap — find target using the proposed rect
-            // (the position the OS was about to place the window).
-            log(&format!(
-                "merge-check: WM_MOVING triggered, proposed=({},{},{})",
-                md.proposed_left, md.proposed_top, md.proposed_right,
-            ));
-            self.find_merge_target_by_proposed_rect(
-                torn_wid,
-                md.proposed_left,
-                md.proposed_top,
-                md.proposed_right,
-                tab_bar_h,
-                controls_w,
-            )
-        } else {
-            // Normal drag end — use window-to-window tab bar overlap.
-            self.find_merge_target_by_overlap(torn_wid, tab_bar_h, controls_w)
+        let (cursor, is_live_merge) = match result {
+            crate::platform_windows::OsDragResult::MergeDetected { cursor } => {
+                log(&format!(
+                    "merge-check: WM_MOVING merge at cursor ({}, {})",
+                    cursor.0, cursor.1,
+                ));
+                // WM_MOVING already confirmed cursor is inside a tab bar zone,
+                // so no extra magnetism needed.
+                (cursor, true)
+            }
+            crate::platform_windows::OsDragResult::DragEnded { cursor } => {
+                log(&format!(
+                    "merge-check: drag ended at cursor ({}, {})",
+                    cursor.0, cursor.1,
+                ));
+                (cursor, false)
+            }
         };
+
+        // For live merge (WM_MOVING already validated), use 0 magnetism since
+        // the cursor was confirmed inside the zone. For post-drag, use Chrome's
+        // kVerticalDetachMagnetism for a more forgiving check.
+        let merge_magnetism = if is_live_merge { 0 } else { magnetism };
+        let target = self.find_merge_target(torn_wid, cursor, merge_magnetism);
 
         if let Some((target_wid, screen_x)) = target {
             let idx = self.compute_drop_index(target_wid, screen_x);
@@ -391,18 +465,54 @@ impl App {
             // WM_MOVING (user is still holding the mouse button), start a
             // DraggingInBar state so the user can continue dragging the tab
             // within the target window (or tear off again) without releasing.
-            if merge_data.is_some() {
-                let cursor_pos = merge_data
-                    .as_ref()
-                    .map(|md| {
-                        PhysicalPosition::new(md.cursor_x as f64, md.cursor_y as f64)
-                    })
-                    .unwrap_or_default();
-                let mut drag = DragState::new(tab_id, target_wid, cursor_pos);
+            if is_live_merge {
+                let (cx, cy) = cursor;
+                // Convert screen cursor to target client coords.
+                let (tgt_left, tgt_top) =
+                    crate::platform_windows::visible_frame_bounds(
+                        &self.windows[&target_wid].window,
+                    )
+                    .map_or((0, 0), |(l, t, _, _)| (l, t));
+                let local_x = cx as f64 - tgt_left as f64;
+                let local_y = cy as f64 - tgt_top as f64;
+                let client_pos = PhysicalPosition::new(local_x, local_y);
+
+                // Store cursor position so subsequent events have context.
+                self.cursor_pos.insert(target_wid, client_pos);
+
+                // Create drag state in the target window.
+                let mut drag = DragState::new(tab_id, target_wid, client_pos);
                 drag.phase = DragPhase::DraggingInBar;
                 drag.mouse_offset_in_tab = mouse_offset;
                 self.drag = Some(drag);
                 self.left_mouse_down = true;
+
+                // Set drag_visual_x so the tab renders at the cursor position
+                // immediately — without this, the tab snaps to its slot index
+                // until the next cursor_moved event.
+                let tw = &self.windows[&target_wid];
+                let layout = TabBarLayout::compute(
+                    tw.tabs.len(),
+                    tw.window.inner_size().width as usize,
+                    self.scale_factor,
+                    None,
+                );
+                let max_x = self.drag_max_x(target_wid, layout.tab_width as f32);
+                let dragged_x =
+                    ((local_x - mouse_offset) as f32).clamp(0.0, max_x);
+                self.drag_visual_x = Some((target_wid, dragged_x));
+
+                // Suppress the stale WM_LBUTTONUP that the OS modal move
+                // loop may deliver after ReleaseCapture.
+                self.merge_drag_suppress_release = true;
+
+                // Chrome-style vertical detach magnetism: after a merge,
+                // add extra Y tolerance to the tear-off check so the cursor
+                // needs to travel further before tearing off again. This
+                // prevents immediate re-tear-off when the cursor was near
+                // the bottom of the tab bar during merge.
+                // Chrome uses kVerticalDetachMagnetism = 15 DIPs.
+                self.tear_off_magnetism = 15.0 * sf;
                 log("merge: seamless drag active in target window");
             }
         } else {
@@ -418,135 +528,26 @@ impl App {
         }
     }
 
-    /// Find a merge target using the proposed window rect from `WM_MOVING`.
+    /// Compute the grab offset for a single-tab window drag.
     ///
-    /// The proposed rect is where the OS was about to place the torn-off window
-    /// at the moment `WM_MOVING` detected overlap. Uses rect-to-rect tab bar
-    /// overlap — the same logic as `find_merge_target_by_overlap` but with the
-    /// proposed position instead of the current (snapped-back) position.
+    /// Returns `(grab_x, grab_y)`: the cursor-to-window-origin offset
+    /// using DWM visible frame bounds for accuracy.
     #[cfg(target_os = "windows")]
-    fn find_merge_target_by_proposed_rect(
-        &self,
-        exclude: WindowId,
-        prop_left: i32,
-        prop_top: i32,
-        prop_right: i32,
-        tab_bar_h: f64,
-        controls_w: f64,
-    ) -> Option<(WindowId, f64)> {
-        use crate::log;
-
-        let torn_bar_top = prop_top as f64;
-        let torn_bar_bot = prop_top as f64 + tab_bar_h;
-
-        for (&wid, tw) in &self.windows {
-            if wid == exclude {
-                continue;
-            }
-            let (wx, wy, wr) = if let Some((l, t, r, _)) =
-                crate::platform_windows::visible_frame_bounds(&tw.window)
-            {
-                (l as f64, t as f64, r as f64)
-            } else {
-                let p = match tw.window.outer_position() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let s = tw.window.inner_size();
-                (p.x as f64, p.y as f64, p.x as f64 + s.width as f64)
-            };
-
-            // Strict overlap — matches the WM_MOVING check that triggered this.
-            let tgt_bar_top = wy;
-            let tgt_bar_bot = wy + tab_bar_h;
-            let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
-
-            let tgt_right = wr - controls_w;
-            let x_overlap = (prop_right as f64) > wx && (prop_left as f64) < tgt_right;
-
-            log(&format!(
-                "merge-check(proposed): candidate {wid:?} visible=({},{},{}), \
-                 y_overlap={y_overlap} x_overlap={x_overlap}",
-                wx as i32, wy as i32, wr as i32,
-            ));
-
-            if y_overlap && x_overlap {
-                let ol = (prop_left as f64).max(wx);
-                let or_ = (prop_right as f64).min(tgt_right);
-                let center_x = f64::midpoint(ol, or_);
-                return Some((wid, center_x));
-            }
-        }
-        None
-    }
-
-    /// Find a merge target using window-to-window tab bar overlap.
-    ///
-    /// Used when the drag ended normally (user released mouse) without
-    /// `WM_MOVING` triggering. Checks if the torn-off window's tab bar
-    /// overlaps any other window's tab bar.
-    #[cfg(target_os = "windows")]
-    fn find_merge_target_by_overlap(
-        &self,
-        torn_wid: WindowId,
-        tab_bar_h: f64,
-        controls_w: f64,
-    ) -> Option<(WindowId, f64)> {
-        use crate::log;
-
-        let torn_bounds = self.windows.get(&torn_wid).and_then(|tw| {
-            crate::platform_windows::visible_frame_bounds(&tw.window).or_else(|| {
-                let p = tw.window.outer_position().ok()?;
-                let s = tw.window.inner_size();
-                Some((p.x, p.y, p.x + s.width as i32, p.y + s.height as i32))
-            })
-        });
-        let (tl, tt, tr, _tb) = torn_bounds?;
-        log(&format!(
-            "merge-check(overlap): torn window visible=({tl},{tt},{tr})"
-        ));
-
-        for (&wid, tw) in &self.windows {
-            if wid == torn_wid {
-                continue;
-            }
-            let (wx, wy, wr) = if let Some((l, t, r, _)) =
-                crate::platform_windows::visible_frame_bounds(&tw.window)
-            {
-                (l as f64, t as f64, r as f64)
-            } else {
-                let p = match tw.window.outer_position() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let s = tw.window.inner_size();
-                (p.x as f64, p.y as f64, p.x as f64 + s.width as f64)
-            };
-
-            let torn_bar_top = tt as f64;
-            let torn_bar_bot = tt as f64 + tab_bar_h;
-            // Generous vertical tolerance: allow 1 tab bar height of slack
-            // so side-approach merges work at slightly different Y positions.
-            let tgt_bar_top = wy - tab_bar_h;
-            let tgt_bar_bot = wy + tab_bar_h * 2.0;
-            let y_overlap = torn_bar_top < tgt_bar_bot && torn_bar_bot > tgt_bar_top;
-
-            let tgt_right = wr - controls_w;
-            let x_overlap = (tr as f64) > wx && (tl as f64) < tgt_right;
-
-            log(&format!(
-                "merge-check(overlap): candidate {wid:?} visible=({},{},{}), \
-                 y_overlap={y_overlap} x_overlap={x_overlap}",
-                wx as i32, wy as i32, wr as i32,
-            ));
-
-            if y_overlap && x_overlap {
-                let ol = (tl as f64).max(wx);
-                let or_ = (tr as f64).min(tgt_right);
-                let center_x = f64::midpoint(ol, or_);
-                return Some((wid, center_x));
-            }
-        }
-        None
+    pub(super) fn compute_single_tab_grab_offset(&self, wid: WindowId) -> (i32, i32) {
+        let (sx, sy) = crate::platform_windows::cursor_screen_pos();
+        let (wl, wt) = self
+            .windows
+            .get(&wid)
+            .and_then(|tw| crate::platform_windows::visible_frame_bounds(&tw.window))
+            .map_or_else(
+                || {
+                    self.windows
+                        .get(&wid)
+                        .and_then(|tw| tw.window.outer_position().ok())
+                        .map_or((0, 0), |p| (p.x, p.y))
+                },
+                |(l, t, _, _)| (l, t),
+            );
+        (sx - wl, sy - wt)
     }
 }

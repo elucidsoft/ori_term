@@ -250,7 +250,7 @@ impl App {
                                 // Single click: start window drag
                                 self.last_click_time = Some(now);
                                 self.last_click_window = Some(window_id);
-                                self.start_window_drag(window_id, pos);
+                                self.start_window_drag(window_id);
                             }
                         }
                         TabBarHit::Tab(idx) => {
@@ -281,6 +281,15 @@ impl App {
                 }
             }
             ElementState::Released => {
+                // After a merge-during-drag, the OS modal move loop may
+                // deliver a stale WM_LBUTTONUP. Suppress it so the seamless
+                // drag continues.
+                #[cfg(target_os = "windows")]
+                if self.merge_drag_suppress_release {
+                    self.merge_drag_suppress_release = false;
+                    return;
+                }
+
                 // Finalize selection and auto-copy
                 if self.left_mouse_down {
                     self.left_mouse_down = false;
@@ -307,6 +316,7 @@ impl App {
                     self.drag_visual_x = None;
                     self.tab_anim_offsets.remove(&drag.source_window);
                     self.tab_bar_dirty = true;
+                    self.tear_off_magnetism = 0.0;
                     if let Some(tw) = self.windows.get(&drag.source_window) {
                         tw.window.request_redraw();
                     }

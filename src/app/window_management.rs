@@ -26,7 +26,7 @@ impl App {
     /// Start an OS-native window drag. On Windows with snap support, the OS
     /// handles dragging via `HTCAPTION` so this is only a fallback. On
     /// Linux/macOS the compositor handles the move (required on Wayland).
-    pub(super) fn start_window_drag(&self, window_id: WindowId, _cursor: PhysicalPosition<f64>) {
+    pub(super) fn start_window_drag(&self, window_id: WindowId) {
         if let Some(tw) = self.windows.get(&window_id) {
             let _ = tw.window.drag_window();
         }

@@ -237,12 +237,15 @@ impl App {
                         // Windows snap (Aero Snap, right-click snap menu) works.
                         #[cfg(target_os = "windows")]
                         {
-                            self.setup_merge_detection(source_wid);
-                            self.torn_off_pending =
-                                Some((source_wid, tab_id, mouse_off));
+                            let grab_offset = self.compute_single_tab_grab_offset(source_wid);
+                            self.drag = None;
+                            self.begin_os_tab_drag(source_wid, tab_id, mouse_off, grab_offset, 0);
                         }
-                        self.drag = None;
-                        self.start_window_drag(source_wid, position);
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            self.drag = None;
+                            self.start_window_drag(source_wid);
+                        }
                         log(&format!(
                             "drag: single tab -> OS window drag, torn_off_pending={source_wid:?}"
                         ));
@@ -266,31 +269,59 @@ impl App {
                 let x_max = window_w - controls_w;
                 let y = position.y;
                 let x = position.x;
-                let outside_y = if y < 0.0 {
+                // Chrome-style magnetism: after a merge, extra Y tolerance
+                // prevents immediate re-tear-off when the cursor was near
+                // the bottom of the tab bar.
+                let effective_bar_h = tab_bar_h + self.tear_off_magnetism;
+
+                // Downward: distance below the effective tab bar boundary.
+                let outside_down = (y - effective_bar_h).max(0.0);
+
+                // Upward: on a borderless window the cursor is clamped to
+                // y >= 0 by the screen edge, so negative-Y detection alone
+                // is unreliable. Fall back to Y displacement from the drag
+                // origin when the cursor is in the top portion of the bar.
+                let outside_up = if y < 0.0 {
                     -y
                 } else {
-                    (y - tab_bar_h).max(0.0)
+                    let origin_y =
+                        self.drag.as_ref().map_or(y, |d| d.origin.y);
+                    let disp = (origin_y - y).max(0.0);
+                    if y < tab_bar_h * 0.5 { disp } else { 0.0 }
                 };
+
+                let outside_y = outside_up.max(outside_down);
                 let outside_x = if x < 0.0 { -x } else { (x - x_max).max(0.0) };
                 let outside = outside_y.max(outside_x);
-                if outside >= TEAR_OFF_THRESHOLD {
+                // Upward uses a lower threshold because the cursor range is
+                // physically limited (can't go above screen top). Chrome uses
+                // kVerticalDetachMagnetism = 15 DIPs; we use half the normal
+                // threshold for the same reason.
+                let threshold = if outside_up > outside_down && outside_up > outside_x {
+                    TEAR_OFF_THRESHOLD * 0.5
+                } else {
+                    TEAR_OFF_THRESHOLD
+                };
+                if outside >= threshold {
                     log("drag: tearing off!");
-                    self.tear_off_tab(tab_id, source_wid, position, event_loop);
-                    // Hand the new window to OS-native drag so Windows snap works.
-                    let new_wid = self.drag.as_ref().map(|d| d.source_window);
-                    self.drag = None;
-                    self.drag_visual_x = None;
-                    self.tab_anim_offsets.remove(&source_wid);
-                    if let Some(wid) = new_wid {
+                    #[allow(unused_variables, reason = "grab_offset used only on Windows")]
+                    if let Some((new_wid, grab_offset)) =
+                        self.tear_off_tab(tab_id, source_wid, event_loop)
+                    {
+                        self.drag = None;
+                        self.drag_visual_x = None;
+                        self.tear_off_magnetism = 0.0;
+                        self.tab_anim_offsets.remove(&source_wid);
                         #[cfg(target_os = "windows")]
                         {
-                            self.setup_merge_detection(wid);
-                            self.torn_off_pending =
-                                Some((wid, tab_id, mouse_off));
+                            self.begin_os_tab_drag(new_wid, tab_id, mouse_off, grab_offset, 5);
                         }
-                        self.start_window_drag(wid, position);
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            self.start_window_drag(new_wid);
+                        }
                         log(&format!(
-                            "drag: tear-off -> OS window drag, torn_off_pending={wid:?}"
+                            "drag: tear-off -> OS window drag, torn_off_pending={new_wid:?}"
                         ));
                     }
                 } else {
