@@ -4,9 +4,9 @@
 //! tab stop management. All movement is clamped to grid bounds and
 //! respects the scroll region where applicable.
 
+use crate::cell::Cell;
 use crate::index::Column;
 
-use super::row::Row;
 use super::Grid;
 
 /// Tab clear mode for TBC (Tabulation Clear).
@@ -173,8 +173,8 @@ impl Grid {
     /// DECRC: restore cursor from saved state, or reset to origin if
     /// nothing was saved.
     pub fn restore_cursor(&mut self) {
-        if let Some(saved) = self.saved_cursor.clone() {
-            self.cursor = saved;
+        if let Some(saved) = &self.saved_cursor {
+            self.cursor = saved.clone();
         } else {
             self.cursor = super::cursor::Cursor::new();
         }
@@ -183,39 +183,39 @@ impl Grid {
     /// Scroll the scroll region up by `count` lines.
     ///
     /// Top rows of the region are lost (scrollback not yet implemented).
-    /// Blank rows appear at the bottom of the region.
+    /// Blank rows appear at the bottom of the region. Uses O(1) rotation
+    /// to reuse existing row allocations.
     fn scroll_region_up(&mut self, count: usize) {
         let top = self.scroll_region.start;
         let bottom = self.scroll_region.end;
         let count = count.min(bottom - top);
+        let template = Cell::default();
 
-        // Remove `count` rows from the top of the region.
-        for _ in 0..count {
-            self.rows.remove(top);
-        }
+        // Rotate departing top rows to the bottom of the region.
+        self.rows[top..bottom].rotate_left(count);
 
-        // Insert `count` blank rows at the bottom of the region.
-        for _ in 0..count {
-            self.rows.insert(bottom - 1, Row::new(self.cols));
+        // Reset the now-bottom rows (they held the old top content).
+        for i in (bottom - count)..bottom {
+            self.rows[i].reset(self.cols, &template);
         }
     }
 
     /// Scroll the scroll region down by `count` lines.
     ///
     /// Bottom rows of the region are lost. Blank rows appear at the top.
+    /// Uses O(1) rotation to reuse existing row allocations.
     fn scroll_region_down(&mut self, count: usize) {
         let top = self.scroll_region.start;
         let bottom = self.scroll_region.end;
         let count = count.min(bottom - top);
+        let template = Cell::default();
 
-        // Remove `count` rows from the bottom of the region.
-        for _ in 0..count {
-            self.rows.remove(bottom - 1);
-        }
+        // Rotate departing bottom rows to the top of the region.
+        self.rows[top..bottom].rotate_right(count);
 
-        // Insert `count` blank rows at the top of the region.
-        for _ in 0..count {
-            self.rows.insert(top, Row::new(self.cols));
+        // Reset the now-top rows (they held the old bottom content).
+        for i in top..top + count {
+            self.rows[i].reset(self.cols, &template);
         }
     }
 }

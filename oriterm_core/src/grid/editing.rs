@@ -99,17 +99,19 @@ impl Grid {
 
         let count = count.min(cols - col);
         let row = &mut self.rows[line];
+        let cells = row.as_mut_slice();
 
-        // Shift cells right by count.
+        // Shift cells right by swapping (no allocation).
         for i in (col + count..cols).rev() {
-            let src = row[Column(i - count)].clone();
-            row[Column(i)] = src;
+            cells.swap(i, i - count);
         }
 
-        // Fill the gap with blank template cells.
-        for i in col..col + count {
-            row[Column(i)].reset(&template);
+        // Reset the gap cells in-place.
+        for cell in &mut cells[col..col + count] {
+            cell.reset(&template);
         }
+
+        row.recalculate_occ();
     }
 
     /// Delete `count` cells at the cursor, shifting remaining cells left.
@@ -127,17 +129,19 @@ impl Grid {
 
         let count = count.min(cols - col);
         let row = &mut self.rows[line];
+        let cells = row.as_mut_slice();
 
-        // Shift cells left by count.
+        // Shift cells left by swapping (no allocation).
         for i in col..cols - count {
-            let src = row[Column(i + count)].clone();
-            row[Column(i)] = src;
+            cells.swap(i, i + count);
         }
 
-        // Fill the vacated right side with blanks.
-        for i in cols - count..cols {
-            row[Column(i)].reset(&template);
+        // Reset the vacated right cells in-place.
+        for cell in &mut cells[cols - count..cols] {
+            cell.reset(&template);
         }
+
+        row.recalculate_occ();
     }
 
     /// Erase part or all of the display.
@@ -178,8 +182,13 @@ impl Grid {
         let cols = self.cols;
         let template = self.cursor.template.clone();
 
+        debug_assert!(
+            mode != EraseMode::Scrollback,
+            "Scrollback mode not applicable to erase_line"
+        );
+
         match mode {
-            EraseMode::Below | EraseMode::Scrollback => {
+            EraseMode::Below => {
                 for i in col..cols {
                     self.rows[line][Column(i)].reset(&template);
                 }
@@ -192,6 +201,9 @@ impl Grid {
             EraseMode::All => {
                 self.rows[line].reset(cols, &template);
             }
+            // Scrollback clearing has no meaning at the line level (CSI 3 K
+            // doesn't exist in xterm/ECMA-48). Treat as no-op in release builds.
+            EraseMode::Scrollback => {}
         }
     }
 

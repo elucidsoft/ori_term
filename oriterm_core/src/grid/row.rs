@@ -65,6 +65,11 @@ impl Row {
         self.occ = self.occ.min(start);
     }
 
+    /// Mutable access to the inner cell slice.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [Cell] {
+        &mut self.inner
+    }
+
     /// Write a cell at the given column, updating occupancy.
     pub fn append(&mut self, col: Column, cell: &Cell) {
         let idx = col.0;
@@ -77,7 +82,7 @@ impl Row {
     }
 
     /// Recalculate occupancy by scanning from the end.
-    fn recalculate_occ(&mut self) {
+    pub(crate) fn recalculate_occ(&mut self) {
         self.occ = self
             .inner
             .iter()

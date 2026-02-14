@@ -106,12 +106,20 @@ impl Index<Line> for Grid {
     type Output = Row;
 
     fn index(&self, line: Line) -> &Row {
+        debug_assert!(
+            line.0 >= 0,
+            "negative Line index {line} used on Grid without scrollback"
+        );
         &self.rows[line.0 as usize]
     }
 }
 
 impl IndexMut<Line> for Grid {
     fn index_mut(&mut self, line: Line) -> &mut Row {
+        debug_assert!(
+            line.0 >= 0,
+            "negative Line index {line} used on Grid without scrollback"
+        );
         &mut self.rows[line.0 as usize]
     }
 }
