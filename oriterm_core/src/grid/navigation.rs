@@ -405,4 +405,239 @@ mod tests {
         assert_eq!(grid.cursor().line(), 10);
         assert_eq!(grid.cursor().col(), Column(42));
     }
+
+    // --- Additional tests from reference repo gap analysis ---
+
+    #[test]
+    fn move_backward_clamps_to_zero() {
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().set_col(Column(3));
+        grid.move_backward(100);
+        assert_eq!(grid.cursor().col(), Column(0));
+    }
+
+    #[test]
+    fn move_to_clamps_out_of_bounds() {
+        let mut grid = Grid::new(24, 80);
+        grid.move_to(999, Column(999));
+        assert_eq!(grid.cursor().line(), 23);
+        assert_eq!(grid.cursor().col(), Column(79));
+    }
+
+    #[test]
+    fn move_to_column_clamps_to_last() {
+        let mut grid = Grid::new(24, 80);
+        grid.move_to_column(Column(999));
+        assert_eq!(grid.cursor().col(), Column(79));
+    }
+
+    #[test]
+    fn move_to_line_clamps_to_last() {
+        let mut grid = Grid::new(24, 80);
+        grid.move_to_line(999);
+        assert_eq!(grid.cursor().line(), 23);
+    }
+
+    #[test]
+    fn next_line_combines_cr_and_lf() {
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().set_line(5);
+        grid.cursor_mut().set_col(Column(40));
+        grid.next_line();
+        assert_eq!(grid.cursor().line(), 6);
+        assert_eq!(grid.cursor().col(), Column(0));
+    }
+
+    #[test]
+    fn linefeed_at_last_line_outside_scroll_region_is_noop() {
+        let mut grid = Grid::new(5, 10);
+        grid.scroll_region = 0..3;
+        grid.cursor_mut().set_line(4);
+        grid.linefeed();
+        // Cursor at last line, outside scroll region bottom: no movement.
+        assert_eq!(grid.cursor().line(), 4);
+    }
+
+    #[test]
+    fn reverse_index_in_middle_moves_up() {
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().set_line(5);
+        grid.reverse_index();
+        assert_eq!(grid.cursor().line(), 4);
+    }
+
+    #[test]
+    fn reverse_index_at_line_zero_outside_scroll_region_is_noop() {
+        let mut grid = Grid::new(5, 10);
+        grid.scroll_region = 2..5;
+        grid.cursor_mut().set_line(0);
+        grid.reverse_index();
+        // Line 0 is outside scroll region; already at 0, can't go further.
+        assert_eq!(grid.cursor().line(), 0);
+    }
+
+    #[test]
+    fn tab_from_col_zero() {
+        let mut grid = Grid::new(24, 80);
+        // Col 0 is a tab stop; next stop is at col 8.
+        grid.tab();
+        assert_eq!(grid.cursor().col(), Column(8));
+    }
+
+    #[test]
+    fn tab_backward_at_col_zero_stays() {
+        let mut grid = Grid::new(24, 80);
+        grid.tab_backward();
+        assert_eq!(grid.cursor().col(), Column(0));
+    }
+
+    #[test]
+    fn tab_after_clearing_all_stops_goes_to_end() {
+        let mut grid = Grid::new(24, 80);
+        grid.clear_tab_stop(TabClearMode::All);
+        grid.cursor_mut().set_col(Column(5));
+        grid.tab();
+        // No tab stops anywhere: go to last column.
+        assert_eq!(grid.cursor().col(), Column(79));
+    }
+
+    #[test]
+    fn restore_cursor_without_save_resets_to_origin() {
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().set_line(10);
+        grid.cursor_mut().set_col(Column(40));
+        // No save_cursor() call.
+        grid.restore_cursor();
+        assert_eq!(grid.cursor().line(), 0);
+        assert_eq!(grid.cursor().col(), Column(0));
+    }
+
+    #[test]
+    fn scroll_region_up_preserves_content_outside() {
+        let mut grid = Grid::new(5, 10);
+        // Write identifiable chars on each line.
+        for line in 0..5 {
+            grid.cursor_mut().set_line(line);
+            grid.cursor_mut().set_col(Column(0));
+            grid.put_char((b'A' + line as u8) as char);
+        }
+        // Set scroll region to lines 1..4 (middle three lines).
+        grid.scroll_region = 1..4;
+        grid.cursor_mut().set_line(3);
+        // Linefeed at bottom of scroll region triggers scroll up.
+        grid.linefeed();
+
+        // Line 0 ('A') should be untouched.
+        assert_eq!(grid[Line(0)][Column(0)].ch, 'A');
+        // Line 4 ('E') should be untouched.
+        assert_eq!(grid[Line(4)][Column(0)].ch, 'E');
+        // Inside region: line 1 now has what was line 2 ('C').
+        assert_eq!(grid[Line(1)][Column(0)].ch, 'C');
+        // Line 2 now has what was line 3 ('D').
+        assert_eq!(grid[Line(2)][Column(0)].ch, 'D');
+        // Line 3 is the new blank row.
+        assert!(grid[Line(3)][Column(0)].is_empty());
+    }
+
+    #[test]
+    fn scroll_region_down_preserves_content_outside() {
+        let mut grid = Grid::new(5, 10);
+        for line in 0..5 {
+            grid.cursor_mut().set_line(line);
+            grid.cursor_mut().set_col(Column(0));
+            grid.put_char((b'A' + line as u8) as char);
+        }
+        // Set scroll region to lines 1..4.
+        grid.scroll_region = 1..4;
+        grid.cursor_mut().set_line(1);
+        // Reverse index at top of scroll region triggers scroll down.
+        grid.reverse_index();
+
+        // Line 0 ('A') untouched.
+        assert_eq!(grid[Line(0)][Column(0)].ch, 'A');
+        // Line 4 ('E') untouched.
+        assert_eq!(grid[Line(4)][Column(0)].ch, 'E');
+        // Line 1 is the new blank row (inserted at top of region).
+        assert!(grid[Line(1)][Column(0)].is_empty());
+        // Line 2 now has what was line 1 ('B').
+        assert_eq!(grid[Line(2)][Column(0)].ch, 'B');
+        // Line 3 now has what was line 2 ('C').
+        assert_eq!(grid[Line(3)][Column(0)].ch, 'C');
+    }
+
+    #[test]
+    fn scroll_region_fill_uses_bce_background() {
+        use vte::ansi::Color;
+        let mut grid = Grid::new(3, 10);
+        grid.put_char('A');
+        grid.cursor_mut().set_line(2);
+        grid.cursor_mut().set_col(Column(0));
+        grid.cursor_mut().template.bg = Color::Indexed(4);
+        // Linefeed at bottom triggers scroll up with BCE.
+        grid.linefeed();
+        // The new bottom row should have the cursor's bg color.
+        assert_eq!(grid[Line(2)][Column(0)].bg, Color::Indexed(4));
+        assert_eq!(grid[Line(2)][Column(9)].bg, Color::Indexed(4));
+    }
+
+    #[test]
+    fn move_up_clamped_to_scroll_region_top() {
+        let mut grid = Grid::new(10, 80);
+        grid.scroll_region = 3..8;
+        grid.cursor_mut().set_line(5);
+        grid.move_up(100);
+        assert_eq!(grid.cursor().line(), 3);
+    }
+
+    #[test]
+    fn move_down_clamped_to_scroll_region_bottom() {
+        let mut grid = Grid::new(10, 80);
+        grid.scroll_region = 3..8;
+        grid.cursor_mut().set_line(5);
+        grid.move_down(100);
+        // Clamped to scroll_region.end - 1.
+        assert_eq!(grid.cursor().line(), 7);
+    }
+
+    #[test]
+    fn move_up_outside_scroll_region_clamps_to_zero() {
+        let mut grid = Grid::new(10, 80);
+        grid.scroll_region = 3..8;
+        // Cursor outside scroll region (line 1).
+        grid.cursor_mut().set_line(1);
+        grid.move_up(100);
+        assert_eq!(grid.cursor().line(), 0);
+    }
+
+    #[test]
+    fn move_down_outside_scroll_region_clamps_to_last() {
+        let mut grid = Grid::new(10, 80);
+        grid.scroll_region = 3..8;
+        // Cursor outside scroll region (line 9).
+        grid.cursor_mut().set_line(9);
+        grid.move_down(100);
+        assert_eq!(grid.cursor().line(), 9);
+    }
+
+    #[test]
+    fn save_cursor_preserves_template() {
+        use vte::ansi::Color;
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().set_line(3);
+        grid.cursor_mut().set_col(Column(7));
+        grid.cursor_mut().template.fg = Color::Indexed(1);
+        grid.cursor_mut().template.flags = crate::cell::CellFlags::BOLD;
+        grid.save_cursor();
+
+        // Change cursor state.
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().template.fg = Color::Named(vte::ansi::NamedColor::Foreground);
+        grid.cursor_mut().template.flags = crate::cell::CellFlags::empty();
+
+        grid.restore_cursor();
+        assert_eq!(grid.cursor().line(), 3);
+        assert_eq!(grid.cursor().col(), Column(7));
+        assert_eq!(grid.cursor().template.fg, Color::Indexed(1));
+        assert!(grid.cursor().template.flags.contains(crate::cell::CellFlags::BOLD));
+    }
 }

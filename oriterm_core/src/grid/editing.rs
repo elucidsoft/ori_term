@@ -39,6 +39,13 @@ impl Grid {
         let width = UnicodeWidthChar::width(ch).unwrap_or(1);
         let cols = self.cols;
 
+        // Wide char can never fit in this terminal width — skip it.
+        // Without this guard, a width-2 char on a 1-column grid would
+        // loop forever: wrap → col 0 → can't fit → wrap → col 0 → …
+        if width > cols {
+            return;
+        }
+
         loop {
             let line = self.cursor.line();
             let col = self.cursor.col().0;
@@ -62,15 +69,18 @@ impl Grid {
             // Clear any wide char pair that we're overwriting.
             self.clear_wide_char_at(line, col);
 
-            // Clone the template before the mutable row borrow. The Arc
-            // clone for extra is O(1) (refcount bump, no heap allocation).
-            let template = self.cursor.template.clone();
+            // Extract template fields before mutable row borrow. `rows` and
+            // `cursor` are disjoint Grid fields, so this avoids a full Cell clone.
+            let tmpl_fg = self.cursor.template.fg;
+            let tmpl_bg = self.cursor.template.bg;
+            let tmpl_flags = self.cursor.template.flags;
+            let tmpl_extra = self.cursor.template.extra.clone();
             let cell = &mut self.rows[line][Column(col)];
             cell.ch = ch;
-            cell.fg = template.fg;
-            cell.bg = template.bg;
-            cell.flags = template.flags;
-            cell.extra.clone_from(&template.extra);
+            cell.fg = tmpl_fg;
+            cell.bg = tmpl_bg;
+            cell.flags = tmpl_flags;
+            cell.extra = tmpl_extra;
 
             if width == 2 {
                 cell.flags |= CellFlags::WIDE_CHAR;
@@ -80,8 +90,8 @@ impl Grid {
                     self.clear_wide_char_at(line, col + 1);
                     let spacer = &mut self.rows[line][Column(col + 1)];
                     spacer.ch = ' ';
-                    spacer.fg = template.fg;
-                    spacer.bg = template.bg;
+                    spacer.fg = tmpl_fg;
+                    spacer.bg = tmpl_bg;
                     spacer.flags = CellFlags::WIDE_CHAR_SPACER;
                     spacer.extra = None;
                 }
@@ -166,8 +176,9 @@ impl Grid {
             cell.reset(&template);
         }
 
-        // Cells shifted left and right edge cleared: existing occ is still a
-        // valid upper bound (may be loose, but no consumer needs a tight value).
+        // Shift-left moves content toward col 0 (doesn't increase occ).
+        // Right-edge fill at [cols-count..cols]: bump occ to cover it.
+        row.set_occ(cols);
     }
 
     /// Erase part or all of the display.
@@ -247,9 +258,16 @@ impl Grid {
                 for cell in &mut cells[..end] {
                     cell.reset(template);
                 }
-                // Prefix erased: existing occ is still a valid upper bound
-                // (content only removed from the left, not shifted right).
-                // Both Alacritty and Ghostty leave the bound loose here.
+                if template.is_empty() {
+                    // Cells [0..end] are now empty. Only cells beyond end
+                    // may be dirty, so if occ was within the erased range
+                    // all dirty cells are gone.
+                    if row.occ() <= end {
+                        row.set_occ(0);
+                    }
+                } else {
+                    row.set_occ(row.occ().max(end));
+                }
             }
             EraseMode::All => {
                 self.rows[line].reset(cols, template);
@@ -280,7 +298,12 @@ impl Grid {
         for cell in &mut cells[col..end] {
             cell.reset(&template);
         }
-        // Cells replaced in-place: existing occ is still a valid upper bound.
+        // BCE template has a colored bg — the erased cells are dirty.
+        // Default template produces truly empty cells, so existing occ
+        // remains a valid upper bound (we only cleared, didn't extend).
+        if !template.is_empty() {
+            row.set_occ(row.occ().max(end));
+        }
     }
 
     /// Clear any wide char pair at the given position.
@@ -526,5 +549,313 @@ mod tests {
         assert!(grid[line][Column(2)].is_empty());
         assert!(grid[line][Column(6)].is_empty());
         assert_eq!(grid[line][Column(7)].ch, 'H');
+    }
+
+    #[test]
+    fn erase_chars_default_bg_does_not_inflate_occ() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        // occ is 10 after writing 10 chars.
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(5));
+        grid.erase_chars(3);
+        // Erased [5..8) with default bg. occ should stay at 10
+        // (cells beyond 8 are still dirty from the original write).
+        let line = crate::index::Line(0);
+        assert!(grid[line][Column(5)].is_empty());
+        assert!(grid[line][Column(7)].is_empty());
+        assert_eq!(grid[line][Column(8)].ch, 'I');
+    }
+
+    #[test]
+    fn wide_char_on_single_column_grid_does_not_hang() {
+        let mut grid = Grid::new(3, 1);
+        // Width-2 char can never fit in a 1-column grid. Must return
+        // immediately without writing or looping.
+        grid.put_char('好');
+        assert_eq!(grid.cursor().col(), Column(0));
+        assert!(grid[crate::index::Line(0)][Column(0)].is_empty());
+    }
+
+    // --- Additional tests from reference repo gap analysis ---
+
+    #[test]
+    fn put_char_inherits_template_attributes() {
+        use vte::ansi::Color;
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().template.fg = Color::Indexed(1);
+        grid.cursor_mut().template.bg = Color::Indexed(2);
+        grid.cursor_mut().template.flags = crate::cell::CellFlags::BOLD;
+        grid.put_char('A');
+
+        let cell = &grid[crate::index::Line(0)][Column(0)];
+        assert_eq!(cell.ch, 'A');
+        assert_eq!(cell.fg, Color::Indexed(1));
+        assert_eq!(cell.bg, Color::Indexed(2));
+        assert!(cell.flags.contains(crate::cell::CellFlags::BOLD));
+    }
+
+    #[test]
+    fn put_char_fills_row_and_wraps_to_next_line() {
+        let mut grid = Grid::new(3, 5);
+        for ch in "ABCDE".chars() {
+            grid.put_char(ch);
+        }
+        // After filling row, cursor is at col 5 (pending wrap).
+        assert_eq!(grid.cursor().col(), Column(5));
+        assert_eq!(grid.cursor().line(), 0);
+
+        // Writing another char triggers wrap to next line.
+        grid.put_char('F');
+        assert_eq!(grid.cursor().line(), 1);
+        assert_eq!(grid.cursor().col(), Column(1));
+        assert_eq!(grid[crate::index::Line(1)][Column(0)].ch, 'F');
+    }
+
+    #[test]
+    fn put_char_sequence_fills_correctly() {
+        let mut grid = Grid::new(24, 10);
+        for ch in "ABCDEFGHIJ".chars() {
+            grid.put_char(ch);
+        }
+        let line = crate::index::Line(0);
+        for (i, ch) in "ABCDEFGHIJ".chars().enumerate() {
+            assert_eq!(grid[line][Column(i)].ch, ch, "Column {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn insert_blank_at_end_of_line() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(9));
+        grid.insert_blank(1);
+        let line = crate::index::Line(0);
+        // Last cell should be blank, 'J' shifted off the edge.
+        assert!(grid[line][Column(9)].is_empty());
+        assert_eq!(grid[line][Column(8)].ch, 'I');
+    }
+
+    #[test]
+    fn insert_blank_count_exceeds_remaining() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(5));
+        grid.insert_blank(100);
+        let line = crate::index::Line(0);
+        assert_eq!(grid[line][Column(0)].ch, 'A');
+        assert_eq!(grid[line][Column(4)].ch, 'E');
+        for col in 5..10 {
+            assert!(grid[line][Column(col)].is_empty(), "Column {col} not empty");
+        }
+    }
+
+    #[test]
+    fn insert_blank_with_bce() {
+        use vte::ansi::Color;
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(2));
+        grid.cursor_mut().template.bg = Color::Indexed(3);
+        grid.insert_blank(2);
+        let line = crate::index::Line(0);
+        // Inserted blanks should have the BCE background.
+        assert_eq!(grid[line][Column(2)].bg, Color::Indexed(3));
+        assert_eq!(grid[line][Column(3)].bg, Color::Indexed(3));
+        assert_eq!(grid[line][Column(2)].ch, ' ');
+    }
+
+    #[test]
+    fn insert_blank_cursor_past_end_is_noop() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(10));
+        grid.insert_blank(5);
+        let line = crate::index::Line(0);
+        assert_eq!(grid[line][Column(9)].ch, 'J');
+    }
+
+    #[test]
+    fn delete_chars_at_end_of_line() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(9));
+        grid.delete_chars(1);
+        let line = crate::index::Line(0);
+        assert!(grid[line][Column(9)].is_empty());
+        assert_eq!(grid[line][Column(8)].ch, 'I');
+    }
+
+    #[test]
+    fn delete_chars_count_exceeds_remaining() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(5));
+        grid.delete_chars(100);
+        let line = crate::index::Line(0);
+        assert_eq!(grid[line][Column(4)].ch, 'E');
+        for col in 5..10 {
+            assert!(grid[line][Column(col)].is_empty(), "Column {col} not empty");
+        }
+    }
+
+    #[test]
+    fn delete_chars_with_bce() {
+        use vte::ansi::Color;
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(2));
+        grid.cursor_mut().template.bg = Color::Indexed(5);
+        grid.delete_chars(3);
+        let line = crate::index::Line(0);
+        // Shifted: col 2 now has 'F', col 3 has 'G', etc.
+        assert_eq!(grid[line][Column(2)].ch, 'F');
+        // Right edge filled with BCE cells.
+        assert_eq!(grid[line][Column(7)].bg, Color::Indexed(5));
+        assert_eq!(grid[line][Column(8)].bg, Color::Indexed(5));
+        assert_eq!(grid[line][Column(9)].bg, Color::Indexed(5));
+    }
+
+    #[test]
+    fn delete_chars_cursor_past_end_is_noop() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(10));
+        grid.delete_chars(5);
+        let line = crate::index::Line(0);
+        assert_eq!(grid[line][Column(9)].ch, 'J');
+    }
+
+    #[test]
+    fn erase_line_above() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(5));
+        grid.erase_line(EraseMode::Above);
+        let line = crate::index::Line(0);
+        // Cols 0..=5 should be erased.
+        for col in 0..=5 {
+            assert!(grid[line][Column(col)].is_empty(), "Column {col} not empty");
+        }
+        // Cols 6..9 untouched.
+        assert_eq!(grid[line][Column(6)].ch, 'G');
+        assert_eq!(grid[line][Column(9)].ch, 'J');
+    }
+
+    #[test]
+    fn erase_chars_past_end_of_line() {
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(7));
+        grid.erase_chars(100);
+        let line = crate::index::Line(0);
+        assert_eq!(grid[line][Column(6)].ch, 'G');
+        for col in 7..10 {
+            assert!(grid[line][Column(col)].is_empty(), "Column {col} not empty");
+        }
+    }
+
+    #[test]
+    fn erase_display_with_bce_background() {
+        use vte::ansi::Color;
+        let mut grid = Grid::new(3, 10);
+        for line in 0..3 {
+            grid.cursor_mut().set_line(line);
+            grid.cursor_mut().set_col(Column(0));
+            for _ in 0..10 {
+                grid.put_char('X');
+            }
+        }
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(0));
+        grid.cursor_mut().template.bg = Color::Indexed(6);
+        grid.erase_display(EraseMode::All);
+        // All cells should have the BCE background.
+        for line in 0..3 {
+            for col in 0..10 {
+                assert_eq!(
+                    grid[crate::index::Line(line as i32)][Column(col)].bg,
+                    Color::Indexed(6),
+                    "Cell ({line}, {col}) bg mismatch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn erase_display_below_at_last_line() {
+        let mut grid = grid_with_text(3, 10, "AAAAAAAAAA");
+        grid.cursor_mut().set_line(2);
+        grid.cursor_mut().set_col(Column(5));
+        grid.erase_display(EraseMode::Below);
+        // Only line 2 from col 5 should be erased (line 2 was empty anyway).
+        let line2 = crate::index::Line(2);
+        assert!(grid[line2][Column(5)].is_empty());
+        // Line 0 untouched.
+        assert_eq!(grid[crate::index::Line(0)][Column(0)].ch, 'A');
+    }
+
+    #[test]
+    fn erase_display_above_at_first_line() {
+        let mut grid = grid_with_text(3, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(5));
+        grid.erase_display(EraseMode::Above);
+        let line0 = crate::index::Line(0);
+        // Cols 0..=5 erased on line 0.
+        assert!(grid[line0][Column(0)].is_empty());
+        assert!(grid[line0][Column(5)].is_empty());
+        // Cols 6+ untouched.
+        assert_eq!(grid[line0][Column(6)].ch, 'G');
+    }
+
+    #[test]
+    fn wrap_flag_set_on_wrapped_line() {
+        let mut grid = Grid::new(3, 5);
+        for ch in "ABCDEF".chars() {
+            grid.put_char(ch);
+        }
+        // The last cell of line 0 should have the WRAP flag.
+        let line0 = crate::index::Line(0);
+        assert!(grid[line0][Column(4)]
+            .flags
+            .contains(crate::cell::CellFlags::WRAP));
+    }
+
+    #[test]
+    fn put_char_wide_spacer_inherits_template_bg() {
+        use vte::ansi::Color;
+        let mut grid = Grid::new(24, 80);
+        grid.cursor_mut().template.bg = Color::Indexed(3);
+        grid.put_char('好');
+        let line = crate::index::Line(0);
+        // Wide char cell gets template bg.
+        assert_eq!(grid[line][Column(0)].bg, Color::Indexed(3));
+        // Spacer also gets template bg.
+        assert_eq!(grid[line][Column(1)].bg, Color::Indexed(3));
+    }
+
+    #[test]
+    fn erase_chars_with_bce_background() {
+        use vte::ansi::Color;
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_col(Column(3));
+        grid.cursor_mut().template.bg = Color::Indexed(7);
+        grid.erase_chars(4);
+        let line = crate::index::Line(0);
+        // Erased cells [3..7) get BCE background.
+        for col in 3..7 {
+            assert_eq!(grid[line][Column(col)].bg, Color::Indexed(7));
+            assert_eq!(grid[line][Column(col)].ch, ' ');
+        }
+        // Surrounding cells untouched.
+        assert_eq!(grid[line][Column(2)].ch, 'C');
+        assert_eq!(grid[line][Column(7)].ch, 'H');
+    }
+
+    #[test]
+    fn erase_line_below_with_bce() {
+        use vte::ansi::Color;
+        let mut grid = grid_with_text(24, 10, "ABCDEFGHIJ");
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(5));
+        grid.cursor_mut().template.bg = Color::Indexed(2);
+        grid.erase_line(EraseMode::Below);
+        let line = crate::index::Line(0);
+        for col in 5..10 {
+            assert_eq!(grid[line][Column(col)].bg, Color::Indexed(2));
+        }
+        // Cols before cursor untouched.
+        assert_eq!(grid[line][Column(4)].ch, 'E');
     }
 }

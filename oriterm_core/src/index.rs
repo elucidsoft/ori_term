@@ -216,4 +216,37 @@ mod tests {
         assert_eq!(Direction::Left, Direction::Left);
         assert_ne!(Direction::Left, Direction::Right);
     }
+
+    // --- Additional tests from reference repo gap analysis ---
+
+    #[test]
+    fn point_default_is_origin() {
+        let p = Point::<Line>::default();
+        assert_eq!(p.line, Line(0));
+        assert_eq!(p.column, Column(0));
+    }
+
+    #[test]
+    fn line_ordering() {
+        assert!(Line(-1) < Line(0));
+        assert!(Line(0) < Line(1));
+        assert_eq!(Line(5).cmp(&Line(5)), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn column_ordering() {
+        assert!(Column(0) < Column(1));
+        assert!(Column(5) < Column(10));
+        assert_eq!(Column(5).cmp(&Column(5)), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn point_same_line_column_breaks_tie() {
+        let a = Point::new(Line(3), Column(5));
+        let b = Point::new(Line(3), Column(10));
+        let c = Point::new(Line(3), Column(5));
+        assert!(a < b);
+        assert_eq!(a, c);
+        assert!(b > a);
+    }
 }

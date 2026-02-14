@@ -31,9 +31,21 @@ impl Row {
     }
 
     /// Reset all cells to the template, resizing if needed.
+    ///
+    /// Only iterates `[0..occ]` when the template background matches existing
+    /// empty cells (the common case). When template bg differs (BCE), marks
+    /// the entire row dirty first so all cells get the new background.
     pub fn reset(&mut self, cols: usize, template: &Cell) {
-        self.inner.resize(cols, Cell::default());
-        for cell in &mut self.inner {
+        // If template bg differs from what empty cells currently contain,
+        // the entire row needs updating (BCE background change).
+        if !self.inner.is_empty()
+            && self.inner[self.inner.len() - 1].bg != template.bg
+        {
+            self.occ = self.inner.len();
+        }
+
+        self.inner.resize_with(cols, || template.clone());
+        for cell in &mut self.inner[..self.occ.min(cols)] {
             cell.reset(template);
         }
         self.occ = 0;
@@ -45,7 +57,7 @@ impl Row {
     }
 
     /// Occupancy upper bound (see `occ` field docs).
-    pub fn occ(&self) -> usize {
+    pub(crate) fn occ(&self) -> usize {
         self.occ
     }
 
@@ -70,12 +82,19 @@ impl Row {
     }
 
     /// Mutable access to the inner cell slice.
+    ///
+    /// # Occ contract
+    ///
+    /// Callers **must** maintain the occ invariant after mutation:
+    /// either call `clamp_occ` / `set_occ`, or verify that the
+    /// existing occ is still a valid upper bound.
     pub(crate) fn as_mut_slice(&mut self) -> &mut [Cell] {
         &mut self.inner
     }
 
     /// Write a cell at the given column, updating occupancy.
-    pub fn append(&mut self, col: Column, cell: &Cell) {
+    #[cfg(test)]
+    pub(crate) fn append(&mut self, col: Column, cell: &Cell) {
         let idx = col.0;
         if idx < self.inner.len() {
             self.inner[idx] = cell.clone();
@@ -204,5 +223,120 @@ mod tests {
         assert_eq!(row.occ(), 10);
         assert_eq!(row[Column(9)].ch, 'A');
         assert!(row[Column(10)].is_empty());
+    }
+
+    #[test]
+    fn reset_bce_across_consecutive_resets() {
+        use vte::ansi::Color;
+
+        let color1 = Color::Indexed(1);
+        let color2 = Color::Indexed(2);
+        let tmpl1 = Cell::from(color1);
+        let tmpl2 = Cell::from(color2);
+
+        let mut row = Row::new(10);
+
+        // First reset: bg=color1 → all cells get color1, occ drops to 0.
+        row.reset(10, &tmpl1);
+        assert_eq!(row.occ(), 0);
+        assert_eq!(row[Column(0)].bg, color1);
+        assert_eq!(row[Column(9)].bg, color1);
+
+        // Second reset with different bg: even though occ is 0, the BCE
+        // guard must detect the bg mismatch and repaint all cells.
+        row.reset(10, &tmpl2);
+        assert_eq!(row.occ(), 0);
+        assert_eq!(row[Column(0)].bg, color2);
+        assert_eq!(row[Column(9)].bg, color2);
+    }
+
+    // --- Additional tests from reference repo gap analysis ---
+
+    #[test]
+    fn reset_resizes_row_larger() {
+        let mut row = Row::new(10);
+        assert_eq!(row.cols(), 10);
+        row.reset(20, &Cell::default());
+        assert_eq!(row.cols(), 20);
+        assert_eq!(row.occ(), 0);
+    }
+
+    #[test]
+    fn reset_shrinks_row() {
+        let mut row = Row::new(20);
+        let mut cell = Cell::default();
+        cell.ch = 'A';
+        row.append(Column(15), &cell);
+        row.reset(10, &Cell::default());
+        assert_eq!(row.cols(), 10);
+        assert_eq!(row.occ(), 0);
+    }
+
+    #[test]
+    fn clear_range_full_row() {
+        let mut row = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'X';
+        for i in 0..10 {
+            row.append(Column(i), &cell);
+        }
+        row.clear_range(Column(0)..Column(10), &Cell::default());
+        for i in 0..10 {
+            assert!(row[Column(i)].is_empty(), "Column {i} not empty");
+        }
+    }
+
+    #[test]
+    fn clear_range_with_bce() {
+        use vte::ansi::Color;
+        let mut row = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'X';
+        for i in 0..10 {
+            row.append(Column(i), &cell);
+        }
+        let template = Cell::from(Color::Indexed(1));
+        row.clear_range(Column(3)..Column(7), &template);
+        assert_eq!(row[Column(3)].bg, Color::Indexed(1));
+        assert_eq!(row[Column(6)].bg, Color::Indexed(1));
+        assert_eq!(row[Column(3)].ch, ' ');
+        // Cells outside range untouched.
+        assert_eq!(row[Column(2)].ch, 'X');
+        assert_eq!(row[Column(7)].ch, 'X');
+    }
+
+    #[test]
+    fn truncate_at_col_zero_clears_entire_row() {
+        let mut row = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'X';
+        for i in 0..10 {
+            row.append(Column(i), &cell);
+        }
+        row.truncate(Column(0), &Cell::default());
+        assert_eq!(row.occ(), 0);
+        for i in 0..10 {
+            assert!(row[Column(i)].is_empty());
+        }
+    }
+
+    #[test]
+    fn append_empty_cell_does_not_bump_occ() {
+        let mut row = Row::new(10);
+        row.append(Column(5), &Cell::default());
+        assert_eq!(row.occ(), 0);
+    }
+
+    #[test]
+    fn row_equality() {
+        let row1 = Row::new(10);
+        let row2 = Row::new(10);
+        assert_eq!(row1, row2);
+
+        let mut row3 = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'A';
+        row3.append(Column(0), &cell);
+        assert_ne!(row1, row3);
     }
 }
