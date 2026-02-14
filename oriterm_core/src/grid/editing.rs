@@ -176,9 +176,12 @@ impl Grid {
             cell.reset(&template);
         }
 
-        // Shift-left moves content toward col 0 (doesn't increase occ).
-        // Right-edge fill at [cols-count..cols]: bump occ to cover it.
-        row.set_occ(cols);
+        if !template.is_empty() {
+            // BCE: fill cells at [cols-count..cols] are dirty.
+            row.set_occ(cols);
+        }
+        // else: Content shifted left; existing occ remains a valid upper
+        // bound. Fill cells are empty and don't extend the dirty range.
     }
 
     /// Erase part or all of the display.
