@@ -8,13 +8,12 @@ pub use terminal_state::TerminalState;
 pub use types::{CharsetState, Notification, PromptState, SpawnConfig, TabId, TermEvent};
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
 
 use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
-use vte::ansi::{CursorShape, KeyboardModes};
+use vte::ansi::CursorShape;
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::ColorConfig;
@@ -41,6 +40,10 @@ pub struct Tab {
     pub search: Option<SearchState>,
     /// True when an inactive tab received a bell — shows badge in tab bar.
     pub has_bell_badge: bool,
+    /// Grid content modified since last render. Lockless — only main thread
+    /// reads/writes (PTY thread sends events via `EventLoopProxy`, never
+    /// touches this flag directly).
+    grid_dirty: AtomicBool,
 }
 
 impl Tab {
@@ -126,6 +129,7 @@ impl Tab {
             selection: None,
             search: None,
             has_bell_badge: false,
+            grid_dirty: AtomicBool::new(true),
         })
     }
 
@@ -161,13 +165,6 @@ impl Tab {
         MutexGuard::map(self.terminal.lock(), |ts| ts.active_grid_mut())
     }
 
-    /// Lock the terminal and return a mapped guard to the active grid (mutable).
-    ///
-    /// Identical to `grid()` since `Mutex` always gives exclusive access.
-    pub fn grid_mut(&self) -> MappedMutexGuard<'_, Grid> {
-        MutexGuard::map(self.terminal.lock(), |ts| ts.active_grid_mut())
-    }
-
     // ── Copy-type property accessors ───────────────────────────────────
 
     /// Read the current terminal mode flags.
@@ -182,22 +179,12 @@ impl Tab {
 
     /// Check whether the grid content has been modified since last render.
     pub fn grid_dirty(&self) -> bool {
-        self.terminal.lock().grid_dirty
+        self.grid_dirty.load(Ordering::Relaxed)
     }
 
     /// Set the grid dirty flag.
     pub fn set_grid_dirty(&self, dirty: bool) {
-        self.terminal.lock().grid_dirty = dirty;
-    }
-
-    /// Read the bell start time (if bell is active).
-    pub fn bell_start(&self) -> Option<Instant> {
-        self.terminal.lock().bell_start
-    }
-
-    /// Read the keyboard mode stack.
-    pub fn keyboard_mode_stack(&self) -> Vec<KeyboardModes> {
-        self.terminal.lock().keyboard_mode_stack.clone()
+        self.grid_dirty.store(dirty, Ordering::Relaxed);
     }
 
     // ── Clone-type property accessors ──────────────────────────────────
@@ -211,48 +198,43 @@ impl Tab {
 
     /// Scroll up by `page_size` lines (into history).
     pub fn scroll_page_up(&self, page_size: usize) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         let max = grid.scrollback.len();
         grid.display_offset = (grid.display_offset + page_size).min(max);
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Scroll down by `page_size` lines (toward live).
     pub fn scroll_page_down(&self, page_size: usize) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         grid.display_offset = grid.display_offset.saturating_sub(page_size);
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Scroll to the top of scrollback history.
     pub fn scroll_to_top(&self) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         grid.display_offset = grid.scrollback.len();
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Scroll to the live (bottom) position.
     pub fn scroll_to_bottom(&self) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         grid.display_offset = 0;
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Scroll by `delta` lines: positive = up (into history), negative = down.
     pub fn scroll_lines(&self, delta: i32) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         if delta > 0 {
             let max = grid.scrollback.len();
             grid.display_offset = (grid.display_offset + delta as usize).min(max);
         } else {
             grid.display_offset = grid.display_offset.saturating_sub((-delta) as usize);
         }
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     // ── Selection operations ───────────────────────────────────────────
@@ -261,21 +243,21 @@ impl Tab {
     pub fn clear_selection(&mut self) {
         if self.selection.is_some() {
             self.selection = None;
-            self.terminal.lock().grid_dirty = true;
+            self.set_grid_dirty(true);
         }
     }
 
     /// Replace the current selection.
     pub fn set_selection(&mut self, sel: Selection) {
         self.selection = Some(sel);
-        self.terminal.lock().grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Update the end point of the current selection (drag tracking).
     pub fn update_selection_end(&mut self, end: SelectionPoint) {
         if let Some(ref mut sel) = self.selection {
             sel.end = end;
-            self.terminal.lock().grid_dirty = true;
+            self.set_grid_dirty(true);
         }
     }
 
@@ -283,8 +265,7 @@ impl Tab {
 
     /// Navigate to the previous shell prompt (OSC 133 marker) in scrollback.
     pub fn navigate_to_previous_prompt(&self) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         let sb_len = grid.scrollback.len();
         // Current top of viewport as scrollback index.
         let viewport_top_sb = sb_len.saturating_sub(grid.display_offset);
@@ -298,14 +279,13 @@ impl Tab {
         }
         if let Some(sb_idx) = target_sb {
             grid.display_offset = sb_len.saturating_sub(sb_idx);
-            term.grid_dirty = true;
+            self.set_grid_dirty(true);
         }
     }
 
     /// Navigate to the next shell prompt (OSC 133 marker) below the viewport.
     pub fn navigate_to_next_prompt(&self) {
-        let mut term = self.terminal.lock();
-        let grid = term.active_grid_mut();
+        let grid = &mut *self.grid();
         let sb_len = grid.scrollback.len();
         // Current bottom of viewport as absolute index.
         let viewport_bottom_sb = sb_len.saturating_sub(grid.display_offset) + grid.lines;
@@ -333,16 +313,28 @@ impl Tab {
             // No prompt below — scroll to live.
             grid.display_offset = 0;
         }
-        term.grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     // ── PTY I/O ────────────────────────────────────────────────────────
 
-    /// Process raw PTY output through both VTE parsers.
-    pub fn process_output(&mut self, data: &[u8]) {
-        self.terminal
-            .lock()
-            .process_output(data, &mut self.pty_writer);
+    /// Process raw PTY output and collect all side-effect data in one lock.
+    ///
+    /// Returns `(title_changed, bell_active, notifications)` so the caller
+    /// can act on them without re-locking.
+    pub fn process_output_batch(
+        &mut self,
+        data: &[u8],
+    ) -> (bool, bool, Vec<Notification>) {
+        let mut term = self.terminal.lock();
+        let old_title = term.effective_title();
+        term.process_output(data, &mut self.pty_writer);
+        let new_title = term.effective_title();
+        let bell_active = term.bell_start.is_some();
+        let notifications = term.drain_notifications();
+        drop(term);
+        self.set_grid_dirty(true);
+        (old_title != new_title, bell_active, notifications)
     }
 
     /// Write bytes to the PTY.
@@ -376,13 +368,6 @@ impl Tab {
         });
     }
 
-    // ── Notifications ──────────────────────────────────────────────────
-
-    /// Drain pending OSC 9/99/777 notifications, returning them to the caller.
-    pub fn drain_notifications(&self) -> Vec<Notification> {
-        self.terminal.lock().drain_notifications()
-    }
-
     // ── Color / cursor config ──────────────────────────────────────────
 
     /// Apply color scheme, overrides, and bold-is-bright in one call.
@@ -407,13 +392,13 @@ impl Tab {
     /// Open a new search session, replacing any existing one.
     pub fn open_search(&mut self) {
         self.search = Some(SearchState::new());
-        self.terminal.lock().grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Close the active search session.
     pub fn close_search(&mut self) {
         self.search = None;
-        self.terminal.lock().grid_dirty = true;
+        self.set_grid_dirty(true);
     }
 
     /// Update the search query. Handles the borrow-checker dance of
@@ -424,7 +409,7 @@ impl Tab {
             search.update_query(term.active_grid());
             drop(term);
             self.search = Some(search);
-            self.terminal.lock().grid_dirty = true;
+            self.set_grid_dirty(true);
         }
     }
 
@@ -435,14 +420,7 @@ impl Tab {
     ///
     /// Returns an owned `String` because the title data is behind a mutex.
     pub fn effective_title(&self) -> String {
-        let term = self.terminal.lock();
-        if term.has_explicit_title {
-            return term.title.clone();
-        }
-        if let Some(ref cwd) = term.cwd {
-            return short_path(cwd);
-        }
-        term.title.clone()
+        self.terminal.lock().effective_title()
     }
 }
 
@@ -527,40 +505,3 @@ fn derive_initial_title(id: TabId, shell_args: &[&str], is_wsl: bool) -> String 
     }
 }
 
-/// Shorten a path for tab bar display: `~` for home, last component otherwise.
-fn short_path(path: &str) -> String {
-    // Try to replace home directory with ~.
-    if let Ok(home) = std::env::var("HOME") {
-        if let Some(rest) = path.strip_prefix(&home) {
-            let relative = if rest.is_empty() {
-                ""
-            } else {
-                rest.trim_start_matches('/')
-            };
-            if relative.is_empty() {
-                return "~".to_owned();
-            }
-            return format!("~/{relative}");
-        }
-    }
-    #[cfg(target_os = "windows")]
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        if let Some(rest) = path.strip_prefix(&profile) {
-            let relative = if rest.is_empty() {
-                ""
-            } else {
-                rest.trim_start_matches('\\').trim_start_matches('/')
-            };
-            if relative.is_empty() {
-                return "~".to_owned();
-            }
-            return format!("~\\{relative}");
-        }
-    }
-    // Fall back to last path component.
-    Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
-        .to_owned()
-}

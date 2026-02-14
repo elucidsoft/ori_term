@@ -50,47 +50,43 @@ impl ApplicationHandler<TermEvent> for App {
 
                 self.cursor_blink_reset = Instant::now();
 
-                let old_title = self.tabs.get(&tab_id)
-                    .map(Tab::effective_title);
-                if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                    tab.process_output(&data);
-                }
-                let new_title = self.tabs.get(&tab_id)
-                    .map(Tab::effective_title);
-                if old_title != new_title {
+                // Single lock: process output, capture title change, bell, and
+                // notifications all at once.
+                let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                    return;
+                };
+                let (title_changed, bell_active, notifications) =
+                    tab.process_output_batch(&data);
+                if title_changed {
                     self.tab_bar_dirty = true;
                 }
 
-                // Process bell state: if this tab rang the bell and is NOT active,
-                // set the bell badge so the tab bar shows an indicator.
+                // Process bell state: if this tab rang the bell and is NOT
+                // active, set the bell badge so the tab bar shows an indicator.
                 let is_active = self
                     .window_containing_tab(tab_id)
                     .and_then(|wid| self.windows.get(&wid))
                     .is_some_and(|tw| tw.active_tab_id() == Some(tab_id));
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                    if tab.bell_start().is_some() && !is_active {
+                    if bell_active && !is_active {
                         tab.has_bell_badge = true;
                         self.tab_bar_dirty = true;
                     }
-                    // Active tab never needs a bell badge (user can see it).
                     if is_active && tab.has_bell_badge {
                         tab.has_bell_badge = false;
                     }
-                    for notif in tab.drain_notifications() {
-                        if notif.title.is_empty() {
-                            log(&format!("notification: {}", notif.body));
-                        } else {
-                            log(&format!("notification: {} — {}", notif.title, notif.body));
-                        }
+                }
+                for notif in notifications {
+                    if notif.title.is_empty() {
+                        log(&format!("notification: {}", notif.body));
+                    } else {
+                        log(&format!("notification: {} — {}", notif.title, notif.body));
                     }
                 }
 
                 self.url_cache.invalidate();
-                // Defer redraw — coalesced in about_to_wait()
                 if let Some(wid) = self.window_containing_tab(tab_id) {
                     if let Some(tw) = self.windows.get(&wid) {
-                        let bell_active =
-                            self.tabs.get(&tab_id).and_then(Tab::bell_start).is_some();
                         if tw.active_tab_id() == Some(tab_id) || bell_active {
                             self.pending_redraw.insert(wid);
                         }

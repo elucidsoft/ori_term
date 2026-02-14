@@ -98,31 +98,34 @@ impl App {
     }
 
     pub(super) fn scroll_to_search_match(&self, tab_id: TabId) {
-        // Read the focused match stable row, then convert to absolute.
-        let match_abs_row = self.tabs.get(&tab_id).and_then(|tab| {
-            let stable = tab.search.as_ref()?.focused_match()?.start_row;
-            let term = tab.terminal.lock();
-            stable.to_absolute(term.active_grid())
-        });
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return;
+        };
+        let Some(stable) = tab
+            .search
+            .as_ref()
+            .and_then(|s| s.focused_match())
+            .map(|m| m.start_row)
+        else {
+            return;
+        };
 
-        if let Some(target_row) = match_abs_row {
-            if let Some(tab) = self.tabs.get(&tab_id) {
-                let mut term = tab.terminal.lock();
-                let grid = term.active_grid_mut();
-                let sb_len = grid.scrollback.len();
-                let lines = grid.lines;
+        // Single lock: convert stable row → absolute, then scroll if needed.
+        let mut term = tab.terminal.lock();
+        let grid = term.active_grid_mut();
+        let Some(target_row) = stable.to_absolute(grid) else {
+            return;
+        };
+        let sb_len = grid.scrollback.len();
+        let lines = grid.lines;
+        let viewport_start = sb_len.saturating_sub(grid.display_offset);
+        let viewport_end = viewport_start + lines;
 
-                // Check if target_row is visible in the current viewport
-                let viewport_start = sb_len.saturating_sub(grid.display_offset);
-                let viewport_end = viewport_start + lines;
-
-                if target_row < viewport_start || target_row >= viewport_end {
-                    // Scroll so the match is roughly centered in the viewport
-                    let center_offset = sb_len.saturating_sub(target_row).saturating_sub(lines / 2);
-                    grid.display_offset = center_offset.min(sb_len);
-                    term.grid_dirty = true;
-                }
-            }
+        if target_row < viewport_start || target_row >= viewport_end {
+            let center_offset = sb_len.saturating_sub(target_row).saturating_sub(lines / 2);
+            grid.display_offset = center_offset.min(sb_len);
+            drop(term);
+            tab.set_grid_dirty(true);
         }
     }
 }

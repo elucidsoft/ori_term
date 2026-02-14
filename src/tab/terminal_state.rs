@@ -5,6 +5,7 @@
 //! inside `Tab`.
 
 use std::io::Write;
+use std::path::Path;
 use std::time::Instant;
 
 use vte::ansi::{CursorShape, KeyboardModes};
@@ -55,8 +56,6 @@ pub struct TerminalState {
     pub pending_notifications: Vec<Notification>,
     prompt_mark_pending: bool,
 
-    // Dirty flag (PTY sets, main thread reads and clears)
-    pub grid_dirty: bool,
 }
 
 impl TerminalState {
@@ -91,7 +90,6 @@ impl TerminalState {
             prompt_state: PromptState::default(),
             pending_notifications: Vec::new(),
             prompt_mark_pending: false,
-            grid_dirty: true,
         }
     }
 
@@ -121,8 +119,6 @@ impl TerminalState {
         data: &[u8],
         pty_writer: &mut Option<Box<dyn Write + Send>>,
     ) {
-        self.grid_dirty = true;
-
         // Run the raw interceptor first to capture OSC 7/133/9/99/777/XTVERSION
         // (sequences that vte::ansi::Processor silently drops).
         let mut interceptor = RawInterceptor {
@@ -165,6 +161,19 @@ impl TerminalState {
         }
     }
 
+    /// Return the display title. If the shell explicitly set a title via
+    /// OSC 0/2, use that. Otherwise derive a short path from CWD, falling
+    /// back to the raw title string.
+    pub fn effective_title(&self) -> String {
+        if self.has_explicit_title {
+            return self.title.clone();
+        }
+        if let Some(ref cwd) = self.cwd {
+            return short_path(cwd);
+        }
+        self.title.clone()
+    }
+
     /// Drain pending OSC 9/99/777 notifications, returning them to the caller.
     pub fn drain_notifications(&mut self) -> Vec<Notification> {
         std::mem::take(&mut self.pending_notifications)
@@ -183,4 +192,42 @@ impl TerminalState {
         self.palette.apply_overrides(colors);
         self.palette.bold_is_bright = bold_is_bright;
     }
+}
+
+/// Shorten a path for tab bar display: `~` for home, last component otherwise.
+fn short_path(path: &str) -> String {
+    // Try to replace home directory with ~.
+    if let Ok(home) = std::env::var("HOME") {
+        if let Some(rest) = path.strip_prefix(&home) {
+            let relative = if rest.is_empty() {
+                ""
+            } else {
+                rest.trim_start_matches('/')
+            };
+            if relative.is_empty() {
+                return "~".to_owned();
+            }
+            return format!("~/{relative}");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if let Some(rest) = path.strip_prefix(&profile) {
+            let relative = if rest.is_empty() {
+                ""
+            } else {
+                rest.trim_start_matches('\\').trim_start_matches('/')
+            };
+            if relative.is_empty() {
+                return "~".to_owned();
+            }
+            return format!("~\\{relative}");
+        }
+    }
+    // Fall back to last path component.
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(path)
+        .to_owned()
 }

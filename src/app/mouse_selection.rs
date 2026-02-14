@@ -84,13 +84,15 @@ impl App {
             return;
         };
 
-        // Clamp col/line to grid bounds and compute absolute row in one lookup.
-        let (grid_cols, col, line, abs_row) = match self.tabs.get(&tab_id) {
+        // Single lock: clamp bounds, compute absolute + stable row.
+        let (grid_cols, col, line, abs_row, stable_row) = match self.tabs.get(&tab_id) {
             Some(tab) => {
                 let g = tab.grid();
                 let c = col.min(g.cols.saturating_sub(1));
                 let l = line.min(g.lines.saturating_sub(1));
-                (g.cols, c, l, g.viewport_to_absolute(l))
+                let abs = g.viewport_to_absolute(l);
+                let stable = StableRowIndex::from_absolute(&g, abs);
+                (g.cols, c, l, abs, stable)
             }
             None => return,
         };
@@ -103,12 +105,6 @@ impl App {
         let click_count = self.detect_click_count(window_id, col, line);
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
-
-        // Compute stable row index for selection points.
-        let stable_row = {
-            let tab = self.tabs.get(&tab_id).expect("tab lookup just succeeded");
-            StableRowIndex::from_absolute(&tab.grid(), abs_row)
-        };
 
         // Shift+click: extend existing selection
         if shift {
@@ -128,48 +124,39 @@ impl App {
             }
         }
 
-        // Create new selection based on click count
+        // Create new selection based on click count. Double/triple-click
+        // need one more grid lock for word/line boundary computation.
         let new_selection = match click_count {
             2 => {
                 // Double-click: word selection
-                if let Some(tab) = self.tabs.get(&tab_id) {
-                    let (word_start, word_end) =
-                        selection::word_boundaries(&tab.grid(), abs_row, col);
-                    let anchor = SelectionPoint {
-                        row: stable_row,
-                        col: word_start,
-                        side: Side::Left,
-                    };
-                    let pivot = SelectionPoint {
-                        row: stable_row,
-                        col: word_end,
-                        side: Side::Right,
-                    };
-                    Some(Selection::new_word(anchor, pivot))
-                } else {
-                    None
-                }
+                self.tabs.get(&tab_id).map(|tab| {
+                    let grid = tab.grid();
+                    let (ws, we) = selection::word_boundaries(&grid, abs_row, col);
+                    Selection::new_word(
+                        SelectionPoint { row: stable_row, col: ws, side: Side::Left },
+                        SelectionPoint { row: stable_row, col: we, side: Side::Right },
+                    )
+                })
             }
             3 => {
                 // Triple-click: line selection
-                if let Some(tab) = self.tabs.get(&tab_id) {
+                self.tabs.get(&tab_id).map(|tab| {
                     let grid = tab.grid();
-                    let line_start_abs = selection::logical_line_start(&grid, abs_row);
-                    let line_end_abs = selection::logical_line_end(&grid, abs_row);
-                    let anchor = SelectionPoint {
-                        row: StableRowIndex::from_absolute(&grid, line_start_abs),
-                        col: 0,
-                        side: Side::Left,
-                    };
-                    let pivot = SelectionPoint {
-                        row: StableRowIndex::from_absolute(&grid, line_end_abs),
-                        col: grid_cols.saturating_sub(1),
-                        side: Side::Right,
-                    };
-                    Some(Selection::new_line(anchor, pivot))
-                } else {
-                    None
-                }
+                    let ls = selection::logical_line_start(&grid, abs_row);
+                    let le = selection::logical_line_end(&grid, abs_row);
+                    Selection::new_line(
+                        SelectionPoint {
+                            row: StableRowIndex::from_absolute(&grid, ls),
+                            col: 0,
+                            side: Side::Left,
+                        },
+                        SelectionPoint {
+                            row: StableRowIndex::from_absolute(&grid, le),
+                            col: grid_cols.saturating_sub(1),
+                            side: Side::Right,
+                        },
+                    )
+                })
             }
             _ => {
                 // Single click: char selection (or block if Alt held)
@@ -203,98 +190,91 @@ impl App {
         window_id: WindowId,
         position: PhysicalPosition<f64>,
     ) {
+        let Some(tid) = self.active_tab_id(window_id) else {
+            return;
+        };
+
         if let Some((col, line)) = self.pixel_to_cell(position) {
             let side = self.pixel_to_side(position);
-            if let Some(tid) = self.active_tab_id(window_id) {
-                if let Some(tab) = self.tabs.get_mut(&tid) {
-                    let grid_cols = tab.grid().cols;
-                    let grid_lines = tab.grid().lines;
-                    let col = col.min(grid_cols.saturating_sub(1));
-                    let line = line.min(grid_lines.saturating_sub(1));
-                    let abs_row = tab.grid().viewport_to_absolute(line);
-                    let stable_row = StableRowIndex::from_absolute(&tab.grid(), abs_row);
+            let Some(tab) = self.tabs.get_mut(&tid) else {
+                return;
+            };
 
-                    // Compute new end point based on selection mode.
-                    // Pre-compute boundary data from grid before mutating selection.
-                    let sel_mode = tab.selection.as_ref().map(|s| s.mode);
-                    let sel_anchor_row = tab.selection.as_ref().map(|s| s.anchor.row);
-                    let new_end = match sel_mode {
-                        Some(SelectionMode::Word) => {
-                            let (w_start, w_end) =
-                                selection::word_boundaries(&tab.grid(), abs_row, col);
-                            let anchor = tab.selection.as_ref().map(|s| s.anchor);
-                            let start_pt = SelectionPoint {
-                                row: stable_row,
-                                col: w_start,
-                                side: Side::Left,
-                            };
-                            let end_pt = SelectionPoint {
-                                row: stable_row,
-                                col: w_end,
-                                side: Side::Right,
-                            };
-                            if anchor.is_some_and(|a| start_pt < a) {
-                                Some(start_pt)
-                            } else {
-                                Some(end_pt)
-                            }
-                        }
-                        Some(SelectionMode::Line) => {
-                            let grid = tab.grid();
-                            let drag_line_start =
-                                selection::logical_line_start(&grid, abs_row);
-                            let drag_line_end =
-                                selection::logical_line_end(&grid, abs_row);
-                            if sel_anchor_row.is_some_and(|ar| stable_row < ar) {
-                                Some(SelectionPoint {
-                                    row: StableRowIndex::from_absolute(&grid, drag_line_start),
-                                    col: 0,
-                                    side: Side::Left,
-                                })
-                            } else {
-                                Some(SelectionPoint {
-                                    row: StableRowIndex::from_absolute(&grid, drag_line_end),
-                                    col: grid_cols.saturating_sub(1),
-                                    side: Side::Right,
-                                })
-                            }
-                        }
-                        Some(_) => Some(SelectionPoint {
-                            row: stable_row,
-                            col,
-                            side,
-                        }),
-                        None => None,
-                    };
+            // Read selection state before locking the grid (selection lives
+            // on Tab, not behind the Mutex).
+            let sel_mode = tab.selection.as_ref().map(|s| s.mode);
+            let sel_anchor = tab.selection.as_ref().map(|s| s.anchor);
 
-                    if let Some(new_end) = new_end {
-                        tab.update_selection_end(new_end);
+            // Single lock: clamp, compute absolute/stable row, and any
+            // word/line boundary data needed for the current selection mode.
+            let new_end = {
+                let grid = tab.grid();
+                let col = col.min(grid.cols.saturating_sub(1));
+                let line = line.min(grid.lines.saturating_sub(1));
+                let abs_row = grid.viewport_to_absolute(line);
+                let stable_row = StableRowIndex::from_absolute(&grid, abs_row);
+
+                match sel_mode {
+                    Some(SelectionMode::Word) => {
+                        let (ws, we) = selection::word_boundaries(&grid, abs_row, col);
+                        let start_pt = SelectionPoint { row: stable_row, col: ws, side: Side::Left };
+                        let end_pt = SelectionPoint { row: stable_row, col: we, side: Side::Right };
+                        if sel_anchor.is_some_and(|a| start_pt < a) {
+                            Some(start_pt)
+                        } else {
+                            Some(end_pt)
+                        }
                     }
+                    Some(SelectionMode::Line) => {
+                        let ls = selection::logical_line_start(&grid, abs_row);
+                        let le = selection::logical_line_end(&grid, abs_row);
+                        let grid_cols = grid.cols;
+                        if sel_anchor.is_some_and(|a| stable_row < a.row) {
+                            Some(SelectionPoint {
+                                row: StableRowIndex::from_absolute(&grid, ls),
+                                col: 0,
+                                side: Side::Left,
+                            })
+                        } else {
+                            Some(SelectionPoint {
+                                row: StableRowIndex::from_absolute(&grid, le),
+                                col: grid_cols.saturating_sub(1),
+                                side: Side::Right,
+                            })
+                        }
+                    }
+                    Some(_) => Some(SelectionPoint { row: stable_row, col, side }),
+                    None => None,
                 }
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
-                }
+            };
+
+            if let Some(end) = new_end {
+                tab.update_selection_end(end);
             }
         } else {
             // Mouse outside grid — auto-scroll
             let y = position.y as usize;
             let grid_top = self.grid_top();
             let ch = self.font_collection.cell_height;
-            if let Some(tid) = self.active_tab_id(window_id) {
-                if let Some(tab) = self.tabs.get_mut(&tid) {
-                    if y < grid_top {
-                        tab.scroll_lines(1);
-                    } else {
-                        let grid_bottom = grid_top + tab.grid().lines * ch;
-                        if y >= grid_bottom && tab.grid().display_offset > 0 {
-                            tab.scroll_lines(-1);
-                        }
-                    }
-                }
-                if let Some(tw) = self.windows.get(&window_id) {
-                    tw.window.request_redraw();
+            let Some(tab) = self.tabs.get_mut(&tid) else {
+                return;
+            };
+            if y < grid_top {
+                tab.scroll_lines(1);
+            } else {
+                // Single lock for both reads.
+                let grid = tab.grid();
+                let grid_bottom = grid_top + grid.lines * ch;
+                let offset = grid.display_offset;
+                drop(grid);
+                if y >= grid_bottom && offset > 0 {
+                    tab.scroll_lines(-1);
                 }
             }
+        }
+
+        if let Some(tw) = self.windows.get(&window_id) {
+            tw.window.request_redraw();
         }
     }
 }
