@@ -43,8 +43,9 @@ fn main() {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => return,
                 Ok(n) => {
-                    let _ = stdout.write_all(&buf[..n]);
-                    let _ = stdout.flush();
+                    if stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+                        return;
+                    }
                 }
             }
         }

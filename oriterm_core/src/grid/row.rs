@@ -9,7 +9,7 @@ use crate::cell::Cell;
 use crate::index::Column;
 
 /// One row of cells in the terminal grid.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Row {
     /// The cells in this row.
     inner: Vec<Cell>,
@@ -20,6 +20,16 @@ pub struct Row {
     /// Alacritty's pattern). Use `clamp_occ` / `set_occ` for O(1) adjustments.
     occ: usize,
 }
+
+/// Equality compares cell content only — `occ` is internal bookkeeping
+/// (dirty-tracking upper bound) and must not affect semantic equality.
+impl PartialEq for Row {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl Eq for Row {}
 
 impl Row {
     /// Create a new row of `cols` default cells.
@@ -65,20 +75,39 @@ impl Row {
     pub fn clear_range(&mut self, range: Range<Column>, template: &Cell) {
         let start = range.start.0;
         let end = range.end.0.min(self.inner.len());
+        if start >= end {
+            return;
+        }
         for cell in &mut self.inner[start..end] {
             cell.reset(template);
         }
-        // Existing occ is still a valid upper bound (cells replaced in-place,
-        // no rightward shift). Leave loose — matches Alacritty/Ghostty pattern.
+        if template.is_empty() {
+            // Default-bg clear: existing occ is still a valid upper bound
+            // (cells replaced in-place, no rightward shift).
+        } else {
+            // BCE clear: the cleared cells are dirty (non-default bg).
+            // Bump occ to cover them so reset() doesn't miss them when
+            // the cleared range doesn't include the last cell.
+            self.occ = self.occ.max(end);
+        }
     }
 
     /// Clear from the given column to the end of the row.
     pub fn truncate(&mut self, col: Column, template: &Cell) {
         let start = col.0;
+        if start >= self.inner.len() {
+            return;
+        }
         for cell in &mut self.inner[start..] {
             cell.reset(template);
         }
-        self.occ = self.occ.min(start);
+        if template.is_empty() {
+            self.occ = self.occ.min(start);
+        } else {
+            // BCE: cells [start..end] are dirty. Bump occ to cover them
+            // explicitly rather than relying on reset's last-cell sentinel.
+            self.occ = self.inner.len();
+        }
     }
 
     /// Mutable access to the inner cell slice.
@@ -111,6 +140,11 @@ impl Row {
 
     /// Set occ to an explicit upper bound (must be valid).
     pub(crate) fn set_occ(&mut self, occ: usize) {
+        debug_assert!(
+            occ <= self.inner.len(),
+            "occ {occ} exceeds row length {}",
+            self.inner.len(),
+        );
         self.occ = occ;
     }
 
@@ -338,5 +372,69 @@ mod tests {
         cell.ch = 'A';
         row3.append(Column(0), &cell);
         assert_ne!(row1, row3);
+    }
+
+    #[test]
+    fn clear_range_bce_updates_occ() {
+        use vte::ansi::Color;
+        let mut row = Row::new(10);
+        assert_eq!(row.occ(), 0);
+        let template = Cell::from(Color::Indexed(1));
+        row.clear_range(Column(3)..Column(7), &template);
+        // BCE clear must bump occ to cover the dirty cells.
+        assert!(row.occ() >= 7, "occ should cover BCE cells, got {}", row.occ());
+    }
+
+    #[test]
+    fn clear_range_bce_survives_reset() {
+        use vte::ansi::Color;
+        let mut row = Row::new(10);
+        let bce = Cell::from(Color::Indexed(1));
+        row.clear_range(Column(3)..Column(7), &bce);
+        // Reset with default template must clear the BCE cells.
+        row.reset(10, &Cell::default());
+        for i in 0..10 {
+            assert!(row[Column(i)].is_empty(), "Column {i} not empty after reset");
+        }
+    }
+
+    #[test]
+    fn truncate_bce_updates_occ() {
+        use vte::ansi::Color;
+        let mut row = Row::new(10);
+        let bce = Cell::from(Color::Indexed(1));
+        row.truncate(Column(5), &bce);
+        // BCE truncate should set occ to cover all dirty cells.
+        assert_eq!(row.occ(), 10);
+    }
+
+    #[test]
+    fn clear_range_inverted_is_noop() {
+        let mut row = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'A';
+        row.append(Column(0), &cell);
+        // Inverted range (start > end) should not panic or modify cells.
+        row.clear_range(Column(7)..Column(3), &Cell::default());
+        assert_eq!(row[Column(0)].ch, 'A');
+    }
+
+    #[test]
+    fn clear_range_start_beyond_row_is_noop() {
+        let mut row = Row::new(10);
+        // Start beyond row length should not panic.
+        row.clear_range(Column(20)..Column(30), &Cell::default());
+        assert_eq!(row.occ(), 0);
+    }
+
+    #[test]
+    fn truncate_beyond_row_is_noop() {
+        let mut row = Row::new(10);
+        let mut cell = Cell::default();
+        cell.ch = 'A';
+        row.append(Column(0), &cell);
+        // Column beyond row length should not panic.
+        row.truncate(Column(20), &Cell::default());
+        assert_eq!(row[Column(0)].ch, 'A');
     }
 }
