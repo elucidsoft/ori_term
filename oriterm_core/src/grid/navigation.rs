@@ -4,7 +4,6 @@
 //! tab stop management. All movement is clamped to grid bounds and
 //! respects the scroll region where applicable.
 
-use crate::cell::Cell;
 use crate::index::Column;
 
 use super::Grid;
@@ -189,7 +188,7 @@ impl Grid {
         let top = self.scroll_region.start;
         let bottom = self.scroll_region.end;
         let count = count.min(bottom - top);
-        let template = Cell::default();
+        let template = self.cursor.template.clone();
 
         // Rotate departing top rows to the bottom of the region.
         self.rows[top..bottom].rotate_left(count);
@@ -208,7 +207,7 @@ impl Grid {
         let top = self.scroll_region.start;
         let bottom = self.scroll_region.end;
         let count = count.min(bottom - top);
-        let template = Cell::default();
+        let template = self.cursor.template.clone();
 
         // Rotate departing bottom rows to the top of the region.
         self.rows[top..bottom].rotate_right(count);

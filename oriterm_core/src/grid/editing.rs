@@ -55,13 +55,16 @@ impl Grid {
         // Clear any wide char pair that we're overwriting.
         self.clear_wide_char_at(line, col);
 
-        // Write the character.
-        let template = self.cursor.template.clone();
+        // Extract only the Copy fields we need, avoiding a full Cell clone
+        // that would heap-allocate if `extra` is Some.
+        let fg = self.cursor.template.fg;
+        let bg = self.cursor.template.bg;
+        let flags = self.cursor.template.flags;
         let cell = &mut self.rows[line][Column(col)];
         cell.ch = ch;
-        cell.fg = template.fg;
-        cell.bg = template.bg;
-        cell.flags = template.flags;
+        cell.fg = fg;
+        cell.bg = bg;
+        cell.flags = flags;
         cell.extra = None;
 
         if width == 2 {
@@ -72,8 +75,8 @@ impl Grid {
                 self.clear_wide_char_at(line, col + 1);
                 let spacer = &mut self.rows[line][Column(col + 1)];
                 spacer.ch = ' ';
-                spacer.fg = template.fg;
-                spacer.bg = template.bg;
+                spacer.fg = fg;
+                spacer.bg = bg;
                 spacer.flags = CellFlags::WIDE_CHAR_SPACER;
                 spacer.extra = None;
             }
@@ -189,14 +192,21 @@ impl Grid {
 
         match mode {
             EraseMode::Below => {
-                for i in col..cols {
-                    self.rows[line][Column(i)].reset(&template);
+                let row = &mut self.rows[line];
+                let cells = row.as_mut_slice();
+                for cell in &mut cells[col..cols] {
+                    cell.reset(&template);
                 }
+                row.recalculate_occ();
             }
             EraseMode::Above => {
-                for i in 0..=col.min(cols - 1) {
-                    self.rows[line][Column(i)].reset(&template);
+                let end = col.min(cols - 1) + 1;
+                let row = &mut self.rows[line];
+                let cells = row.as_mut_slice();
+                for cell in &mut cells[..end] {
+                    cell.reset(&template);
                 }
+                row.recalculate_occ();
             }
             EraseMode::All => {
                 self.rows[line].reset(cols, &template);
@@ -215,9 +225,12 @@ impl Grid {
         let template = self.cursor.template.clone();
 
         let end = (col + count).min(cols);
-        for i in col..end {
-            self.rows[line][Column(i)].reset(&template);
+        let row = &mut self.rows[line];
+        let cells = row.as_mut_slice();
+        for cell in &mut cells[col..end] {
+            cell.reset(&template);
         }
+        row.recalculate_occ();
     }
 
     /// Clear any wide char pair at the given position.
