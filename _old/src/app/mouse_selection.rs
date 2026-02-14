@@ -46,26 +46,21 @@ impl App {
     ///
     /// Returns true if a URL was opened and the click should be consumed.
     fn handle_ctrl_click_url(&mut self, tab_id: crate::tab::TabId, abs_row: usize, col: usize) -> bool {
-        // Check OSC 8 hyperlink first
-        let uri: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
+        // Single lock: check OSC 8 hyperlink and implicit URL in one scope.
+        let url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
             let grid = tab.grid();
             let row = grid.absolute_row(abs_row)?;
             if col >= row.len() {
                 return None;
             }
-            row[col].hyperlink().map(|h| h.uri.clone())
+            // OSC 8 hyperlink takes priority.
+            if let Some(h) = row[col].hyperlink() {
+                return Some(h.uri.clone());
+            }
+            // Fall through to implicit URL detection.
+            self.url_cache.url_at(&grid, abs_row, col).map(|hit| hit.url)
         });
-        if let Some(ref uri) = uri {
-            Self::open_url(uri);
-            return true;
-        }
-        // Fall through to implicit URL detection
-        let implicit_url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
-            let grid = tab.grid();
-            let hit = self.url_cache.url_at(&grid, abs_row, col)?;
-            Some(hit.url)
-        });
-        if let Some(ref url) = implicit_url {
+        if let Some(ref url) = url {
             Self::open_url(url);
             return true;
         }

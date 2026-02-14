@@ -10,7 +10,7 @@ pub use types::{
 };
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread;
 
@@ -31,7 +31,7 @@ use crate::term_mode::TermMode;
 pub struct Tab {
     pub id: TabId,
     /// Thread-shared terminal state behind a fair mutex.
-    pub terminal: Arc<FairMutex<TerminalState>>,
+    pub(crate) terminal: Arc<FairMutex<TerminalState>>,
 
     // PTY handles
     /// Shared PTY writer — main thread writes input, reader thread writes
@@ -48,6 +48,10 @@ pub struct Tab {
     /// Grid content modified since last render. Set by PTY thread (via
     /// `TermEvent::Wakeup`), cleared by renderer after each frame.
     grid_dirty: AtomicBool,
+    /// Lock-free snapshot of terminal mode flags. Updated by the reader
+    /// thread after each chunk; read by the main thread for mouse
+    /// reporting, key encoding, etc. without locking the terminal.
+    mode_cache: Arc<AtomicU32>,
     /// Coalesces `Wakeup` events: the reader thread only sends a new Wakeup
     /// when this is `false`. The main thread clears it when processing.
     wakeup_pending: Arc<AtomicBool>,
@@ -124,6 +128,7 @@ impl Tab {
         let terminal = Arc::new(FairMutex::new(terminal_state));
         let pty_writer: PtyWriter = Arc::new(parking_lot::Mutex::new(writer));
         let wakeup_pending = Arc::new(AtomicBool::new(false));
+        let mode_cache = Arc::new(AtomicU32::new(TermMode::default().bits()));
 
         spawn_reader_thread(
             cfg.id,
@@ -131,6 +136,7 @@ impl Tab {
             Arc::clone(&terminal),
             Arc::clone(&pty_writer),
             Arc::clone(&wakeup_pending),
+            Arc::clone(&mode_cache),
             cfg.proxy.clone(),
         );
         #[cfg(target_os = "windows")]
@@ -147,6 +153,7 @@ impl Tab {
             search: None,
             has_bell_badge: false,
             grid_dirty: AtomicBool::new(true),
+            mode_cache,
             wakeup_pending,
         })
     }
@@ -184,9 +191,12 @@ impl Tab {
 
     // ── Copy-type property accessors ───────────────────────────────────
 
-    /// Read the current terminal mode flags.
+    /// Read the current terminal mode flags (lock-free).
+    ///
+    /// Returns a snapshot updated by the reader thread after each chunk.
+    /// Avoids locking the terminal on every mouse move / key event.
     pub fn mode(&self) -> TermMode {
-        self.terminal.lock().mode
+        TermMode::from_bits_truncate(self.mode_cache.load(Ordering::Relaxed))
     }
 
     /// Read the current cursor shape.
@@ -444,16 +454,24 @@ fn spawn_reader_thread(
     terminal: Arc<FairMutex<TerminalState>>,
     pty_writer: PtyWriter,
     wakeup_pending: Arc<AtomicBool>,
+    mode_cache: Arc<AtomicU32>,
     proxy: EventLoopProxy<TermEvent>,
 ) {
     thread::spawn(move || {
         log(&format!("reader thread started for tab {:?}", id));
         let mut buf = vec![0u8; READ_BUFFER_SIZE];
-        let mut unprocessed = 0;
+        let mut pty_responses: Vec<u8> = Vec::new();
+        // Track unprocessed data as buf[start..end] to avoid shifting
+        // after every chunk. Only compact when the tail reaches the end.
+        let mut start = 0;
+        let mut end = 0;
 
         loop {
-            // Read more data only when the buffer has been fully processed.
-            if unprocessed == 0 {
+            // Read without holding a lease — the read may block
+            // indefinitely (idle shell), and the main thread must be
+            // able to lock the terminal for rendering in the meantime.
+            if start == end {
+                start = 0;
                 match reader.read(&mut buf) {
                     Ok(0) => {
                         log(&format!("reader: eof for tab {:?}", id));
@@ -466,40 +484,52 @@ fn spawn_reader_thread(
                         break;
                     }
                     Ok(n) => {
-                        unprocessed = n;
+                        end = n;
                     }
                 }
             }
 
-            // Try to acquire terminal lock (fast path).
-            let mut term = match terminal.try_lock_unfair() {
-                Some(t) => t,
-                None if unprocessed >= READ_BUFFER_SIZE => {
-                    // Buffer full — force lock.
+            // Data is available — acquire a lease so the renderer yields
+            // to us, then try the lock. The lease is only held during the
+            // lock attempt, never across a blocking read.
+            let mut term = {
+                let lease = terminal.lease();
+                if let Some(t) = terminal.try_lock_unfair() {
+                    t
+                    // lease dropped here
+                } else {
+                    drop(lease);
+                    // Renderer holds the lock — yield to let it finish,
+                    // then wait for the data lock. We must not block on
+                    // a pipe read while unprocessed bytes remain: those
+                    // bytes may contain a DA/DSR query whose response
+                    // ConPTY awaits before sending more output, which
+                    // would deadlock (reader ← pipe ← ConPTY ← response
+                    // in unprocessed buf).
+                    thread::yield_now();
                     terminal.lock_unfair()
-                }
-                None => {
-                    // Read more data while waiting for lock.
-                    match reader.read(&mut buf[unprocessed..]) {
-                        Ok(n) if n > 0 => unprocessed += n,
-                        _ => {}
-                    }
-                    continue;
                 }
             };
 
             // Parse in bounded chunks to limit lock hold time.
             // This lets the main thread acquire the lock between
             // chunks for rendering, keybindings, etc.
-            let chunk = unprocessed.min(MAX_LOCKED_PARSE);
-            term.process_output(&buf[..chunk], &pty_writer);
+            let chunk = (end - start).min(MAX_LOCKED_PARSE);
+            pty_responses.clear();
+            term.process_output(&buf[start..start + chunk], &mut pty_responses);
+            mode_cache.store(term.mode.bits(), Ordering::Relaxed);
             drop(term);
+            start += chunk;
 
-            // Shift remaining unprocessed bytes to front of buffer.
-            if chunk < unprocessed {
-                buf.copy_within(chunk..unprocessed, 0);
+            // Flush VTE responses (DA, DECRPM, etc.) outside the terminal
+            // lock. Writing to the ConPTY input pipe while holding the lock
+            // can deadlock: ConPTY may be blocked writing to its output pipe
+            // (waiting for us to read), so it can't read our responses.
+            if !pty_responses.is_empty() {
+                let mut w = pty_writer.lock();
+                let _ = w.write_all(&pty_responses);
+                let _ = w.flush();
             }
-            unprocessed -= chunk;
 
             // Only send Wakeup if one isn't already pending.
             if !wakeup_pending.swap(true, Ordering::Relaxed) {

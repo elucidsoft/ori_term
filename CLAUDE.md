@@ -78,8 +78,6 @@ Colors downgrade gracefully: TrueColor → nearest ANSI256 → nearest ANSI → 
 
 **Primary**: `./fmt-all.sh`, `./clippy-all.sh`, `./build-all.sh`, `./test-all.sh`
 **Build**: `cargo build --target x86_64-pc-windows-gnu` (debug), `cargo build --target x86_64-pc-windows-gnu --release` (release)
-**Deploy**: `cp target/x86_64-pc-windows-gnu/release/oriterm.exe /mnt/c/Users/ericm/ori_term/oriterm.exe`
-**Launch from Windows**: `C:\Users\ericm\ori_term\oriterm.exe`
 **Always run `./clippy-all.sh` and `./test-all.sh` after changes.**
 
 ---
@@ -116,4 +114,4 @@ Plans are the source of truth for multi-session work. Keep them in sync with rea
 
 ## Current State
 
-See [current_state.md](current_state.md) for full implementation status, architecture, data structures, and event flow.
+See [plans/roadmap/](plans/roadmap/) — the roadmap is the current state. 28 sections, 8 tiers. Use `/continue-roadmap` to resume work. Old prototype in `_old/` for reference.

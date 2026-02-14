@@ -35,37 +35,32 @@ impl App {
             return no_hit;
         };
 
-        // Compute abs_row, check bounds, and extract OSC 8 URI in one pass.
-        let (abs_row, osc8_uri) = {
-            let Some(tab) = self.tabs.get(&tid) else {
-                return no_hit;
-            };
-            let grid = tab.grid();
-            let abs_row = grid.viewport_to_absolute(line);
-            let Some(row) = grid.absolute_row(abs_row) else {
-                return no_hit;
-            };
-            if col >= row.len() {
-                return no_hit;
-            }
-            let osc8 = row[col].hyperlink().map(|h| h.uri.clone());
-            (abs_row, osc8)
+        let Some(tab) = self.tabs.get(&tid) else {
+            return no_hit;
         };
 
+        // Single lock: check OSC 8 hyperlink and implicit URL in one scope.
+        let grid = tab.grid();
+        let abs_row = grid.viewport_to_absolute(line);
+        let Some(row) = grid.absolute_row(abs_row) else {
+            return no_hit;
+        };
+        if col >= row.len() {
+            return no_hit;
+        }
+
         // OSC 8 hyperlink takes priority.
-        if let Some(uri) = osc8_uri {
+        if let Some(h) = row[col].hyperlink() {
             return HoverResult {
                 cursor_icon: CursorIcon::Pointer,
-                hover: Some((window_id, uri)),
+                hover: Some((window_id, h.uri.clone())),
                 url_range: None,
             };
         }
 
         // Fall through to implicit URL detection.
-        let Some(tab) = self.tabs.get(&tid) else {
-            return no_hit;
-        };
-        let url_hit = self.url_cache.url_at(&tab.grid(), abs_row, col);
+        let url_hit = self.url_cache.url_at(&grid, abs_row, col);
+        drop(grid);
         if let Some(hit) = url_hit {
             return HoverResult {
                 cursor_icon: CursorIcon::Pointer,

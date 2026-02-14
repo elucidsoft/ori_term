@@ -1,40 +1,62 @@
 //! Binary entry point for the oriterm terminal emulator.
 
-#![windows_subsystem = "windows"]
+use std::io::{self, Read, Write};
+use std::thread;
+
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let pty_system = native_pty_system();
 
-    if args.iter().any(|a| a == "--print-config") {
-        let config = ori_term::config::Config::default();
-        match toml::to_string_pretty(&config) {
-            Ok(s) => print!("{s}"),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("failed to open pty");
+
+    let cmd = CommandBuilder::new_default_prog();
+    let mut child = pair.slave.spawn_command(cmd).expect("failed to spawn shell");
+
+    // Drop the slave side so the reader detects EOF when the shell exits.
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader().expect("failed to clone pty reader");
+    let mut writer = pair.master.take_writer().expect("failed to take pty writer");
+
+    // Relay PTY output to stdout.
+    let _output = thread::spawn(move || {
+        let mut stdout = io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    let _ = stdout.write_all(&buf[..n]);
+                    let _ = stdout.flush();
+                }
             }
         }
-        return;
-    }
+    });
 
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("oriterm {}", env!("CARGO_PKG_VERSION"));
-        return;
-    }
+    // Relay stdin to PTY input.
+    let _input = thread::spawn(move || {
+        let mut stdin = io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => {
+                    if writer.write_all(&buf[..n]).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
 
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("oriterm {}", env!("CARGO_PKG_VERSION"));
-        println!("A GPU-accelerated terminal emulator\n");
-        println!("USAGE:");
-        println!("    oriterm [OPTIONS]\n");
-        println!("OPTIONS:");
-        println!("    --print-config    Print the default configuration to stdout");
-        println!("    --version, -V     Print version information");
-        println!("    --help, -h        Print this help message");
-        return;
-    }
-
-    if let Err(e) = ori_term::app::App::run() {
-        let _ = std::fs::write("oriterm_error.log", format!("{e:?}"));
-    }
+    // Block until the shell process exits.
+    let _ = child.wait();
 }

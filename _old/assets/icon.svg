@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Main rounded background -->
+  <rect x="40" y="40" width="432" height="432" rx="44" ry="44" fill="#1e1e2e"/>
+
+  <!-- Title bar: a path that has rounded top corners and square bottom -->
+  <path d="M84,40 L428,40 Q472,40 472,84 L472,90 L40,90 L40,84 Q40,40 84,40 Z" fill="#313244"/>
+
+  <!-- Title bar separator -->
+  <rect x="40" y="90" width="432" height="2" fill="#45475a" opacity="0.5"/>
+
+  <!-- Border (on top of everything) -->
+  <rect x="40" y="40" width="432" height="432" rx="44" ry="44" fill="none" stroke="#45475a" stroke-width="4"/>
+
+  <!-- Prompt chevron > -->
+  <polyline points="120,188 228,296 120,404" fill="none" stroke="#a6e3a1" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Large underline cursor (bottom-aligned with chevron bottom leg) -->
+  <rect x="280" y="388" width="110" height="18" rx="5" fill="#f5e0dc" opacity="0.9"/>
+</svg>

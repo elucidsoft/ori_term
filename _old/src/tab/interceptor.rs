@@ -1,22 +1,21 @@
 //! Raw VTE interceptor for sequences the high-level processor drops.
 
-use std::io::Write;
-
 use vte::Perform;
 
-use super::types::{Notification, PromptState, PtyWriter};
+use super::types::{Notification, PromptState};
 
 /// Raw VTE `Perform` implementation that intercepts sequences the high-level
 /// `vte::ansi::Processor` drops: OSC 7 (CWD), OSC 133 (prompt markers),
 /// OSC 9/99/777 (notifications), and XTVERSION (CSI > q).
 pub(super) struct RawInterceptor<'a> {
-    pub pty_writer: &'a PtyWriter,
+    pub pty_responses: &'a mut Vec<u8>,
     pub cwd: &'a mut Option<String>,
     pub prompt_state: &'a mut PromptState,
     pub pending_notifications: &'a mut Vec<Notification>,
     pub prompt_mark_pending: &'a mut bool,
     pub has_explicit_title: &'a mut bool,
     pub suppress_title: &'a mut bool,
+    pub title_dirty: &'a mut bool,
 }
 
 impl Perform for RawInterceptor<'_> {
@@ -45,6 +44,7 @@ impl Perform for RawInterceptor<'_> {
                         // process title (e.g. C:\WINDOWS\system32\wsl.exe).
                         *self.has_explicit_title = false;
                         *self.suppress_title = false;
+                        *self.title_dirty = true;
                     }
                 }
             }
@@ -113,9 +113,7 @@ impl Perform for RawInterceptor<'_> {
             let build = include_str!("../../BUILD_NUMBER").trim();
             // Response: DCS > | terminal-name(version) ST
             let response = format!("\x1bP>|oriterm({version} build {build})\x1b\\");
-            let mut w = self.pty_writer.lock();
-            let _ = w.write_all(response.as_bytes());
-            let _ = w.flush();
+            self.pty_responses.extend_from_slice(response.as_bytes());
         }
     }
 }
