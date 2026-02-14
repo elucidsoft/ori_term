@@ -1,9 +1,16 @@
 //! Shared types used across the tab subsystem.
 
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use vte::ansi::{CharsetIndex, CursorShape, StandardCharset};
 use winit::event_loop::EventLoopProxy;
+
+/// Thread-shared PTY writer. Both the main thread (keyboard input) and the
+/// reader thread (VTE responses like DA, DECRPM) write through this.
+pub type PtyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
 /// Unique identifier for a tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,7 +83,10 @@ pub struct SpawnConfig {
 /// Events sent from background threads to the event loop.
 #[derive(Debug)]
 pub enum TermEvent {
-    PtyOutput(TabId, Vec<u8>),
+    /// PTY reader thread parsed new output — redraw needed.
+    Wakeup(TabId),
+    /// PTY child process exited — close the tab.
     PtyExited(TabId),
+    /// Configuration file changed — reload.
     ConfigReload,
 }

@@ -52,7 +52,7 @@ impl TermHandler<'_> {
         }
     }
 
-    pub(super) fn handle_clipboard_load(&mut self, _clipboard: u8, terminator: &str) {
+    pub(super) fn handle_clipboard_load(&self, _clipboard: u8, terminator: &str) {
         // OSC 52 clipboard load: respond with base64-encoded clipboard contents.
         // Format: ESC ] 52 ; <selector> ; <base64> <terminator>
         if let Some(text) = crate::clipboard::get_text() {
@@ -67,7 +67,7 @@ impl TermHandler<'_> {
         self.active_grid().put_char(' ');
     }
 
-    pub(super) fn handle_report_keyboard_mode(&mut self) {
+    pub(super) fn handle_report_keyboard_mode(&self) {
         let bits = self
             .keyboard_mode_stack
             .last()

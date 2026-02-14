@@ -24,7 +24,7 @@ grid lock, read lock, write lock, lease, fairness
 ---
 
 ### Section 02: PTY Processing Thread
-**File:** `section-02-pty-thread.md` | **Status:** Not Started
+**File:** `section-02-pty-thread.md` | **Status:** Complete
 
 ```
 PTY reader, VTE parsing, process_output, TermHandler

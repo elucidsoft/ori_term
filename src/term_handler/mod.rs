@@ -11,6 +11,7 @@ mod title;
 use std::io::Write;
 use std::time::Instant;
 
+
 use vte::ansi::{
     Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink,
     KeyboardModes, KeyboardModesApplyBehavior, LineClearMode, Mode, PrivateMode, Rgb,
@@ -19,7 +20,7 @@ use vte::ansi::{
 
 use crate::grid::Grid;
 use crate::palette::Palette;
-use crate::tab::CharsetState;
+use crate::tab::{CharsetState, PtyWriter};
 use crate::term_mode::TermMode;
 
 /// Tracks grapheme cluster continuation for ZWJ emoji sequences.
@@ -44,7 +45,7 @@ pub struct TermHandler<'a> {
     pub(super) mode: &'a mut TermMode,
     pub(super) palette: &'a mut Palette,
     pub(super) title: &'a mut String,
-    pub(super) pty_writer: &'a mut Option<Box<dyn Write + Send>>,
+    pub(super) pty_writer: &'a PtyWriter,
     pub(super) active_is_alt: &'a mut bool,
     pub(super) cursor_shape: &'a mut CursorShape,
     pub(super) charset: &'a mut CharsetState,
@@ -65,7 +66,7 @@ impl<'a> TermHandler<'a> {
         mode: &'a mut TermMode,
         palette: &'a mut Palette,
         title: &'a mut String,
-        pty_writer: &'a mut Option<Box<dyn Write + Send>>,
+        pty_writer: &'a PtyWriter,
         active_is_alt: &'a mut bool,
         cursor_shape: &'a mut CursorShape,
         charset: &'a mut CharsetState,
@@ -125,11 +126,10 @@ impl<'a> TermHandler<'a> {
         }
     }
 
-    pub(super) fn write_pty(&mut self, data: &[u8]) {
-        if let Some(w) = self.pty_writer.as_mut() {
-            let _ = w.write_all(data);
-            let _ = w.flush();
-        }
+    pub(super) fn write_pty(&self, data: &[u8]) {
+        let mut w = self.pty_writer.lock();
+        let _ = w.write_all(data);
+        let _ = w.flush();
     }
 
     pub(super) fn swap_alt_screen(&mut self, save_cursor: bool) {

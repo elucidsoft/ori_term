@@ -4,7 +4,6 @@
 //! main/UI thread need access to. It is wrapped in `Arc<parking_lot::Mutex<>>`
 //! inside `Tab`.
 
-use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 
@@ -17,7 +16,7 @@ use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
 
 use super::interceptor::RawInterceptor;
-use super::types::{CharsetState, Notification, PromptState};
+use super::types::{CharsetState, Notification, PromptState, PtyWriter};
 
 /// Terminal state shared between the PTY reader thread and the main thread.
 ///
@@ -56,6 +55,8 @@ pub struct TerminalState {
     pub pending_notifications: Vec<Notification>,
     prompt_mark_pending: bool,
 
+    /// Set by VTE parsing when title or CWD changes; cleared by main thread.
+    pub title_dirty: bool,
 }
 
 impl TerminalState {
@@ -90,6 +91,7 @@ impl TerminalState {
             prompt_state: PromptState::default(),
             pending_notifications: Vec::new(),
             prompt_mark_pending: false,
+            title_dirty: false,
         }
     }
 
@@ -113,12 +115,10 @@ impl TerminalState {
 
     /// Process raw PTY output through both the raw interceptor and VTE processor.
     ///
-    /// `pty_writer` is passed in because it stays on `Tab` (not behind the Mutex).
-    pub fn process_output(
-        &mut self,
-        data: &[u8],
-        pty_writer: &mut Option<Box<dyn Write + Send>>,
-    ) {
+    /// `pty_writer` is the shared writer for VTE responses (DA, DECRPM, etc.).
+    pub fn process_output(&mut self, data: &[u8], pty_writer: &PtyWriter) {
+        let old_title = self.effective_title();
+
         // Run the raw interceptor first to capture OSC 7/133/9/99/777/XTVERSION
         // (sequences that vte::ansi::Processor silently drops).
         let mut interceptor = RawInterceptor {
@@ -158,6 +158,11 @@ impl TerminalState {
             self.prompt_mark_pending = false;
             let row = self.active_grid().cursor.row;
             self.active_grid_mut().row_mut(row).prompt_start = true;
+        }
+
+        // Detect title/CWD changes (covers both OSC 0/2 and OSC 7).
+        if self.effective_title() != old_title {
+            self.title_dirty = true;
         }
     }
 

@@ -88,7 +88,7 @@ impl TermHandler<'_> {
 
     #[allow(clippy::needless_pass_by_value, reason = "VTE Handler trait passes prefix by value")]
     pub(super) fn handle_dynamic_color_sequence(
-        &mut self,
+        &self,
         prefix: String,
         index: usize,
         terminator: &str,

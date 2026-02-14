@@ -5,18 +5,21 @@ pub mod terminal_state;
 mod types;
 
 pub use terminal_state::TerminalState;
-pub use types::{CharsetState, Notification, PromptState, SpawnConfig, TabId, TermEvent};
+pub use types::{
+    CharsetState, Notification, PromptState, PtyWriter, SpawnConfig, TabId, TermEvent,
+};
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
+use parking_lot::{MappedMutexGuard, MutexGuard};
 use vte::ansi::CursorShape;
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::ColorConfig;
+use crate::sync::FairMutex;
 use crate::grid::Grid;
 use crate::log;
 use crate::palette::ColorScheme;
@@ -27,11 +30,13 @@ use crate::term_mode::TermMode;
 
 pub struct Tab {
     pub id: TabId,
-    /// Thread-shared terminal state behind a mutex.
-    pub terminal: Arc<Mutex<TerminalState>>,
+    /// Thread-shared terminal state behind a fair mutex.
+    pub terminal: Arc<FairMutex<TerminalState>>,
 
-    // PTY handles (main thread for shutdown, reader thread for parsing)
-    pub pty_writer: Option<Box<dyn Write + Send>>,
+    // PTY handles
+    /// Shared PTY writer — main thread writes input, reader thread writes
+    /// VTE responses (DA, DECRPM, etc.).
+    pty_writer: PtyWriter,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
 
@@ -40,10 +45,12 @@ pub struct Tab {
     pub search: Option<SearchState>,
     /// True when an inactive tab received a bell — shows badge in tab bar.
     pub has_bell_badge: bool,
-    /// Grid content modified since last render. Lockless — only main thread
-    /// reads/writes (PTY thread sends events via `EventLoopProxy`, never
-    /// touches this flag directly).
+    /// Grid content modified since last render. Set by PTY thread (via
+    /// `TermEvent::Wakeup`), cleared by renderer after each frame.
     grid_dirty: AtomicBool,
+    /// Coalesces `Wakeup` events: the reader thread only sends a new Wakeup
+    /// when this is `false`. The main thread clears it when processing.
+    wakeup_pending: Arc<AtomicBool>,
 }
 
 impl Tab {
@@ -104,10 +111,6 @@ impl Tab {
         let writer = pair.master.take_writer()?;
         log("  reader/writer ready");
 
-        spawn_reader_thread(cfg.id, reader, cfg.proxy.clone());
-        #[cfg(target_os = "windows")]
-        spawn_child_waiter(cfg.id, &*child, cfg.proxy);
-
         let initial_title = derive_initial_title(cfg.id, &shell_args, is_wsl);
 
         let terminal_state = TerminalState::new(
@@ -118,18 +121,33 @@ impl Tab {
             initial_title,
             is_wsl,
         );
+        let terminal = Arc::new(FairMutex::new(terminal_state));
+        let pty_writer: PtyWriter = Arc::new(parking_lot::Mutex::new(writer));
+        let wakeup_pending = Arc::new(AtomicBool::new(false));
+
+        spawn_reader_thread(
+            cfg.id,
+            reader,
+            Arc::clone(&terminal),
+            Arc::clone(&pty_writer),
+            Arc::clone(&wakeup_pending),
+            cfg.proxy.clone(),
+        );
+        #[cfg(target_os = "windows")]
+        spawn_child_waiter(cfg.id, &*child, cfg.proxy);
 
         log(&format!("Tab::spawn done for {:?}", cfg.id));
         Ok(Self {
             id: cfg.id,
-            terminal: Arc::new(Mutex::new(terminal_state)),
-            pty_writer: Some(writer),
+            terminal,
+            pty_writer,
             pty_master: pair.master,
             child,
             selection: None,
             search: None,
             has_bell_badge: false,
             grid_dirty: AtomicBool::new(true),
+            wakeup_pending,
         })
     }
 
@@ -137,9 +155,8 @@ impl Tab {
     /// Must be called before dropping to avoid `ClosePseudoConsole` blocking
     /// on Windows (the `ConPTY` reader thread holds a pipe handle).
     pub fn shutdown(&mut self) {
-        // Close writer first so the child sees EOF on stdin
-        self.pty_writer.take();
-        // Kill the child process so ClosePseudoConsole returns quickly
+        // Kill the child process so ClosePseudoConsole returns quickly.
+        // The reader thread will see EOF or error and exit naturally.
         let _ = self.child.kill();
     }
 
@@ -185,6 +202,11 @@ impl Tab {
     /// Set the grid dirty flag.
     pub fn set_grid_dirty(&self, dirty: bool) {
         self.grid_dirty.store(dirty, Ordering::Relaxed);
+    }
+
+    /// Clear the wakeup-pending flag so the reader thread can send another.
+    pub fn clear_wakeup(&self) {
+        self.wakeup_pending.store(false, Ordering::Relaxed);
     }
 
     // ── Clone-type property accessors ──────────────────────────────────
@@ -318,34 +340,15 @@ impl Tab {
 
     // ── PTY I/O ────────────────────────────────────────────────────────
 
-    /// Process raw PTY output and collect all side-effect data in one lock.
+    /// Write raw bytes to the PTY stdin.
     ///
-    /// Returns `(title_changed, bell_active, notifications)` so the caller
-    /// can act on them without re-locking.
-    pub fn process_output_batch(
-        &mut self,
-        data: &[u8],
-    ) -> (bool, bool, Vec<Notification>) {
-        let mut term = self.terminal.lock();
-        let old_title = term.effective_title();
-        term.process_output(data, &mut self.pty_writer);
-        let new_title = term.effective_title();
-        let bell_active = term.bell_start.is_some();
-        let notifications = term.drain_notifications();
-        drop(term);
-        self.set_grid_dirty(true);
-        (old_title != new_title, bell_active, notifications)
-    }
-
-    /// Write bytes to the PTY.
-    pub fn send_pty(&mut self, data: &[u8]) {
-        if let Some(writer) = self.pty_writer.as_mut() {
-            match writer.write_all(data) {
-                Ok(()) => {
-                    let _ = writer.flush();
-                }
-                Err(e) => log(&format!("send_pty ERROR for tab {:?}: {e}", self.id)),
-            }
+    /// Thread-safe: uses the shared writer mutex. Takes `&self` because the
+    /// writer is behind `Arc<Mutex<>>`.
+    pub fn send_pty(&self, data: &[u8]) {
+        if !data.is_empty() {
+            let mut w = self.pty_writer.lock();
+            let _ = w.write_all(data);
+            let _ = w.flush();
         }
     }
 
@@ -424,30 +427,83 @@ impl Tab {
     }
 }
 
-/// Spawn the PTY reader thread that forwards output to the event loop.
+/// Maximum read buffer before forcing a lock. 1 MB.
+const READ_BUFFER_SIZE: usize = 0x10_0000;
+/// Maximum bytes to parse per lock hold. Limits how long the reader thread
+/// blocks the main thread. Larger = higher throughput, smaller = lower latency.
+const MAX_LOCKED_PARSE: usize = 0x1_0000; // 64 KB
+
+/// Spawn the PTY reader thread that parses VTE output under the terminal lock.
+///
+/// The reader thread shares the PTY writer (for VTE responses like DA,
+/// DECRPM). The main thread writes keyboard/mouse input through the same
+/// shared writer. No channel needed — both threads write directly.
 fn spawn_reader_thread(
     id: TabId,
     mut reader: Box<dyn Read + Send>,
+    terminal: Arc<FairMutex<TerminalState>>,
+    pty_writer: PtyWriter,
+    wakeup_pending: Arc<AtomicBool>,
     proxy: EventLoopProxy<TermEvent>,
 ) {
     thread::spawn(move || {
         log(&format!("reader thread started for tab {:?}", id));
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; READ_BUFFER_SIZE];
+        let mut unprocessed = 0;
+
         loop {
-            match reader.read(&mut buf) {
-                Ok(0) => {
-                    log(&format!("reader: eof for tab {:?}", id));
-                    let _ = proxy.send_event(TermEvent::PtyExited(id));
-                    break;
+            // Read more data only when the buffer has been fully processed.
+            if unprocessed == 0 {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        log(&format!("reader: eof for tab {:?}", id));
+                        let _ = proxy.send_event(TermEvent::PtyExited(id));
+                        break;
+                    }
+                    Err(e) => {
+                        log(&format!("reader error for tab {:?}: {e}", id));
+                        let _ = proxy.send_event(TermEvent::PtyExited(id));
+                        break;
+                    }
+                    Ok(n) => {
+                        unprocessed = n;
+                    }
                 }
-                Err(e) => {
-                    log(&format!("reader error for tab {:?}: {e}", id));
-                    let _ = proxy.send_event(TermEvent::PtyExited(id));
-                    break;
+            }
+
+            // Try to acquire terminal lock (fast path).
+            let mut term = match terminal.try_lock_unfair() {
+                Some(t) => t,
+                None if unprocessed >= READ_BUFFER_SIZE => {
+                    // Buffer full — force lock.
+                    terminal.lock_unfair()
                 }
-                Ok(n) => {
-                    let _ = proxy.send_event(TermEvent::PtyOutput(id, buf[..n].to_vec()));
+                None => {
+                    // Read more data while waiting for lock.
+                    match reader.read(&mut buf[unprocessed..]) {
+                        Ok(n) if n > 0 => unprocessed += n,
+                        _ => {}
+                    }
+                    continue;
                 }
+            };
+
+            // Parse in bounded chunks to limit lock hold time.
+            // This lets the main thread acquire the lock between
+            // chunks for rendering, keybindings, etc.
+            let chunk = unprocessed.min(MAX_LOCKED_PARSE);
+            term.process_output(&buf[..chunk], &pty_writer);
+            drop(term);
+
+            // Shift remaining unprocessed bytes to front of buffer.
+            if chunk < unprocessed {
+                buf.copy_within(chunk..unprocessed, 0);
+            }
+            unprocessed -= chunk;
+
+            // Only send Wakeup if one isn't already pending.
+            if !wakeup_pending.swap(true, Ordering::Relaxed) {
+                let _ = proxy.send_event(TermEvent::Wakeup(id));
             }
         }
     });

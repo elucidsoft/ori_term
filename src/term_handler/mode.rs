@@ -89,7 +89,7 @@ impl TermHandler<'_> {
         self.mode.remove(TermMode::APP_KEYPAD);
     }
 
-    pub(super) fn handle_report_mode(&mut self, mode: Mode) {
+    pub(super) fn handle_report_mode(&self, mode: Mode) {
         // DECRPM response: CSI Ps; Pm $ y
         // Pm: 1 = set, 2 = reset, 0 = not recognized
         let (param, state) = match mode {
@@ -103,7 +103,7 @@ impl TermHandler<'_> {
         self.write_pty(response.as_bytes());
     }
 
-    pub(super) fn handle_report_private_mode(&mut self, mode: PrivateMode) {
+    pub(super) fn handle_report_private_mode(&self, mode: PrivateMode) {
         // DECRPM response: CSI ? Ps; Pm $ y
         let (param, state) = match mode {
             PrivateMode::Named(NamedPrivateMode::SwapScreenAndSetRestoreCursor) => {
@@ -123,7 +123,7 @@ impl TermHandler<'_> {
         self.write_pty(response.as_bytes());
     }
 
-    pub(super) fn handle_device_status(&mut self, status: usize) {
+    pub(super) fn handle_device_status(&self, status: usize) {
         match status {
             // DSR 5 — Device Status Report: respond "OK"
             5 => {
@@ -140,7 +140,7 @@ impl TermHandler<'_> {
         }
     }
 
-    pub(super) fn handle_identify_terminal(&mut self, intermediate: Option<char>) {
+    pub(super) fn handle_identify_terminal(&self, intermediate: Option<char>) {
         match intermediate {
             // DA2 — Secondary Device Attributes (CSI > c)
             Some('>') => {
@@ -155,13 +155,13 @@ impl TermHandler<'_> {
         }
     }
 
-    pub(super) fn handle_text_area_size_chars(&mut self) {
+    pub(super) fn handle_text_area_size_chars(&self) {
         let grid = self.active_grid_ref();
         let response = format!("\x1b[8;{};{}t", grid.lines, grid.cols);
         self.write_pty(response.as_bytes());
     }
 
-    pub(super) fn handle_text_area_size_pixels(&mut self) {
+    pub(super) fn handle_text_area_size_pixels(&self) {
         // Report pixel size as CSI 4 ; height ; width t
         // We don't track pixel size in the handler, so report character-based estimate
         let grid = self.active_grid_ref();

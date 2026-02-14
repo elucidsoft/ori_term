@@ -17,6 +17,7 @@ pub mod render;
 pub mod search;
 pub mod selection;
 pub mod shell_integration;
+pub mod sync;
 pub mod tab;
 pub mod tab_bar;
 pub mod term_handler;

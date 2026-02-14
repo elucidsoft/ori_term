@@ -4,13 +4,13 @@ use std::io::Write;
 
 use vte::Perform;
 
-use super::types::{Notification, PromptState};
+use super::types::{Notification, PromptState, PtyWriter};
 
 /// Raw VTE `Perform` implementation that intercepts sequences the high-level
 /// `vte::ansi::Processor` drops: OSC 7 (CWD), OSC 133 (prompt markers),
 /// OSC 9/99/777 (notifications), and XTVERSION (CSI > q).
 pub(super) struct RawInterceptor<'a> {
-    pub pty_writer: &'a mut Option<Box<dyn Write + Send>>,
+    pub pty_writer: &'a PtyWriter,
     pub cwd: &'a mut Option<String>,
     pub prompt_state: &'a mut PromptState,
     pub pending_notifications: &'a mut Vec<Notification>,
@@ -113,10 +113,9 @@ impl Perform for RawInterceptor<'_> {
             let build = include_str!("../../BUILD_NUMBER").trim();
             // Response: DCS > | terminal-name(version) ST
             let response = format!("\x1bP>|oriterm({version} build {build})\x1b\\");
-            if let Some(w) = self.pty_writer.as_mut() {
-                let _ = w.write_all(response.as_bytes());
-                let _ = w.flush();
-            }
+            let mut w = self.pty_writer.lock();
+            let _ = w.write_all(response.as_bytes());
+            let _ = w.flush();
         }
     }
 }

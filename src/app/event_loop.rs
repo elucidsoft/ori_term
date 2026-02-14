@@ -43,20 +43,27 @@ impl ApplicationHandler<TermEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TermEvent) {
         match event {
-            TermEvent::PtyOutput(tab_id, data) => {
-                log(&format!("pty_output: tab={tab_id:?} len={}", data.len()));
+            TermEvent::Wakeup(tab_id) => {
                 self.pty_event_count += 1;
-                self.pty_bytes_received += data.len() as u64;
-
                 self.cursor_blink_reset = Instant::now();
 
-                // Single lock: process output, capture title change, bell, and
-                // notifications all at once.
-                let Some(tab) = self.tabs.get_mut(&tab_id) else {
+                let Some(tab) = self.tabs.get(&tab_id) else {
                     return;
                 };
-                let (title_changed, bell_active, notifications) =
-                    tab.process_output_batch(&data);
+
+                // Clear the coalescing flag so the reader thread can send
+                // another Wakeup after it parses more data.
+                tab.clear_wakeup();
+                tab.set_grid_dirty(true);
+
+                // Briefly lock terminal to read side-effect state.
+                let mut term = tab.terminal.lock();
+                let title_changed = term.title_dirty;
+                term.title_dirty = false;
+                let bell_active = term.bell_start.is_some();
+                let notifications = term.drain_notifications();
+                drop(term);
+
                 if title_changed {
                     self.tab_bar_dirty = true;
                 }
@@ -178,12 +185,11 @@ impl ApplicationHandler<TermEvent> for App {
             };
             log(&format!(
                 "stats: renders={}/s (avg {avg_ms:.1}ms, total {:.0}ms), \
-                 pty={} ev/s {:.1} KB/s, \
+                 pty_wakeups={}/s, \
                  win_events={}/s, cursor_moved={}/s, about_to_wait={}/s",
                 (f64::from(self.render_count) / secs) as u32,
                 self.render_total_ms,
                 (f64::from(self.pty_event_count) / secs) as u32,
-                self.pty_bytes_received as f64 / secs / 1024.0,
                 (f64::from(self.window_event_count) / secs) as u32,
                 (f64::from(self.cursor_moved_count) / secs) as u32,
                 (f64::from(self.about_to_wait_count) / secs) as u32,
@@ -191,7 +197,6 @@ impl ApplicationHandler<TermEvent> for App {
             self.render_count = 0;
             self.render_total_ms = 0.0;
             self.pty_event_count = 0;
-            self.pty_bytes_received = 0;
             self.window_event_count = 0;
             self.cursor_moved_count = 0;
             self.about_to_wait_count = 0;
