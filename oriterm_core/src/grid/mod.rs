@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod editing;
 pub mod navigation;
 pub mod row;
+pub mod scroll;
 
 use std::ops::{Index, IndexMut, Range};
 

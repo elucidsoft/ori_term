@@ -31,7 +31,7 @@ sections:
     status: complete
   - id: "1.9"
     title: Grid Scrolling
-    status: not-started
+    status: complete
   - id: "1.10"
     title: Scrollback Ring Buffer
     status: not-started
@@ -351,35 +351,35 @@ Scroll operations within scroll regions. A scroll region is a range of lines (se
 
 **File:** `oriterm_core/src/grid/scroll.rs`
 
-- [ ] Add to `Grid`:
-  - [ ] Field: `scroll_region: Range<usize>` — top..bottom (default: 0..lines)
-  - [ ] `set_scroll_region(&mut self, top: usize, bottom: usize)` — DECSTBM
-    - [ ] Validate: top < bottom, both within grid bounds
-    - [ ] Store as `top..bottom`
-- [ ] `scroll_up(&mut self, count: usize)`
-  - [ ] Move rows in scroll region up by `count`
-  - [ ] Top rows go to scrollback (if scroll region is full screen) or are lost (if sub-region)
-  - [ ] New blank rows appear at bottom of region
-  - [ ] Mark affected rows dirty
-- [ ] `scroll_down(&mut self, count: usize)`
-  - [ ] Move rows in scroll region down by `count`
-  - [ ] Bottom rows are lost
-  - [ ] New blank rows appear at top of region
-  - [ ] Mark affected rows dirty
-- [ ] `insert_lines(&mut self, count: usize)` — IL: insert blank lines at cursor, pushing down
-  - [ ] Only operates within scroll region
-  - [ ] Cursor must be within scroll region
-- [ ] `delete_lines(&mut self, count: usize)` — DL: delete lines at cursor, pulling up
-  - [ ] Only operates within scroll region
-  - [ ] New blank lines at bottom of region
-- [ ] **Tests** (`oriterm_core/src/grid/scroll.rs` `#[cfg(test)]`):
-  - [ ] `scroll_up(1)` with full-screen region: top row evicted, blank at bottom
-  - [ ] `scroll_up(3)` with sub-region: only region rows move
-  - [ ] `scroll_down(1)`: bottom row lost, blank at top of region
-  - [ ] `insert_lines(2)` at cursor line: 2 blank lines inserted, bottom rows lost
-  - [ ] `delete_lines(2)` at cursor line: 2 lines removed, blanks at bottom
-  - [ ] Scroll region boundaries respected (rows outside region untouched)
-  - [ ] `set_scroll_region` with invalid values is clamped
+- [x] Add to `Grid`:
+  - [x] Field: `scroll_region: Range<usize>` — top..bottom (default: 0..lines)
+  - [x] `set_scroll_region(&mut self, top: usize, bottom: Option<usize>)` — DECSTBM
+    - [x] Validate: top < bottom, both within grid bounds
+    - [x] Store as `top..bottom` (0-based half-open range)
+- [x] `scroll_up(&mut self, count: usize)`
+  - [x] Move rows in scroll region up by `count`
+  - [x] Top rows go to scrollback (if scroll region is full screen) or are lost (if sub-region)
+  - [x] New blank rows appear at bottom of region
+  - [ ] Mark affected rows dirty  <!-- blocked-by:1.11 -->
+- [x] `scroll_down(&mut self, count: usize)`
+  - [x] Move rows in scroll region down by `count`
+  - [x] Bottom rows are lost
+  - [x] New blank rows appear at top of region
+  - [ ] Mark affected rows dirty  <!-- blocked-by:1.11 -->
+- [x] `insert_lines(&mut self, count: usize)` — IL: insert blank lines at cursor, pushing down
+  - [x] Only operates within scroll region
+  - [x] Cursor must be within scroll region
+- [x] `delete_lines(&mut self, count: usize)` — DL: delete lines at cursor, pulling up
+  - [x] Only operates within scroll region
+  - [x] New blank lines at bottom of region
+- [x] **Tests** (`oriterm_core/src/grid/scroll.rs` `#[cfg(test)]`):
+  - [x] `scroll_up(1)` with full-screen region: top row evicted, blank at bottom
+  - [x] `scroll_up(3)` with sub-region: only region rows move
+  - [x] `scroll_down(1)`: bottom row lost, blank at top of region
+  - [x] `insert_lines(2)` at cursor line: 2 blank lines inserted, bottom rows lost
+  - [x] `delete_lines(2)` at cursor line: 2 lines removed, blanks at bottom
+  - [x] Scroll region boundaries respected (rows outside region untouched)
+  - [x] `set_scroll_region` with invalid values is clamped
 
 ---
 

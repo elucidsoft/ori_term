@@ -152,7 +152,7 @@ fn bench_put_char_full_screen(c: &mut Criterion) {
     group.finish();
 }
 
-/// Scroll: linefeed at the bottom line, which triggers `scroll_region_up`.
+/// Scroll: linefeed at the bottom line, which triggers `scroll_up`.
 /// This is the second hottest path — every newline at the bottom of the
 /// screen causes a scroll. Models `tail -f`, build output, `yes`.
 fn bench_scroll(c: &mut Criterion) {
@@ -191,6 +191,96 @@ fn bench_scroll_bce(c: &mut Criterion) {
                 b.iter(|| {
                     grid.cursor_mut().set_line(lines - 1);
                     grid.linefeed();
+                    black_box(&grid);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Scroll down (reverse index at top): RI at top of screen inserts a blank
+/// line. Less common than scroll_up but exercised by `tput ri`, some editors
+/// for reverse scrolling, and cursor-up-past-top in scroll region.
+fn bench_scroll_down(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scroll/reverse_index_at_top");
+    for &(cols, lines) in &SIZES {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{cols}x{lines}")),
+            &(cols, lines),
+            |b, &(cols, lines)| {
+                let mut grid = filled_grid(lines, cols);
+                b.iter(|| {
+                    grid.cursor_mut().set_line(0);
+                    grid.reverse_index();
+                    black_box(&grid);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Scroll up within a DECSTBM sub-region: the vim/tmux hot path. Only the
+/// editor area scrolls while status bars and tab lines stay fixed. Models
+/// a typical split: 2 lines reserved (top bar + status), rest scrolls.
+fn bench_scroll_sub_region(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scroll/sub_region");
+    for &(cols, lines) in &SIZES {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{cols}x{lines}")),
+            &(cols, lines),
+            |b, &(cols, lines)| {
+                let mut grid = filled_grid(lines, cols);
+                // Reserve line 0 (tab bar) and last line (status bar).
+                grid.set_scroll_region(2, Some(lines - 1));
+                b.iter(|| {
+                    grid.cursor_mut().set_line(lines - 2);
+                    grid.linefeed();
+                    black_box(&grid);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Insert lines (IL): CSI Ps L. Used by vim `O` (open line above), tmux
+/// pane resize, and any editor that inserts lines mid-screen. Pushes
+/// existing lines down within the scroll region.
+fn bench_insert_lines(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scroll/insert_lines");
+    for &(cols, lines) in &SIZES {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{cols}x{lines}")),
+            &(cols, lines),
+            |b, &(cols, lines)| {
+                let mut grid = filled_grid(lines, cols);
+                b.iter(|| {
+                    grid.cursor_mut().set_line(lines / 2);
+                    grid.insert_lines(black_box(1));
+                    black_box(&grid);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Delete lines (DL): CSI Ps M. Used by vim `dd`, tmux pane close, and
+/// any editor that deletes lines mid-screen. Pulls remaining lines up
+/// within the scroll region.
+fn bench_delete_lines(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scroll/delete_lines");
+    for &(cols, lines) in &SIZES {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{cols}x{lines}")),
+            &(cols, lines),
+            |b, &(cols, lines)| {
+                let mut grid = filled_grid(lines, cols);
+                b.iter(|| {
+                    grid.cursor_mut().set_line(lines / 2);
+                    grid.delete_lines(black_box(1));
                     black_box(&grid);
                 });
             },
@@ -411,6 +501,10 @@ criterion_group!(
     bench_put_char_full_screen,
     bench_scroll,
     bench_scroll_bce,
+    bench_scroll_down,
+    bench_scroll_sub_region,
+    bench_insert_lines,
+    bench_delete_lines,
     bench_erase_display_all,
     bench_erase_line_below,
     bench_insert_blank,
