@@ -37,7 +37,8 @@ impl App {
             code += 16;
         }
 
-        if tab.mode.contains(TermMode::SGR_MOUSE) {
+        let mode = tab.mode();
+        if mode.contains(TermMode::SGR_MOUSE) {
             // SGR encoding: CSI < code ; col+1 ; line+1 M/m
             let suffix = if pressed { b'M' } else { b'm' };
             let mut buf = [0u8; 32];
@@ -46,7 +47,7 @@ impl App {
             let pos = cursor.position() as usize;
             buf[pos] = suffix;
             tab.send_pty(&buf[..=pos]);
-        } else if tab.mode.contains(TermMode::UTF8_MOUSE) {
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
             // UTF-8 encoding: like normal but coordinates are UTF-8 encoded.
             // Coordinates are limited to valid Unicode scalar values (max U+10FFFF).
             let encode_utf8 = |v: u32, out: &mut [u8; 4]| -> usize {

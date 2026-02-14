@@ -97,16 +97,18 @@ impl App {
         self.scroll_to_search_match(tab_id);
     }
 
-    pub(super) fn scroll_to_search_match(&mut self, tab_id: TabId) {
+    pub(super) fn scroll_to_search_match(&self, tab_id: TabId) {
         // Read the focused match stable row, then convert to absolute.
         let match_abs_row = self.tabs.get(&tab_id).and_then(|tab| {
             let stable = tab.search.as_ref()?.focused_match()?.start_row;
-            stable.to_absolute(tab.grid())
+            let term = tab.terminal.lock();
+            stable.to_absolute(term.active_grid())
         });
 
         if let Some(target_row) = match_abs_row {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                let grid = tab.grid_mut();
+            if let Some(tab) = self.tabs.get(&tab_id) {
+                let mut term = tab.terminal.lock();
+                let grid = term.active_grid_mut();
                 let sb_len = grid.scrollback.len();
                 let lines = grid.lines;
 
@@ -118,7 +120,7 @@ impl App {
                     // Scroll so the match is roughly centered in the viewport
                     let center_offset = sb_len.saturating_sub(target_row).saturating_sub(lines / 2);
                     grid.display_offset = center_offset.min(sb_len);
-                    tab.grid_dirty = true;
+                    term.grid_dirty = true;
                 }
             }
         }

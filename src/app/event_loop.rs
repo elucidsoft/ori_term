@@ -12,7 +12,7 @@ use crate::config;
 use crate::key_encoding::{self, KeyEventType};
 use crate::keybindings;
 use crate::log;
-use crate::tab::TermEvent;
+use crate::tab::{Tab, TermEvent};
 use crate::term_mode::TermMode;
 
 use super::{App, build_modifiers};
@@ -45,16 +45,18 @@ impl ApplicationHandler<TermEvent> for App {
         match event {
             TermEvent::PtyOutput(tab_id, data) => {
                 log(&format!("pty_output: tab={tab_id:?} len={}", data.len()));
+                self.pty_event_count += 1;
+                self.pty_bytes_received += data.len() as u64;
 
                 self.cursor_blink_reset = Instant::now();
 
                 let old_title = self.tabs.get(&tab_id)
-                    .map(|t| t.effective_title().into_owned());
+                    .map(Tab::effective_title);
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.process_output(&data);
                 }
                 let new_title = self.tabs.get(&tab_id)
-                    .map(|t| t.effective_title().into_owned());
+                    .map(Tab::effective_title);
                 if old_title != new_title {
                     self.tab_bar_dirty = true;
                 }
@@ -66,7 +68,7 @@ impl ApplicationHandler<TermEvent> for App {
                     .and_then(|wid| self.windows.get(&wid))
                     .is_some_and(|tw| tw.active_tab_id() == Some(tab_id));
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                    if tab.bell_start.is_some() && !is_active {
+                    if tab.bell_start().is_some() && !is_active {
                         tab.has_bell_badge = true;
                         self.tab_bar_dirty = true;
                     }
@@ -88,7 +90,7 @@ impl ApplicationHandler<TermEvent> for App {
                 if let Some(wid) = self.window_containing_tab(tab_id) {
                     if let Some(tw) = self.windows.get(&wid) {
                         let bell_active =
-                            self.tabs.get(&tab_id).and_then(|t| t.bell_start).is_some();
+                            self.tabs.get(&tab_id).and_then(Tab::bell_start).is_some();
                         if tw.active_tab_id() == Some(tab_id) || bell_active {
                             self.pending_redraw.insert(wid);
                         }
@@ -110,46 +112,94 @@ impl ApplicationHandler<TermEvent> for App {
         #[cfg(target_os = "windows")]
         self.check_torn_off_merge();
 
-        // Drain coalesced redraws: N PTY events → 1 request_redraw per window.
-        for wid in self.pending_redraw.drain() {
-            if let Some(tw) = self.windows.get(&wid) {
-                tw.window.request_redraw();
-            }
-        }
-
         // Tick tab drag/reorder animations (time-based decay, independent of mouse events)
         let anim_active = self.decay_tab_animations();
-
-        // Smart cursor blink / bell scheduling: instead of spinning at 60fps,
-        // sleep until the next blink transition or bell animation tick.
-        // NOTE: dragging does NOT use Poll — CursorMoved events drive redraws
-        // directly. Polling would present stale frames between mouse events,
-        // each blocking on vsync and adding latency (Chrome doesn't poll either).
         let has_bell_badge = self.tabs.values().any(|t| t.has_bell_badge);
-        if has_bell_badge || anim_active {
-            // Bell badge or tab animation is active — schedule ~60fps redraws.
-            // Use WaitUntil instead of Poll to avoid spinning the event loop,
-            // which would block CursorMoved events behind vsync presents.
-            for tw in self.windows.values() {
-                tw.window.request_redraw();
+
+        // Cursor blink: detect transition since last render.
+        let cursor_blink_dirty = if self.config.terminal.cursor_blink {
+            self.cursor_blink_visible() != self.prev_cursor_visible
+        } else {
+            false
+        };
+
+        // Aggregate dirty state: pending PTY output, tab bar changes,
+        // bell animation, drag animation, cursor blink transition,
+        // or any active tab with dirty grid content.
+        let grid_dirty = self.windows.values().any(|tw| {
+            tw.active_tab_id()
+                .and_then(|tid| self.tabs.get(&tid))
+                .is_some_and(Tab::grid_dirty)
+        });
+        let needs_render = !self.pending_redraw.is_empty()
+            || self.tab_bar_dirty
+            || grid_dirty
+            || has_bell_badge
+            || anim_active
+            || cursor_blink_dirty;
+
+        // Direct rendering bypasses WM_PAINT starvation on Windows.
+        // WM_PAINT has the lowest message priority — continuous WM_MOUSEMOVE
+        // (e.g. htop with MOUSE_ALL) starves it indefinitely. Rendering from
+        // about_to_wait is immune to this starvation.
+        let frame_budget = Duration::from_millis(8);
+        if needs_render && self.last_render_time.elapsed() >= frame_budget {
+            self.pending_redraw.clear();
+            let wids: Vec<WindowId> = self.windows.keys().copied().collect();
+            for wid in wids {
+                self.render_window(wid);
             }
-            let deadline = Instant::now() + Duration::from_millis(16);
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+            self.last_render_time = Instant::now();
+        }
+
+        // Schedule next wake-up based on what needs attention.
+        if needs_render {
+            // Active dirty state — wake at frame budget to render.
+            let remaining = frame_budget.saturating_sub(self.last_render_time.elapsed());
+            event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + remaining));
         } else if self.config.terminal.cursor_blink {
-            // Schedule wake-up at the next blink transition.
+            // Idle with cursor blink — schedule at next blink transition.
             let interval_ms = self.config.terminal.cursor_blink_interval_ms.max(1);
             let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
             let next_toggle_ms = ((elapsed_ms / interval_ms) + 1) * interval_ms;
             let sleep_ms = next_toggle_ms.saturating_sub(elapsed_ms);
-            let deadline = Instant::now() + Duration::from_millis(sleep_ms);
-            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-            // Request redraw for all windows so the blink state updates.
-            for tw in self.windows.values() {
-                tw.window.request_redraw();
-            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(sleep_ms),
+            ));
         } else {
             // Fully idle — sleep until next event.
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+
+        // Periodic stats logging.
+        self.about_to_wait_count += 1;
+        if self.stats_log_time.elapsed().as_secs() >= 5 {
+            let secs = self.stats_log_time.elapsed().as_secs_f64();
+            let avg_ms = if self.render_count > 0 {
+                self.render_total_ms / f64::from(self.render_count)
+            } else {
+                0.0
+            };
+            log(&format!(
+                "stats: renders={}/s (avg {avg_ms:.1}ms, total {:.0}ms), \
+                 pty={} ev/s {:.1} KB/s, \
+                 win_events={}/s, cursor_moved={}/s, about_to_wait={}/s",
+                (f64::from(self.render_count) / secs) as u32,
+                self.render_total_ms,
+                (f64::from(self.pty_event_count) / secs) as u32,
+                self.pty_bytes_received as f64 / secs / 1024.0,
+                (f64::from(self.window_event_count) / secs) as u32,
+                (f64::from(self.cursor_moved_count) / secs) as u32,
+                (f64::from(self.about_to_wait_count) / secs) as u32,
+            ));
+            self.render_count = 0;
+            self.render_total_ms = 0.0;
+            self.pty_event_count = 0;
+            self.pty_bytes_received = 0;
+            self.window_event_count = 0;
+            self.cursor_moved_count = 0;
+            self.about_to_wait_count = 0;
+            self.stats_log_time = Instant::now();
         }
     }
 
@@ -159,6 +209,7 @@ impl ApplicationHandler<TermEvent> for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
+        self.window_event_count += 1;
         match event {
             WindowEvent::CloseRequested => {
                 self.close_window(window_id, event_loop);
@@ -192,6 +243,7 @@ impl ApplicationHandler<TermEvent> for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_moved_count += 1;
                 self.handle_cursor_moved(window_id, position, event_loop);
             }
 
@@ -201,7 +253,7 @@ impl ApplicationHandler<TermEvent> for App {
                     let has_kitty_events = self
                         .active_tab_id(window_id)
                         .and_then(|tid| self.tabs.get(&tid))
-                        .is_some_and(|tab| tab.mode.contains(TermMode::REPORT_EVENT_TYPES));
+                        .is_some_and(|tab| tab.mode().contains(TermMode::REPORT_EVENT_TYPES));
                     if !has_kitty_events {
                         return;
                     }
@@ -293,7 +345,7 @@ impl ApplicationHandler<TermEvent> for App {
                         let bytes = key_encoding::encode_key(
                             &event.logical_key,
                             mods,
-                            tab.mode,
+                            tab.mode(),
                             event.text.as_ref().map(winit::keyboard::SmolStr::as_str),
                             event.location,
                             evt,
@@ -319,7 +371,7 @@ impl ApplicationHandler<TermEvent> for App {
                 }
                 if let Some(tid) = self.active_tab_id(window_id) {
                     if let Some(tab) = self.tabs.get_mut(&tid) {
-                        if tab.mode.contains(TermMode::FOCUS_IN_OUT) {
+                        if tab.mode().contains(TermMode::FOCUS_IN_OUT) {
                             let seq = if focused {
                                 b"\x1b[I" as &[u8]
                             } else {

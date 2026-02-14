@@ -73,7 +73,7 @@ impl App {
                 let mouse_active = self
                     .tabs
                     .get(&tid)
-                    .is_some_and(|t| t.mode.intersects(TermMode::ANY_MOUSE));
+                    .is_some_and(|t| t.mode().intersects(TermMode::ANY_MOUSE));
                 if mouse_active {
                     if let Some((col, line)) = self.pixel_to_cell(pos) {
                         let btn_code = match button {
@@ -357,7 +357,7 @@ impl App {
             let mouse_active = self
                 .tabs
                 .get(&tid)
-                .is_some_and(|t| t.mode.intersects(TermMode::ANY_MOUSE));
+                .is_some_and(|t| t.mode().intersects(TermMode::ANY_MOUSE));
             if mouse_active {
                 let pos = self
                     .cursor_pos
@@ -378,9 +378,10 @@ impl App {
         // Alternate scroll: convert scroll to arrow keys in alt screen
         if !self.modifiers.shift_key() {
             let alt_scroll_mode = self.tabs.get(&tid).and_then(|t| {
-                let is_alt_scroll = t.mode.contains(TermMode::ALT_SCREEN)
-                    && t.mode.contains(TermMode::ALTERNATE_SCROLL);
-                is_alt_scroll.then(|| t.mode.contains(TermMode::APP_CURSOR))
+                let mode = t.mode();
+                let is_alt_scroll = mode.contains(TermMode::ALT_SCREEN)
+                    && mode.contains(TermMode::ALTERNATE_SCROLL);
+                is_alt_scroll.then(|| mode.contains(TermMode::APP_CURSOR))
             });
             if let Some(app_cursor) = alt_scroll_mode {
                 let (up, down) = if app_cursor {

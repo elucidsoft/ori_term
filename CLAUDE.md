@@ -99,6 +99,21 @@ Colors downgrade gracefully: TrueColor → nearest ANSI256 → nearest ANSI → 
 - **lipgloss** — CSS-like fluent styling, AdaptiveColor/CompleteColor, lazy `sync.Once` renderer
 - **termenv** — Color profile detection (NO_COLOR/CLICOLOR), `Environ` interface for testing, profile-aware downgrade
 
+## Plans
+
+Implementation plans live in `plans/`. Each plan is a directory with an `index.md`, `00-overview.md`, and numbered section files (`section-01-*.md`, `section-02-*.md`, etc.).
+
+When the user says **"continue plan X"** or **"resume plan X"** or **"pick up plan X"**:
+1. Look in `plans/` for a directory matching the name (fuzzy match — "threading" matches `threaded-pty`, "font" matches `font-rendering`, etc.).
+2. Read `00-overview.md` for the full context and mandate.
+3. Read each `section-*.md` to find the first section with `status: not-started` or `status: in-progress`.
+4. Resume work from that section.
+5. **After completing each section**, update the plan files: set YAML status to `complete`, check checkboxes, update `index.md`, and record any deviations.
+
+Plans are the source of truth for multi-session work. Keep them in sync with reality.
+
+---
+
 ## Current State
 
 See [current_state.md](current_state.md) for full implementation status, architecture, data structures, and event flow.

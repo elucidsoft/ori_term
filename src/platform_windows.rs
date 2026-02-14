@@ -255,6 +255,16 @@ pub fn show_window(window: &winit::window::Window) {
     }
 }
 
+/// Release mouse capture before process exit to prevent orphaned mouse-up
+/// events from being delivered to the window behind (click-through on exit).
+#[allow(unsafe_code)]
+pub fn release_mouse_capture() {
+    // SAFETY: Standard Win32 API call, no preconditions.
+    unsafe {
+        ReleaseCapture();
+    }
+}
+
 fn snap_ptrs() -> &'static Mutex<HashMap<usize, usize>> {
     SNAP_PTRS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -363,20 +373,50 @@ unsafe extern "system" fn subclass_proc(
                 let h = rect.bottom - rect.top;
 
                 let border = data.resize_border;
+                let not_maximized = IsZoomed(hwnd) == 0;
 
-                // Resize edges (not when maximized — no resize border needed)
-                if IsZoomed(hwnd) == 0 {
+                // Caption area (tab bar) — interactive elements take priority
+                // over resize borders so buttons at window edges stay clickable.
+                if y < data.caption_height {
+                    // Check interactive regions first (tabs, buttons, controls)
+                    if let Ok(rects) = data.client_rects.lock() {
+                        for r in rects.iter() {
+                            if x >= r[0] && y >= r[1] && x < r[2] && y < r[3] {
+                                return HTCLIENT as LRESULT;
+                            }
+                        }
+                    }
+                    // Resize edges in non-interactive caption area
+                    if not_maximized {
+                        let on_left = x < border;
+                        let on_right = x >= w - border;
+                        let on_top = y < border;
+
+                        if on_top && on_left {
+                            return HTTOPLEFT as LRESULT;
+                        }
+                        if on_top && on_right {
+                            return HTTOPRIGHT as LRESULT;
+                        }
+                        if on_left {
+                            return HTLEFT as LRESULT;
+                        }
+                        if on_right {
+                            return HTRIGHT as LRESULT;
+                        }
+                        if on_top {
+                            return HTTOP as LRESULT;
+                        }
+                    }
+                    return HTCAPTION as LRESULT;
+                }
+
+                // Below caption — resize edges
+                if not_maximized {
                     let on_left = x < border;
                     let on_right = x >= w - border;
-                    let on_top = y < border;
                     let on_bottom = y >= h - border;
 
-                    if on_top && on_left {
-                        return HTTOPLEFT as LRESULT;
-                    }
-                    if on_top && on_right {
-                        return HTTOPRIGHT as LRESULT;
-                    }
                     if on_bottom && on_left {
                         return HTBOTTOMLEFT as LRESULT;
                     }
@@ -389,25 +429,9 @@ unsafe extern "system" fn subclass_proc(
                     if on_right {
                         return HTRIGHT as LRESULT;
                     }
-                    if on_top {
-                        return HTTOP as LRESULT;
-                    }
                     if on_bottom {
                         return HTBOTTOM as LRESULT;
                     }
-                }
-
-                // Caption area (tab bar height) — enables OS drag-to-snap
-                if y < data.caption_height {
-                    // Check interactive regions (tabs, buttons, controls)
-                    if let Ok(rects) = data.client_rects.lock() {
-                        for r in rects.iter() {
-                            if x >= r[0] && y >= r[1] && x < r[2] && y < r[3] {
-                                return HTCLIENT as LRESULT;
-                            }
-                        }
-                    }
-                    return HTCAPTION as LRESULT;
                 }
 
                 HTCLIENT as LRESULT

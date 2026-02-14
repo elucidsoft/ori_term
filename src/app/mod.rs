@@ -129,6 +129,17 @@ pub struct App {
     /// Y tolerance is added to the tear-off check so the cursor needs to
     /// travel further before tearing off again. Cleared when the drag ends.
     pub(super) tear_off_magnetism: f64,
+    /// Last time any window was rendered (for frame-rate limiting).
+    pub(super) last_render_time: Instant,
+    // Performance instrumentation (periodic stats logging).
+    pub(super) render_count: u32,
+    pub(super) render_total_ms: f64,
+    pub(super) pty_event_count: u32,
+    pub(super) pty_bytes_received: u64,
+    pub(super) window_event_count: u32,
+    pub(super) about_to_wait_count: u32,
+    pub(super) cursor_moved_count: u32,
+    pub(super) stats_log_time: Instant,
 }
 
 impl App {
@@ -285,6 +296,15 @@ impl App {
             #[cfg(target_os = "windows")]
             merge_drag_suppress_release: false,
             tear_off_magnetism: 0.0,
+            last_render_time: Instant::now(),
+            render_count: 0,
+            render_total_ms: 0.0,
+            pty_event_count: 0,
+            pty_bytes_received: 0,
+            window_event_count: 0,
+            about_to_wait_count: 0,
+            cursor_moved_count: 0,
+            stats_log_time: Instant::now(),
         };
 
         event_loop.run_app(&mut app)?;
@@ -320,7 +340,7 @@ impl App {
     pub(super) fn copy_selection_to_clipboard(&self, tab_id: TabId) -> bool {
         if let Some(tab) = self.tabs.get(&tab_id) {
             if let Some(ref sel) = tab.selection {
-                let text = selection::extract_text(tab.grid(), sel);
+                let text = selection::extract_text(&tab.grid(), sel);
                 if !text.is_empty() {
                     clipboard::set_text(&text);
                     return true;
@@ -362,7 +382,7 @@ impl App {
         };
         if let Some(text) = clipboard::get_text() {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                if tab.mode.contains(TermMode::BRACKETED_PASTE) {
+                if tab.mode().contains(TermMode::BRACKETED_PASTE) {
                     tab.send_pty(b"\x1b[200~");
                     tab.send_pty(text.as_bytes());
                     tab.send_pty(b"\x1b[201~");

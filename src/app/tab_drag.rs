@@ -438,7 +438,7 @@ impl App {
                 let (cols, rows) = self.grid_dims_for_size(size.width, size.height);
                 if let Some(tab) = self.tabs.get_mut(&tab_id) {
                     tab.resize(cols, rows, size.width as u16, size.height as u16);
-                    tab.grid_dirty = true;
+                    tab.set_grid_dirty(true);
                 }
             }
 

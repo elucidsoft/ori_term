@@ -65,7 +65,8 @@ impl App {
         let Some(tab) = self.tabs.get(&tid) else {
             return no_hit;
         };
-        if let Some(hit) = self.url_cache.url_at(tab.grid(), abs_row, col) {
+        let url_hit = self.url_cache.url_at(&tab.grid(), abs_row, col);
+        if let Some(hit) = url_hit {
             return HoverResult {
                 cursor_icon: CursorIcon::Pointer,
                 hover: Some((window_id, hit.url)),

@@ -6,6 +6,7 @@ use winit::window::{CursorIcon, ResizeDirection, WindowId};
 
 use crate::drag::{DRAG_START_THRESHOLD, DragPhase, TEAR_OFF_THRESHOLD};
 use crate::log;
+use crate::tab::Tab;
 use crate::tab_bar::{CONTROLS_ZONE_WIDTH, TAB_BAR_HEIGHT, TabBarHit, TabBarLayout};
 use crate::term_mode::TermMode;
 
@@ -103,8 +104,8 @@ impl App {
 
         if hover_changed {
             if let Some(tid) = self.active_tab_id(window_id) {
-                if let Some(tab) = self.tabs.get_mut(&tid) {
-                    tab.grid_dirty = true;
+                if let Some(tab) = self.tabs.get(&tid) {
+                    tab.set_grid_dirty(true);
                 }
             }
         }
@@ -147,7 +148,7 @@ impl App {
         let mode = self
             .tabs
             .get(&tid)
-            .map_or(TermMode::empty(), |t| t.mode);
+            .map_or(TermMode::empty(), Tab::mode);
         let report_all = mode.contains(TermMode::MOUSE_ALL);
         let report_motion = mode.contains(TermMode::MOUSE_MOTION);
         if !(report_all || report_motion && self.left_mouse_down) {

@@ -69,7 +69,7 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.clear_selection();
                 tab.resize(cols, rows, pixel_w, pixel_h);
-                tab.grid_dirty = true;
+                tab.set_grid_dirty(true);
             }
         }
         self.tab_bar_dirty = true;
@@ -248,19 +248,18 @@ impl App {
             self.exit_app();
         }
 
-        // Non-last window: safe to do normal cleanup
+        // Non-last window: shutdown tabs and drop on background threads.
+        // On Windows, `ClosePseudoConsole` blocks until reader threads exit.
         let tab_ids: Vec<TabId> = self
             .windows
             .get(&window_id)
             .map(|tw| tw.tabs.clone())
             .unwrap_or_default();
-        for tid in &tab_ids {
-            if let Some(tab) = self.tabs.get_mut(tid) {
-                tab.shutdown();
-            }
-        }
         for tid in tab_ids {
-            self.tabs.remove(&tid);
+            if let Some(mut tab) = self.tabs.remove(&tid) {
+                tab.shutdown();
+                std::thread::spawn(move || drop(tab));
+            }
         }
         self.windows.remove(&window_id);
     }
@@ -292,6 +291,12 @@ impl App {
         for tab in self.tabs.values_mut() {
             tab.shutdown();
         }
+
+        // Release mouse capture so pending mouse-up events don't get
+        // delivered to the window behind after our process exits.
+        #[cfg(target_os = "windows")]
+        crate::platform_windows::release_mouse_capture();
+
         // Don't join threads — process::exit will clean them up.
         std::process::exit(0);
     }
@@ -351,7 +356,7 @@ impl App {
             if let Some(tab) = self.tabs.get_mut(&tab_id) {
                 tab.clear_selection();
                 tab.resize(cols, rows, pixel_w, pixel_h);
-                tab.grid_dirty = true;
+                tab.set_grid_dirty(true);
             }
         }
     }

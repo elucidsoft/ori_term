@@ -1499,6 +1499,7 @@ dependencies = [
  "image",
  "log",
  "notify",
+ "parking_lot",
  "pollster",
  "portable-pty",
  "regex",

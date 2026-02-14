@@ -48,7 +48,8 @@ impl App {
     fn handle_ctrl_click_url(&mut self, tab_id: crate::tab::TabId, abs_row: usize, col: usize) -> bool {
         // Check OSC 8 hyperlink first
         let uri: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
-            let row = tab.grid().absolute_row(abs_row)?;
+            let grid = tab.grid();
+            let row = grid.absolute_row(abs_row)?;
             if col >= row.len() {
                 return None;
             }
@@ -61,7 +62,7 @@ impl App {
         // Fall through to implicit URL detection
         let implicit_url: Option<String> = self.tabs.get(&tab_id).and_then(|tab| {
             let grid = tab.grid();
-            let hit = self.url_cache.url_at(grid, abs_row, col)?;
+            let hit = self.url_cache.url_at(&grid, abs_row, col)?;
             Some(hit.url)
         });
         if let Some(ref url) = implicit_url {
@@ -106,7 +107,7 @@ impl App {
         // Compute stable row index for selection points.
         let stable_row = {
             let tab = self.tabs.get(&tab_id).expect("tab lookup just succeeded");
-            StableRowIndex::from_absolute(tab.grid(), abs_row)
+            StableRowIndex::from_absolute(&tab.grid(), abs_row)
         };
 
         // Shift+click: extend existing selection
@@ -133,7 +134,7 @@ impl App {
                 // Double-click: word selection
                 if let Some(tab) = self.tabs.get(&tab_id) {
                     let (word_start, word_end) =
-                        selection::word_boundaries(tab.grid(), abs_row, col);
+                        selection::word_boundaries(&tab.grid(), abs_row, col);
                     let anchor = SelectionPoint {
                         row: stable_row,
                         col: word_start,
@@ -153,15 +154,15 @@ impl App {
                 // Triple-click: line selection
                 if let Some(tab) = self.tabs.get(&tab_id) {
                     let grid = tab.grid();
-                    let line_start_abs = selection::logical_line_start(grid, abs_row);
-                    let line_end_abs = selection::logical_line_end(grid, abs_row);
+                    let line_start_abs = selection::logical_line_start(&grid, abs_row);
+                    let line_end_abs = selection::logical_line_end(&grid, abs_row);
                     let anchor = SelectionPoint {
-                        row: StableRowIndex::from_absolute(grid, line_start_abs),
+                        row: StableRowIndex::from_absolute(&grid, line_start_abs),
                         col: 0,
                         side: Side::Left,
                     };
                     let pivot = SelectionPoint {
-                        row: StableRowIndex::from_absolute(grid, line_end_abs),
+                        row: StableRowIndex::from_absolute(&grid, line_end_abs),
                         col: grid_cols.saturating_sub(1),
                         side: Side::Right,
                     };
@@ -211,7 +212,7 @@ impl App {
                     let col = col.min(grid_cols.saturating_sub(1));
                     let line = line.min(grid_lines.saturating_sub(1));
                     let abs_row = tab.grid().viewport_to_absolute(line);
-                    let stable_row = StableRowIndex::from_absolute(tab.grid(), abs_row);
+                    let stable_row = StableRowIndex::from_absolute(&tab.grid(), abs_row);
 
                     // Compute new end point based on selection mode.
                     // Pre-compute boundary data from grid before mutating selection.
@@ -220,7 +221,7 @@ impl App {
                     let new_end = match sel_mode {
                         Some(SelectionMode::Word) => {
                             let (w_start, w_end) =
-                                selection::word_boundaries(tab.grid(), abs_row, col);
+                                selection::word_boundaries(&tab.grid(), abs_row, col);
                             let anchor = tab.selection.as_ref().map(|s| s.anchor);
                             let start_pt = SelectionPoint {
                                 row: stable_row,
@@ -241,18 +242,18 @@ impl App {
                         Some(SelectionMode::Line) => {
                             let grid = tab.grid();
                             let drag_line_start =
-                                selection::logical_line_start(grid, abs_row);
+                                selection::logical_line_start(&grid, abs_row);
                             let drag_line_end =
-                                selection::logical_line_end(grid, abs_row);
+                                selection::logical_line_end(&grid, abs_row);
                             if sel_anchor_row.is_some_and(|ar| stable_row < ar) {
                                 Some(SelectionPoint {
-                                    row: StableRowIndex::from_absolute(grid, drag_line_start),
+                                    row: StableRowIndex::from_absolute(&grid, drag_line_start),
                                     col: 0,
                                     side: Side::Left,
                                 })
                             } else {
                                 Some(SelectionPoint {
-                                    row: StableRowIndex::from_absolute(grid, drag_line_end),
+                                    row: StableRowIndex::from_absolute(&grid, drag_line_end),
                                     col: grid_cols.saturating_sub(1),
                                     side: Side::Right,
                                 })

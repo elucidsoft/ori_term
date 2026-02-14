@@ -15,7 +15,7 @@ impl App {
         let inherit_cwd: Option<String> = self
             .active_tab_id(window_id)
             .and_then(|tid| self.tabs.get(&tid))
-            .and_then(|t| t.cwd.clone());
+            .and_then(Tab::cwd);
 
         let tab_id = self.spawn_tab(window_id, inherit_cwd.as_deref())?;
 
@@ -49,11 +49,14 @@ impl App {
             self.windows.remove(wid);
         }
 
-        // Safe to drop now — only reached for non-last windows
-        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+        // Shutdown and drop on a background thread. On Windows,
+        // `ClosePseudoConsole` (called from `pty_master` drop) blocks until
+        // the ConPTY reader thread exits. If child processes (htop, vim, etc.)
+        // are still alive, this can take seconds — must not freeze the event loop.
+        if let Some(mut tab) = self.tabs.remove(&tab_id) {
             tab.shutdown();
+            std::thread::spawn(move || drop(tab));
         }
-        self.tabs.remove(&tab_id);
     }
 
     /// Duplicate tab at `tab_index` — spawns a new tab with the same CWD.
@@ -65,7 +68,7 @@ impl App {
         let Some((window_id, source_tab_id)) = info else {
             return;
         };
-        let cwd = self.tabs.get(&source_tab_id).and_then(|t| t.cwd.clone());
+        let cwd = self.tabs.get(&source_tab_id).and_then(Tab::cwd);
         self.spawn_tab(window_id, cwd.as_deref());
     }
 
@@ -83,7 +86,7 @@ impl App {
 
         let tab_id = self.alloc_tab_id();
         let cursor_shape = config::parse_cursor_style(&self.config.terminal.cursor_style);
-        let mut tab = match Tab::spawn(SpawnConfig {
+        let tab = match Tab::spawn(SpawnConfig {
             id: tab_id,
             cols,
             rows,

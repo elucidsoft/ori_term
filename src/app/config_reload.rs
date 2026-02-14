@@ -101,8 +101,8 @@ impl App {
 
         // Mark everything dirty — config may affect both grid and tab bar.
         self.tab_bar_dirty = true;
-        for tab in self.tabs.values_mut() {
-            tab.grid_dirty = true;
+        for tab in self.tabs.values() {
+            tab.set_grid_dirty(true);
         }
 
         // Redraw all windows

@@ -107,8 +107,10 @@ impl App {
             None => return,
         };
 
-        // Get palette from any tab (for color derivation)
-        let palette = self.tabs.values().next().map(|t| &t.palette);
+        // Get palette from any tab (for color derivation).
+        // Lock the terminal to borrow the palette — guard must outlive the call.
+        let term_guard = self.tabs.values().next().map(|t| t.terminal.lock());
+        let palette = term_guard.as_ref().map(|g| &g.palette);
 
         renderer.draw_settings_frame(
             gpu,

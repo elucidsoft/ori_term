@@ -1,70 +1,46 @@
 //! Tab state: grid, PTY, VTE parser, and shell integration.
 
 mod interceptor;
+pub mod terminal_state;
 mod types;
 
+pub use terminal_state::TerminalState;
 pub use types::{CharsetState, Notification, PromptState, SpawnConfig, TabId, TermEvent};
 
-use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
+use parking_lot::{MappedMutexGuard, Mutex, MutexGuard};
 use vte::ansi::{CursorShape, KeyboardModes};
 use winit::event_loop::EventLoopProxy;
 
 use crate::config::ColorConfig;
 use crate::grid::Grid;
 use crate::log;
-use crate::palette::{ColorScheme, Palette};
+use crate::palette::ColorScheme;
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionPoint};
 use crate::shell_integration;
-use crate::term_handler::{GraphemeState, TermHandler};
 use crate::term_mode::TermMode;
 
-use interceptor::RawInterceptor;
-
-#[allow(clippy::struct_excessive_bools, reason = "Tab state needs multiple flag fields")]
 pub struct Tab {
     pub id: TabId,
-    primary_grid: Grid,
-    alt_grid: Grid,
-    active_is_alt: bool,
+    /// Thread-shared terminal state behind a mutex.
+    pub terminal: Arc<Mutex<TerminalState>>,
+
+    // PTY handles (main thread for shutdown, reader thread for parsing)
     pub pty_writer: Option<Box<dyn Write + Send>>,
-    processor: vte::ansi::Processor,
-    pub title: String,
-    pub palette: Palette,
-    pub mode: TermMode,
-    pub cursor_shape: CursorShape,
-    pub charset: CharsetState,
-    pub title_stack: Vec<String>,
-    pub cwd: Option<String>,
-    pub prompt_state: PromptState,
-    pub selection: Option<Selection>,
-    pub search: Option<SearchState>,
-    raw_parser: vte::Parser,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
-    grapheme_state: GraphemeState,
-    pub keyboard_mode_stack: Vec<KeyboardModes>,
-    inactive_keyboard_mode_stack: Vec<KeyboardModes>,
-    /// When the bell (BEL 0x07) last rang — drives visual bell flash decay.
-    pub bell_start: Option<Instant>,
+
+    // UI state (main thread only — never accessed by PTY thread)
+    pub selection: Option<Selection>,
+    pub search: Option<SearchState>,
     /// True when an inactive tab received a bell — shows badge in tab bar.
     pub has_bell_badge: bool,
-    /// Notifications received via OSC 9/99/777.
-    pub pending_notifications: Vec<Notification>,
-    /// True when the grid content has changed and needs a GPU rebuild.
-    pub grid_dirty: bool,
-    /// True when OSC 0/2 explicitly set the title (suppresses CWD-based title).
-    pub has_explicit_title: bool,
-    /// Set by `RawInterceptor` when OSC 133;A is received; consumed after processing.
-    prompt_mark_pending: bool,
-    /// Suppress OSC 0/2 title changes until the shell sends CWD or prompt markers.
-    /// Prevents `ConPTY`'s auto-generated process-path title from flashing.
-    pub suppress_title: bool,
 }
 
 impl Tab {
@@ -131,37 +107,25 @@ impl Tab {
 
         let initial_title = derive_initial_title(cfg.id, &shell_args, is_wsl);
 
+        let terminal_state = TerminalState::new(
+            cfg.cols,
+            cfg.rows,
+            cfg.max_scrollback,
+            cfg.cursor_shape,
+            initial_title,
+            is_wsl,
+        );
+
         log(&format!("Tab::spawn done for {:?}", cfg.id));
         Ok(Self {
             id: cfg.id,
-            primary_grid: Grid::with_max_scrollback(cfg.cols, cfg.rows, cfg.max_scrollback),
-            alt_grid: Grid::new(cfg.cols, cfg.rows),
-            active_is_alt: false,
+            terminal: Arc::new(Mutex::new(terminal_state)),
             pty_writer: Some(writer),
-            processor: vte::ansi::Processor::new(),
-            title: initial_title,
-            palette: Palette::new(),
-            mode: TermMode::default(),
-            cursor_shape: cfg.cursor_shape,
-            charset: CharsetState::default(),
-            title_stack: Vec::new(),
-            cwd: None,
-            prompt_state: PromptState::default(),
-            selection: None,
-            search: None,
-            raw_parser: vte::Parser::new(),
             pty_master: pair.master,
             child,
-            grapheme_state: GraphemeState::default(),
-            keyboard_mode_stack: Vec::new(),
-            inactive_keyboard_mode_stack: Vec::new(),
-            bell_start: None,
+            selection: None,
+            search: None,
             has_bell_badge: false,
-            pending_notifications: Vec::new(),
-            grid_dirty: true,
-            has_explicit_title: false,
-            prompt_mark_pending: false,
-            suppress_title: is_wsl,
         })
     }
 
@@ -186,76 +150,141 @@ impl Tab {
         }
     }
 
-    pub fn grid(&self) -> &Grid {
-        if self.active_is_alt {
-            &self.alt_grid
-        } else {
-            &self.primary_grid
-        }
+    // ── Grid access (convenience, locks internally) ────────────────────
+
+    /// Lock the terminal and return a mapped guard to the active grid.
+    ///
+    /// The returned guard auto-derefs to `Grid`. The mutex is held for the
+    /// guard's lifetime — callers must not call other lock-taking methods
+    /// while this guard is alive.
+    pub fn grid(&self) -> MappedMutexGuard<'_, Grid> {
+        MutexGuard::map(self.terminal.lock(), |ts| ts.active_grid_mut())
     }
 
-    pub fn grid_mut(&mut self) -> &mut Grid {
-        if self.active_is_alt {
-            &mut self.alt_grid
-        } else {
-            &mut self.primary_grid
-        }
+    /// Lock the terminal and return a mapped guard to the active grid (mutable).
+    ///
+    /// Identical to `grid()` since `Mutex` always gives exclusive access.
+    pub fn grid_mut(&self) -> MappedMutexGuard<'_, Grid> {
+        MutexGuard::map(self.terminal.lock(), |ts| ts.active_grid_mut())
     }
+
+    // ── Copy-type property accessors ───────────────────────────────────
+
+    /// Read the current terminal mode flags.
+    pub fn mode(&self) -> TermMode {
+        self.terminal.lock().mode
+    }
+
+    /// Read the current cursor shape.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.terminal.lock().cursor_shape
+    }
+
+    /// Check whether the grid content has been modified since last render.
+    pub fn grid_dirty(&self) -> bool {
+        self.terminal.lock().grid_dirty
+    }
+
+    /// Set the grid dirty flag.
+    pub fn set_grid_dirty(&self, dirty: bool) {
+        self.terminal.lock().grid_dirty = dirty;
+    }
+
+    /// Read the bell start time (if bell is active).
+    pub fn bell_start(&self) -> Option<Instant> {
+        self.terminal.lock().bell_start
+    }
+
+    /// Read the keyboard mode stack.
+    pub fn keyboard_mode_stack(&self) -> Vec<KeyboardModes> {
+        self.terminal.lock().keyboard_mode_stack.clone()
+    }
+
+    // ── Clone-type property accessors ──────────────────────────────────
+
+    /// Clone the current working directory.
+    pub fn cwd(&self) -> Option<String> {
+        self.terminal.lock().cwd.clone()
+    }
+
+    // ── Scroll operations ──────────────────────────────────────────────
 
     /// Scroll up by `page_size` lines (into history).
-    pub fn scroll_page_up(&mut self, page_size: usize) {
-        let grid = self.grid_mut();
+    pub fn scroll_page_up(&self, page_size: usize) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         let max = grid.scrollback.len();
         grid.display_offset = (grid.display_offset + page_size).min(max);
-        self.grid_dirty = true;
+        term.grid_dirty = true;
     }
 
     /// Scroll down by `page_size` lines (toward live).
-    pub fn scroll_page_down(&mut self, page_size: usize) {
-        let grid = self.grid_mut();
+    pub fn scroll_page_down(&self, page_size: usize) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         grid.display_offset = grid.display_offset.saturating_sub(page_size);
-        self.grid_dirty = true;
+        term.grid_dirty = true;
     }
 
     /// Scroll to the top of scrollback history.
-    pub fn scroll_to_top(&mut self) {
-        let grid = self.grid_mut();
+    pub fn scroll_to_top(&self) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         grid.display_offset = grid.scrollback.len();
-        self.grid_dirty = true;
+        term.grid_dirty = true;
     }
 
     /// Scroll to the live (bottom) position.
-    pub fn scroll_to_bottom(&mut self) {
-        let grid = self.grid_mut();
+    pub fn scroll_to_bottom(&self) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         grid.display_offset = 0;
-        self.grid_dirty = true;
+        term.grid_dirty = true;
     }
+
+    /// Scroll by `delta` lines: positive = up (into history), negative = down.
+    pub fn scroll_lines(&self, delta: i32) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
+        if delta > 0 {
+            let max = grid.scrollback.len();
+            grid.display_offset = (grid.display_offset + delta as usize).min(max);
+        } else {
+            grid.display_offset = grid.display_offset.saturating_sub((-delta) as usize);
+        }
+        term.grid_dirty = true;
+    }
+
+    // ── Selection operations ───────────────────────────────────────────
 
     /// Clear the current selection.
     pub fn clear_selection(&mut self) {
         if self.selection.is_some() {
             self.selection = None;
-            self.grid_dirty = true;
+            self.terminal.lock().grid_dirty = true;
         }
     }
 
     /// Replace the current selection.
     pub fn set_selection(&mut self, sel: Selection) {
         self.selection = Some(sel);
-        self.grid_dirty = true;
+        self.terminal.lock().grid_dirty = true;
     }
 
     /// Update the end point of the current selection (drag tracking).
     pub fn update_selection_end(&mut self, end: SelectionPoint) {
         if let Some(ref mut sel) = self.selection {
             sel.end = end;
-            self.grid_dirty = true;
+            self.terminal.lock().grid_dirty = true;
         }
     }
 
+    // ── Prompt navigation ──────────────────────────────────────────────
+
     /// Navigate to the previous shell prompt (OSC 133 marker) in scrollback.
-    pub fn navigate_to_previous_prompt(&mut self) {
-        let grid = self.grid_mut();
+    pub fn navigate_to_previous_prompt(&self) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         let sb_len = grid.scrollback.len();
         // Current top of viewport as scrollback index.
         let viewport_top_sb = sb_len.saturating_sub(grid.display_offset);
@@ -269,13 +298,14 @@ impl Tab {
         }
         if let Some(sb_idx) = target_sb {
             grid.display_offset = sb_len.saturating_sub(sb_idx);
-            self.grid_dirty = true;
+            term.grid_dirty = true;
         }
     }
 
     /// Navigate to the next shell prompt (OSC 133 marker) below the viewport.
-    pub fn navigate_to_next_prompt(&mut self) {
-        let grid = self.grid_mut();
+    pub fn navigate_to_next_prompt(&self) {
+        let mut term = self.terminal.lock();
+        let grid = term.active_grid_mut();
         let sb_len = grid.scrollback.len();
         // Current bottom of viewport as absolute index.
         let viewport_bottom_sb = sb_len.saturating_sub(grid.display_offset) + grid.lines;
@@ -303,66 +333,19 @@ impl Tab {
             // No prompt below — scroll to live.
             grid.display_offset = 0;
         }
-        self.grid_dirty = true;
+        term.grid_dirty = true;
     }
 
-    /// Scroll by `delta` lines: positive = up (into history), negative = down.
-    pub fn scroll_lines(&mut self, delta: i32) {
-        let grid = self.grid_mut();
-        if delta > 0 {
-            let max = grid.scrollback.len();
-            grid.display_offset = (grid.display_offset + delta as usize).min(max);
-        } else {
-            grid.display_offset = grid.display_offset.saturating_sub((-delta) as usize);
-        }
-        self.grid_dirty = true;
-    }
+    // ── PTY I/O ────────────────────────────────────────────────────────
 
+    /// Process raw PTY output through both VTE parsers.
     pub fn process_output(&mut self, data: &[u8]) {
-        self.grid_dirty = true;
-
-        // Run the raw interceptor first to capture OSC 7/133/9/99/777/XTVERSION
-        // (sequences that vte::ansi::Processor silently drops).
-        let mut interceptor = RawInterceptor {
-            pty_writer: &mut self.pty_writer,
-            cwd: &mut self.cwd,
-            prompt_state: &mut self.prompt_state,
-            pending_notifications: &mut self.pending_notifications,
-            prompt_mark_pending: &mut self.prompt_mark_pending,
-            has_explicit_title: &mut self.has_explicit_title,
-            suppress_title: &mut self.suppress_title,
-        };
-        self.raw_parser.advance(&mut interceptor, data);
-
-        // Then run the normal high-level Processor for everything else.
-        let mut handler = TermHandler::new(
-            &mut self.primary_grid,
-            &mut self.alt_grid,
-            &mut self.mode,
-            &mut self.palette,
-            &mut self.title,
-            &mut self.pty_writer,
-            &mut self.active_is_alt,
-            &mut self.cursor_shape,
-            &mut self.charset,
-            &mut self.title_stack,
-            &mut self.grapheme_state,
-            &mut self.keyboard_mode_stack,
-            &mut self.inactive_keyboard_mode_stack,
-            &mut self.bell_start,
-            &mut self.has_explicit_title,
-            &mut self.suppress_title,
-        );
-        self.processor.advance(&mut handler, data);
-
-        // Mark the cursor row as a prompt start after both parsers have updated.
-        if self.prompt_mark_pending {
-            self.prompt_mark_pending = false;
-            let row = self.grid().cursor.row;
-            self.grid_mut().row_mut(row).prompt_start = true;
-        }
+        self.terminal
+            .lock()
+            .process_output(data, &mut self.pty_writer);
     }
 
+    /// Write bytes to the PTY.
     pub fn send_pty(&mut self, data: &[u8]) {
         if let Some(writer) = self.pty_writer.as_mut() {
             match writer.write_all(data) {
@@ -374,11 +357,17 @@ impl Tab {
         }
     }
 
-    pub fn resize(&mut self, cols: usize, rows: usize, pixel_width: u16, pixel_height: u16) {
-        // Alt screen never reflows (full-screen apps redraw themselves).
-        let reflow = true;
-        self.primary_grid.resize(cols, rows, reflow);
-        self.alt_grid.resize(cols, rows, false);
+    // ── Resize ─────────────────────────────────────────────────────────
+
+    /// Resize grids and PTY to the given dimensions.
+    pub fn resize(&self, cols: usize, rows: usize, pixel_width: u16, pixel_height: u16) {
+        {
+            let mut term = self.terminal.lock();
+            // Alt screen never reflows (full-screen apps redraw themselves).
+            let reflow = true;
+            term.primary_grid.resize(cols, rows, reflow);
+            term.alt_grid.resize(cols, rows, false);
+        }
         let _ = self.pty_master.resize(portable_pty::PtySize {
             rows: rows as u16,
             cols: cols as u16,
@@ -387,62 +376,73 @@ impl Tab {
         });
     }
 
+    // ── Notifications ──────────────────────────────────────────────────
+
     /// Drain pending OSC 9/99/777 notifications, returning them to the caller.
-    pub fn drain_notifications(&mut self) -> Vec<Notification> {
-        std::mem::take(&mut self.pending_notifications)
+    pub fn drain_notifications(&self) -> Vec<Notification> {
+        self.terminal.lock().drain_notifications()
     }
+
+    // ── Color / cursor config ──────────────────────────────────────────
 
     /// Apply color scheme, overrides, and bold-is-bright in one call.
     pub fn apply_color_config(
-        &mut self,
+        &self,
         scheme: Option<&ColorScheme>,
         colors: &ColorConfig,
         bold_is_bright: bool,
     ) {
-        if let Some(scheme) = scheme {
-            self.palette.set_scheme(scheme);
-        }
-        self.palette.apply_overrides(colors);
-        self.palette.bold_is_bright = bold_is_bright;
+        self.terminal
+            .lock()
+            .apply_color_config(scheme, colors, bold_is_bright);
     }
 
     /// Set the cursor shape (block, underline, bar).
-    pub fn set_cursor_shape(&mut self, shape: CursorShape) {
-        self.cursor_shape = shape;
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
+        self.terminal.lock().cursor_shape = shape;
     }
+
+    // ── Search ─────────────────────────────────────────────────────────
 
     /// Open a new search session, replacing any existing one.
     pub fn open_search(&mut self) {
         self.search = Some(SearchState::new());
-        self.grid_dirty = true;
+        self.terminal.lock().grid_dirty = true;
     }
 
     /// Close the active search session.
     pub fn close_search(&mut self) {
         self.search = None;
-        self.grid_dirty = true;
+        self.terminal.lock().grid_dirty = true;
     }
 
     /// Update the search query. Handles the borrow-checker dance of
-    /// borrowing `self.grid()` while mutating `self.search`.
+    /// borrowing the grid while mutating `self.search`.
     pub fn update_search_query(&mut self) {
         if let Some(mut search) = self.search.take() {
-            search.update_query(self.grid());
+            let term = self.terminal.lock();
+            search.update_query(term.active_grid());
+            drop(term);
             self.search = Some(search);
-            self.grid_dirty = true;
+            self.terminal.lock().grid_dirty = true;
         }
     }
 
+    // ── Title ──────────────────────────────────────────────────────────
+
     /// Return the display title for the tab bar. If the shell explicitly set a
     /// title via OSC 0/2, use that. Otherwise derive a short path from CWD.
-    pub fn effective_title(&self) -> Cow<'_, str> {
-        if self.has_explicit_title {
-            return Cow::Borrowed(&self.title);
+    ///
+    /// Returns an owned `String` because the title data is behind a mutex.
+    pub fn effective_title(&self) -> String {
+        let term = self.terminal.lock();
+        if term.has_explicit_title {
+            return term.title.clone();
         }
-        if let Some(ref cwd) = self.cwd {
-            return Cow::Owned(short_path(cwd));
+        if let Some(ref cwd) = term.cwd {
+            return short_path(cwd);
         }
-        Cow::Borrowed(&self.title)
+        term.title.clone()
     }
 }
 

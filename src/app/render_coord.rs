@@ -1,5 +1,7 @@
 //! Render coordination — frame building and context menu action dispatch.
 
+use std::time::Instant;
+
 use winit::event_loop::ActiveEventLoop;
 use winit::window::WindowId;
 
@@ -8,7 +10,7 @@ use crate::context_menu::ContextAction;
 use crate::gpu::FrameParams;
 use crate::log;
 use crate::palette;
-use crate::tab::TabId;
+use crate::tab::{Tab, TabId};
 use crate::grid::{GRID_PADDING_BOTTOM, GRID_PADDING_LEFT, GRID_PADDING_TOP};
 use crate::tab_bar::TAB_BAR_HEIGHT;
 #[cfg(target_os = "windows")]
@@ -52,7 +54,7 @@ impl App {
                     let title = self
                         .tabs
                         .get(id)
-                        .map_or_else(|| "?".to_string(), |t| t.effective_title().into_owned());
+                        .map_or_else(|| "?".to_string(), Tab::effective_title);
                     (*id, title)
                 })
                 .collect();
@@ -107,7 +109,7 @@ impl App {
     }
 
     /// Compute cursor blink visibility from elapsed time since last reset.
-    fn cursor_blink_visible(&self) -> bool {
+    pub(super) fn cursor_blink_visible(&self) -> bool {
         if self.config.terminal.cursor_blink {
             let elapsed_ms = self.cursor_blink_reset.elapsed().as_millis() as u64;
             let interval = self.config.terminal.cursor_blink_interval_ms.max(1);
@@ -186,50 +188,56 @@ impl App {
 
         let grid_dirty = active_tab_id
             .and_then(|id| self.tabs.get(&id))
-            .is_some_and(|tab| tab.grid_dirty)
+            .is_some_and(Tab::grid_dirty)
             || cursor_visible_changed;
         let tab_bar_dirty = self.tab_bar_dirty;
         let twl = self.tab_width_lock_for(window_id);
 
-        let frame_params = active_tab_id
-            .and_then(|tab_id| self.tabs.get(&tab_id))
-            .map(|tab| FrameParams {
-                width: phys.width,
-                height: phys.height,
-                grid: tab.grid(),
-                palette: &tab.palette,
-                mode: tab.mode,
-                cursor_shape: tab.cursor_shape,
-                selection: tab.selection.as_ref(),
-                search: tab.search.as_ref(),
-                tab_info,
-                active_tab: active_idx,
-                hover_hit: hover,
-                is_maximized,
-                context_menu: self.context_menu.as_ref(),
-                opacity: self.config.window.effective_opacity(),
-                hover_hyperlink: self
-                    .hover_hyperlink
-                    .as_ref()
-                    .filter(|(wid, _)| *wid == window_id)
-                    .map(|(_, uri)| uri.as_str()),
-                hover_url_range: self.hover_url_range.as_deref(),
-                minimum_contrast: self.config.colors.effective_minimum_contrast(),
-                alpha_blending: self.config.colors.alpha_blending,
-                dragged_tab,
-                tab_offsets,
-                bell_badges,
-                bell_phase,
-                scale: self.scale_factor as f32,
-                cursor_visible,
-                grid_dirty,
-                tab_bar_dirty,
-                window_id,
-                tab_width_lock: twl,
-            });
-
-        let Some(frame_params) = frame_params else {
+        // Lock the terminal state for the active tab so FrameParams can borrow
+        // grid and palette from the MutexGuard.
+        let Some(active_id) = active_tab_id else {
+            self.tab_bar_dirty = false;
             return;
+        };
+        let Some(tab) = self.tabs.get(&active_id) else {
+            self.tab_bar_dirty = false;
+            return;
+        };
+        let term = tab.terminal.lock();
+
+        let frame_params = FrameParams {
+            width: phys.width,
+            height: phys.height,
+            grid: term.active_grid(),
+            palette: &term.palette,
+            mode: term.mode,
+            cursor_shape: term.cursor_shape,
+            selection: tab.selection.as_ref(),
+            search: tab.search.as_ref(),
+            tab_info,
+            active_tab: active_idx,
+            hover_hit: hover,
+            is_maximized,
+            context_menu: self.context_menu.as_ref(),
+            opacity: self.config.window.effective_opacity(),
+            hover_hyperlink: self
+                .hover_hyperlink
+                .as_ref()
+                .filter(|(wid, _)| *wid == window_id)
+                .map(|(_, uri)| uri.as_str()),
+            hover_url_range: self.hover_url_range.as_deref(),
+            minimum_contrast: self.config.colors.effective_minimum_contrast(),
+            alpha_blending: self.config.colors.alpha_blending,
+            dragged_tab,
+            tab_offsets,
+            bell_badges,
+            bell_phase,
+            scale: self.scale_factor as f32,
+            cursor_visible,
+            grid_dirty,
+            tab_bar_dirty,
+            window_id,
+            tab_width_lock: twl,
         };
 
         let gpu = match &self.gpu {
@@ -246,6 +254,7 @@ impl App {
             Some(tw) => tw,
             None => return,
         };
+        let t0 = Instant::now();
         renderer.draw_frame(
             gpu,
             &tw.surface,
@@ -254,11 +263,20 @@ impl App {
             &mut self.font_collection,
             &mut self.ui_collection,
         );
+        let render_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        self.render_count += 1;
+        self.render_total_ms += render_ms;
+        if render_ms > 5.0 {
+            log(&format!(
+                "render_slow: {render_ms:.1}ms (grid_dirty={grid_dirty}, tab_bar_dirty={tab_bar_dirty})"
+            ));
+        }
 
-        if let Some(tab_id) = active_tab_id {
-            if let Some(tab) = self.tabs.get_mut(&tab_id) {
-                tab.grid_dirty = false;
-            }
+        // Release the terminal lock before setting grid_dirty
+        drop(term);
+
+        if let Some(tab) = self.tabs.get(&active_id) {
+            tab.set_grid_dirty(false);
         }
         self.tab_bar_dirty = false;
     }
