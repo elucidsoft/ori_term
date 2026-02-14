@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::thread;
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 fn main() {
     let pty_system = native_pty_system();
@@ -18,13 +18,22 @@ fn main() {
         .expect("failed to open pty");
 
     let cmd = CommandBuilder::new_default_prog();
-    let mut child = pair.slave.spawn_command(cmd).expect("failed to spawn shell");
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("failed to spawn shell");
 
     // Drop the slave side so the reader detects EOF when the shell exits.
     drop(pair.slave);
 
-    let mut reader = pair.master.try_clone_reader().expect("failed to clone pty reader");
-    let mut writer = pair.master.take_writer().expect("failed to take pty writer");
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("failed to clone pty reader");
+    let mut writer = pair
+        .master
+        .take_writer()
+        .expect("failed to take pty writer");
 
     // Relay PTY output to stdout.
     let _output = thread::spawn(move || {

@@ -1,46 +1,8 @@
-[package]
-name = "ori_term"
-version = "0.1.0-alpha.3"
-edition = "2024"
-description = "A Rust console/TUI library that gets terminal interaction right"
-license = "MIT"
+[workspace]
+members = ["oriterm_core", "oriterm"]
+resolver = "2"
 
-[dependencies]
-unicode-width = "0.2"
-unicode-segmentation = "1.12"
-winit = "0.30"
-wgpu = "28"
-pollster = "0.4"
-swash = "0.2"
-rustybuzz = "0.20"
-parking_lot = "0.12"
-portable-pty = "0.9.0"
-vte = { version = "0.15.0", features = ["ansi"] }
-bitflags = "2"
-log = "0.4"
-base64 = "0.22"
-toml = "0.8"
-serde = { version = "1", features = ["derive"] }
-notify = "8"
-regex = "1"
-window-vibrancy = "0.7"
-
-[features]
-default = []
-
-[target.'cfg(not(windows))'.dependencies]
-arboard = "3"
-
-[target.'cfg(windows)'.dependencies]
-clipboard-win = "5.4"
-dwrote = "0.11"
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_Threading", "Win32_UI_Controls", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
-
-[[bin]]
-name = "oriterm"
-path = "src/main.rs"
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "deny"
 dead_code = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -49,7 +11,7 @@ unused_import_braces = "warn"
 unused_lifetimes = "warn"
 unused_qualifications = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 # Deny all default clippy warnings (from Alacritty)
 all = { level = "deny", priority = -1 }
 # Pedantic as warnings (from Ratatui)
@@ -102,8 +64,3 @@ too_many_lines = "allow"
 uninlined_format_args = "allow"
 unreadable_literal = "allow"
 unused_self = "allow"
-
-[build-dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
-
-[dev-dependencies]

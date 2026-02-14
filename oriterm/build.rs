@@ -1,11 +1,14 @@
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let assets = workspace_root.join("assets");
 
     // Embed the application icon into the Windows executable
     if std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "windows" {
-        let rc_path = "assets/icon.rc";
+        let rc_path = assets.join("icon.rc");
         let res_path = format!("{out_dir}/icon.res");
 
         // Determine the correct windres binary for the target
@@ -19,8 +22,8 @@ fn main() {
         let status = Command::new(windres)
             .args([
                 "--include-dir",
-                "assets",
-                rc_path,
+                assets.to_str().unwrap(),
+                rc_path.to_str().unwrap(),
                 "-O",
                 "coff",
                 "-o",
@@ -31,9 +34,15 @@ fn main() {
         match status {
             Ok(s) if s.success() => {
                 println!("cargo:rustc-link-arg-bins={res_path}");
-                println!("cargo:rerun-if-changed={rc_path}");
-                println!("cargo:rerun-if-changed=assets/icon.ico");
-                println!("cargo:rerun-if-changed=assets/oriterm.manifest");
+                println!("cargo:rerun-if-changed={}", rc_path.display());
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    assets.join("icon.ico").display()
+                );
+                println!(
+                    "cargo:rerun-if-changed={}",
+                    assets.join("oriterm.manifest").display()
+                );
             }
             Ok(s) => {
                 eprintln!("warning: windres exited with {s}, exe will have no icon");
@@ -45,7 +54,8 @@ fn main() {
     }
 
     // Decode PNG to raw RGBA at build time so runtime doesn't need the image crate
-    let png_bytes = std::fs::read("assets/icon-256.png").expect("read assets/icon-256.png");
+    let png_path = assets.join("icon-256.png");
+    let png_bytes = std::fs::read(&png_path).expect("read assets/icon-256.png");
     let img = image::load_from_memory_with_format(&png_bytes, image::ImageFormat::Png)
         .expect("decode icon PNG");
     let rgba = img.into_rgba8();
@@ -55,5 +65,5 @@ fn main() {
     out.extend_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&rgba);
     std::fs::write(format!("{out_dir}/icon_rgba.bin"), &out).expect("write icon_rgba.bin");
-    println!("cargo:rerun-if-changed=assets/icon-256.png");
+    println!("cargo:rerun-if-changed={}", png_path.display());
 }

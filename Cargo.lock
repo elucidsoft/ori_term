@@ -1488,7 +1488,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ori_term"
+name = "oriterm"
 version = "0.1.0-alpha.3"
 dependencies = [
  "arboard",
@@ -1499,6 +1499,7 @@ dependencies = [
  "image",
  "log",
  "notify",
+ "oriterm_core",
  "parking_lot",
  "pollster",
  "portable-pty",
@@ -1514,6 +1515,16 @@ dependencies = [
  "window-vibrancy",
  "windows-sys 0.60.2",
  "winit",
+]
+
+[[package]]
+name = "oriterm_core"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "bitflags 2.10.0",
+ "log",
+ "unicode-width",
+ "vte",
 ]
 
 [[package]]
