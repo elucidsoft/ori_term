@@ -6,7 +6,7 @@
 
 use unicode_width::UnicodeWidthChar;
 
-use crate::cell::CellFlags;
+use crate::cell::{Cell, CellFlags};
 use crate::index::Column;
 
 use super::Grid;
@@ -30,71 +30,85 @@ impl Grid {
     /// Handles wide characters (writes cell + spacer), wrap at end of line,
     /// and clearing overwritten wide char pairs.
     pub fn put_char(&mut self, ch: char) {
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
         let width = UnicodeWidthChar::width(ch).unwrap_or(1);
         let cols = self.cols;
-        let line = self.cursor.line();
-        let col = self.cursor.col().0;
 
-        // If a pending wrap is active and we're at the last column, wrap now.
-        if col >= cols {
-            // Wrap: mark current row, move to next line.
-            self.rows[line][Column(cols - 1)].flags |= CellFlags::WRAP;
-            self.linefeed();
-            self.cursor.set_col(Column(0));
-            return self.put_char(ch);
-        }
+        loop {
+            let line = self.cursor.line();
+            let col = self.cursor.col().0;
 
-        // For wide chars at the last column, wrap instead of splitting.
-        if width == 2 && col + 1 >= cols {
-            self.rows[line][Column(col)].flags |= CellFlags::WRAP;
-            self.linefeed();
-            self.cursor.set_col(Column(0));
-            return self.put_char(ch);
-        }
-
-        // Clear any wide char pair that we're overwriting.
-        self.clear_wide_char_at(line, col);
-
-        // Extract only the Copy fields we need, avoiding a full Cell clone
-        // that would heap-allocate if `extra` is Some.
-        let fg = self.cursor.template.fg;
-        let bg = self.cursor.template.bg;
-        let flags = self.cursor.template.flags;
-        let cell = &mut self.rows[line][Column(col)];
-        cell.ch = ch;
-        cell.fg = fg;
-        cell.bg = bg;
-        cell.flags = flags;
-        cell.extra = None;
-
-        if width == 2 {
-            cell.flags |= CellFlags::WIDE_CHAR;
-
-            // Write the spacer in the next column.
-            if col + 1 < cols {
-                self.clear_wide_char_at(line, col + 1);
-                let spacer = &mut self.rows[line][Column(col + 1)];
-                spacer.ch = ' ';
-                spacer.fg = fg;
-                spacer.bg = bg;
-                spacer.flags = CellFlags::WIDE_CHAR_SPACER;
-                spacer.extra = None;
+            // If a pending wrap is active and we're at the last column, wrap now.
+            if col >= cols {
+                self.rows[line][Column(cols - 1)].flags |= CellFlags::WRAP;
+                self.linefeed();
+                self.cursor.set_col(Column(0));
+                continue;
             }
-        }
 
-        // Advance cursor by character width.
-        let new_col = col + width;
-        self.cursor.set_col(Column(new_col));
+            // For wide chars at the last column, wrap instead of splitting.
+            if width == 2 && col + 1 >= cols {
+                self.rows[line][Column(col)].flags |= CellFlags::WRAP;
+                self.linefeed();
+                self.cursor.set_col(Column(0));
+                continue;
+            }
+
+            // Clear any wide char pair that we're overwriting.
+            self.clear_wide_char_at(line, col);
+
+            // Clone the template before the mutable row borrow. The Arc
+            // clone for extra is O(1) (refcount bump, no heap allocation).
+            let template = self.cursor.template.clone();
+            let cell = &mut self.rows[line][Column(col)];
+            cell.ch = ch;
+            cell.fg = template.fg;
+            cell.bg = template.bg;
+            cell.flags = template.flags;
+            cell.extra.clone_from(&template.extra);
+
+            if width == 2 {
+                cell.flags |= CellFlags::WIDE_CHAR;
+
+                // Write the spacer in the next column.
+                if col + 1 < cols {
+                    self.clear_wide_char_at(line, col + 1);
+                    let spacer = &mut self.rows[line][Column(col + 1)];
+                    spacer.ch = ' ';
+                    spacer.fg = template.fg;
+                    spacer.bg = template.bg;
+                    spacer.flags = CellFlags::WIDE_CHAR_SPACER;
+                    spacer.extra = None;
+                }
+            }
+
+            // Advance cursor by character width.
+            self.cursor.set_col(Column(col + width));
+
+            break;
+        }
     }
 
     /// Insert `count` blank cells at the cursor, shifting existing cells right.
     ///
     /// Cells that shift past the right edge are lost.
     pub fn insert_blank(&mut self, count: usize) {
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
         let line = self.cursor.line();
         let col = self.cursor.col().0;
         let cols = self.cols;
-        let template = self.cursor.template.clone();
+        // BCE: erased cells get only the current background color.
+        let template = Cell::from(self.cursor.template.bg);
 
         if col >= cols {
             return;
@@ -114,17 +128,25 @@ impl Grid {
             cell.reset(&template);
         }
 
-        row.recalculate_occ();
+        // Cells shifted right: occ grows by at most `count`, capped at cols.
+        row.set_occ((row.occ() + count).min(cols));
     }
 
     /// Delete `count` cells at the cursor, shifting remaining cells left.
     ///
     /// New cells at the right edge are blank.
     pub fn delete_chars(&mut self, count: usize) {
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
         let line = self.cursor.line();
         let col = self.cursor.col().0;
         let cols = self.cols;
-        let template = self.cursor.template.clone();
+        // BCE: erased cells get only the current background color.
+        let template = Cell::from(self.cursor.template.bg);
 
         if col >= cols {
             return;
@@ -144,25 +166,29 @@ impl Grid {
             cell.reset(&template);
         }
 
-        row.recalculate_occ();
+        // Cells shifted left and right edge cleared: existing occ is still a
+        // valid upper bound (may be loose, but no consumer needs a tight value).
     }
 
     /// Erase part or all of the display.
     pub fn erase_display(&mut self, mode: EraseMode) {
-        let template = self.cursor.template.clone();
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
+        // BCE: erased cells get only the current background color.
+        let template = Cell::from(self.cursor.template.bg);
         match mode {
             EraseMode::Below => {
-                // Erase from cursor to end of current line.
-                self.erase_line(EraseMode::Below);
-                // Erase all lines below cursor.
+                self.erase_line_with_template(EraseMode::Below, &template);
                 for line in self.cursor.line() + 1..self.lines {
                     self.rows[line].reset(self.cols, &template);
                 }
             }
             EraseMode::Above => {
-                // Erase from start of current line to cursor.
-                self.erase_line(EraseMode::Above);
-                // Erase all lines above cursor.
+                self.erase_line_with_template(EraseMode::Above, &template);
                 for line in 0..self.cursor.line() {
                     self.rows[line].reset(self.cols, &template);
                 }
@@ -180,10 +206,21 @@ impl Grid {
 
     /// Erase part or all of the current line.
     pub fn erase_line(&mut self, mode: EraseMode) {
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
+        let template = Cell::from(self.cursor.template.bg);
+        self.erase_line_with_template(mode, &template);
+    }
+
+    /// Erase part or all of the current line using a pre-built BCE template.
+    fn erase_line_with_template(&mut self, mode: EraseMode, template: &Cell) {
         let line = self.cursor.line();
         let col = self.cursor.col().0;
         let cols = self.cols;
-        let template = self.cursor.template.clone();
 
         debug_assert!(
             mode != EraseMode::Scrollback,
@@ -195,21 +232,27 @@ impl Grid {
                 let row = &mut self.rows[line];
                 let cells = row.as_mut_slice();
                 for cell in &mut cells[col..cols] {
-                    cell.reset(&template);
+                    cell.reset(template);
                 }
-                row.recalculate_occ();
+                if template.is_empty() {
+                    row.clamp_occ(col);
+                } else {
+                    row.set_occ(cols);
+                }
             }
             EraseMode::Above => {
                 let end = col.min(cols - 1) + 1;
                 let row = &mut self.rows[line];
                 let cells = row.as_mut_slice();
                 for cell in &mut cells[..end] {
-                    cell.reset(&template);
+                    cell.reset(template);
                 }
-                row.recalculate_occ();
+                // Prefix erased: existing occ is still a valid upper bound
+                // (content only removed from the left, not shifted right).
+                // Both Alacritty and Ghostty leave the bound loose here.
             }
             EraseMode::All => {
-                self.rows[line].reset(cols, &template);
+                self.rows[line].reset(cols, template);
             }
             // Scrollback clearing has no meaning at the line level (CSI 3 K
             // doesn't exist in xterm/ECMA-48). Treat as no-op in release builds.
@@ -219,10 +262,17 @@ impl Grid {
 
     /// Erase `count` cells starting at cursor (replace with template, don't shift).
     pub fn erase_chars(&mut self, count: usize) {
+        debug_assert!(
+            self.cursor.line() < self.lines,
+            "cursor line {} out of bounds (lines={})",
+            self.cursor.line(),
+            self.lines,
+        );
         let line = self.cursor.line();
         let col = self.cursor.col().0;
         let cols = self.cols;
-        let template = self.cursor.template.clone();
+        // BCE: erased cells get only the current background color.
+        let template = Cell::from(self.cursor.template.bg);
 
         let end = (col + count).min(cols);
         let row = &mut self.rows[line];
@@ -230,7 +280,7 @@ impl Grid {
         for cell in &mut cells[col..end] {
             cell.reset(&template);
         }
-        row.recalculate_occ();
+        // Cells replaced in-place: existing occ is still a valid upper bound.
     }
 
     /// Clear any wide char pair at the given position.

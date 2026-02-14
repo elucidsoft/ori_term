@@ -24,8 +24,15 @@ pub struct Cursor {
     /// Column index (0-based).
     col: Column,
     /// Template cell applied to new characters (fg, bg, flags).
+    ///
+    /// Intentionally `pub` — the VTE handler sets SGR attributes directly
+    /// on this cell, and Grid editing methods read it for character writes
+    /// and BCE (Background Color Erase) operations.
     pub template: Cell,
     /// Visual cursor shape.
+    ///
+    /// Intentionally `pub` — set by DECSCUSR (CSI Ps SP q) in the VTE
+    /// handler, read by the renderer to choose the cursor glyph.
     pub shape: CursorShape,
 }
 

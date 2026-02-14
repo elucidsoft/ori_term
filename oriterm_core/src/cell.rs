@@ -2,9 +2,11 @@
 //!
 //! A `Cell` represents one character position in the terminal grid. Most cells
 //! are 24 bytes on the stack. Only cells with combining marks, colored
-//! underlines, or hyperlinks allocate heap storage via `CellExtra`.
+//! underlines, or hyperlinks allocate heap storage via `CellExtra`. Extra data
+//! is stored behind `Arc` so cloning a cell (e.g. from cursor template) is O(1).
 
 use std::fmt;
+use std::sync::Arc;
 
 use bitflags::bitflags;
 use unicode_width::UnicodeWidthChar;
@@ -87,7 +89,7 @@ impl fmt::Display for Hyperlink {
 /// One character position in the terminal grid.
 ///
 /// Target size: 24 bytes. Fields are ordered to minimize padding:
-/// `char(4) + Color(4) + Color(4) + CellFlags(2) + pad(2) + Option<Box>(8)`.
+/// `char(4) + Color(4) + Color(4) + CellFlags(2) + pad(2) + Option<Arc>(8)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// The character stored in this cell.
@@ -99,7 +101,11 @@ pub struct Cell {
     /// SGR attribute flags.
     pub flags: CellFlags,
     /// Optional heap data for combining marks, underline color, or hyperlinks.
-    pub extra: Option<Box<CellExtra>>,
+    ///
+    /// Uses `Arc` so that cloning a cell with extra data (e.g. propagating
+    /// cursor template attributes) is O(1) — a refcount bump instead of a
+    /// heap allocation.
+    pub extra: Option<Arc<CellExtra>>,
 }
 
 const _: () = assert!(size_of::<Cell>() <= 24);
@@ -113,6 +119,13 @@ impl Default for Cell {
             flags: CellFlags::empty(),
             extra: None,
         }
+    }
+}
+
+impl From<Color> for Cell {
+    /// BCE (Background Color Erase) cell: default cell with a custom background.
+    fn from(bg: Color) -> Self {
+        Self { bg, ..Self::default() }
     }
 }
 
@@ -150,15 +163,18 @@ impl Cell {
 
     /// Append a combining mark (zero-width character) to this cell.
     ///
-    /// Lazily allocates `CellExtra` on first combining mark.
+    /// Lazily allocates `CellExtra` on first combining mark. Uses
+    /// `Arc::make_mut` for copy-on-write when the extra is shared.
     pub fn push_zerowidth(&mut self, ch: char) {
-        let extra = self.extra.get_or_insert_with(|| Box::new(CellExtra::new()));
-        extra.zerowidth.push(ch);
+        let extra = self.extra.get_or_insert_with(Default::default);
+        Arc::make_mut(extra).zerowidth.push(ch);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use vte::ansi::{Color, NamedColor};
 
     use super::{Cell, CellExtra, CellFlags, Hyperlink};
@@ -238,7 +254,7 @@ mod tests {
     #[test]
     fn extra_created_for_underline_color() {
         let mut cell = Cell::default();
-        cell.extra = Some(Box::new(CellExtra {
+        cell.extra = Some(Arc::new(CellExtra {
             underline_color: Some(Color::Spec(vte::ansi::Rgb { r: 255, g: 0, b: 0 })),
             hyperlink: None,
             zerowidth: Vec::new(),
@@ -253,7 +269,7 @@ mod tests {
     #[test]
     fn extra_created_for_hyperlink() {
         let mut cell = Cell::default();
-        cell.extra = Some(Box::new(CellExtra {
+        cell.extra = Some(Arc::new(CellExtra {
             underline_color: None,
             hyperlink: Some(Hyperlink {
                 id: None,

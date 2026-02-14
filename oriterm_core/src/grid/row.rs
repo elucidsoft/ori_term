@@ -13,7 +13,11 @@ use crate::index::Column;
 pub struct Row {
     /// The cells in this row.
     inner: Vec<Cell>,
-    /// Index of last non-empty cell + 1 (0 = row is entirely empty).
+    /// Upper bound on cells modified since last `reset()`.
+    ///
+    /// After `reset()`, occ is 0. `IndexMut` bumps occ to track writes.
+    /// The value may exceed the true occupancy (lazy dirty-tracking, matching
+    /// Alacritty's pattern). Use `clamp_occ` / `set_occ` for O(1) adjustments.
     occ: usize,
 }
 
@@ -40,7 +44,7 @@ impl Row {
         self.inner.len()
     }
 
-    /// Occupancy: index of last non-empty cell + 1.
+    /// Occupancy upper bound (see `occ` field docs).
     pub fn occ(&self) -> usize {
         self.occ
     }
@@ -52,15 +56,15 @@ impl Row {
         for cell in &mut self.inner[start..end] {
             cell.reset(template);
         }
-        self.recalculate_occ();
+        // Existing occ is still a valid upper bound (cells replaced in-place,
+        // no rightward shift). Leave loose — matches Alacritty/Ghostty pattern.
     }
 
     /// Clear from the given column to the end of the row.
-    pub fn truncate(&mut self, col: Column) {
+    pub fn truncate(&mut self, col: Column, template: &Cell) {
         let start = col.0;
-        let template = Cell::default();
         for cell in &mut self.inner[start..] {
-            cell.reset(&template);
+            cell.reset(template);
         }
         self.occ = self.occ.min(start);
     }
@@ -81,14 +85,16 @@ impl Row {
         }
     }
 
-    /// Recalculate occupancy by scanning from the end.
-    pub(crate) fn recalculate_occ(&mut self) {
-        self.occ = self
-            .inner
-            .iter()
-            .rposition(|c| !c.is_empty())
-            .map_or(0, |i| i + 1);
+    /// Clamp occ to at most `max`, maintaining it as a valid upper bound.
+    pub(crate) fn clamp_occ(&mut self, max: usize) {
+        self.occ = self.occ.min(max);
     }
+
+    /// Set occ to an explicit upper bound (must be valid).
+    pub(crate) fn set_occ(&mut self, occ: usize) {
+        self.occ = occ;
+    }
+
 }
 
 impl Index<Column> for Row {
@@ -163,7 +169,7 @@ mod tests {
     fn index_mut_updates_occ() {
         let mut row = Row::new(80);
         row[Column(20)].ch = 'Z';
-        // IndexMut should update occ even though is_empty isn't checked here.
+        // IndexMut bumps occ as an upper bound — it does not check emptiness.
         assert_eq!(row.occ(), 21);
     }
 
@@ -194,7 +200,7 @@ mod tests {
         }
         assert_eq!(row.occ(), 20);
 
-        row.truncate(Column(10));
+        row.truncate(Column(10), &Cell::default());
         assert_eq!(row.occ(), 10);
         assert_eq!(row[Column(9)].ch, 'A');
         assert!(row[Column(10)].is_empty());
