@@ -122,7 +122,7 @@ impl Grid {
             self.rows[i].reset(self.cols, &template);
         }
 
-        self.dirty.mark_all();
+        self.dirty.mark_range(range);
     }
 
     /// Scroll a range of rows down by `count` using O(1) rotation.
@@ -142,7 +142,7 @@ impl Grid {
             self.rows[i].reset(self.cols, &template);
         }
 
-        self.dirty.mark_all();
+        self.dirty.mark_range(range);
     }
 }
 

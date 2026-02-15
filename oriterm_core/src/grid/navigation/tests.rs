@@ -394,6 +394,30 @@ fn move_down_outside_scroll_region_clamps_to_last() {
 }
 
 #[test]
+fn cursor_only_movement_does_not_dirty() {
+    let mut grid = Grid::new(24, 80);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.move_up(3);
+    grid.move_down(5);
+    grid.move_forward(10);
+    grid.move_backward(3);
+    grid.move_to(10, Column(40));
+    grid.move_to_column(Column(20));
+    grid.move_to_line(5);
+    grid.carriage_return();
+    grid.tab();
+    grid.tab_backward();
+    grid.save_cursor();
+    grid.restore_cursor();
+
+    assert!(
+        !grid.dirty().is_any_dirty(),
+        "cursor-only movement should not mark dirty"
+    );
+}
+
+#[test]
 fn save_cursor_preserves_template() {
     use vte::ansi::Color;
     let mut grid = Grid::new(24, 80);

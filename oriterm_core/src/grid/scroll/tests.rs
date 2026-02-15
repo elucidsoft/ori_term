@@ -698,6 +698,200 @@ fn scroll_display_zero_is_noop() {
     assert_eq!(grid.display_offset(), 1);
 }
 
+// --- dirty tracking ---
+
+#[test]
+fn scroll_display_marks_dirty_when_offset_changes() {
+    let mut grid = Grid::new(3, 5);
+    // Build up some scrollback.
+    for _ in 0..5 {
+        grid.scroll_up(1);
+    }
+    // Drain dirty state from scroll_up calls.
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.scroll_display(2);
+    assert_eq!(grid.display_offset(), 2);
+    assert!(grid.dirty().is_any_dirty());
+}
+
+#[test]
+fn scroll_display_no_dirty_when_offset_unchanged() {
+    let mut grid = Grid::new(3, 5);
+    // No scrollback — delta=0 or clamped to 0.
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.scroll_display(0);
+    assert!(!grid.dirty().is_any_dirty());
+
+    // Already at 0, negative delta clamps to 0.
+    grid.scroll_display(-5);
+    assert!(!grid.dirty().is_any_dirty());
+}
+
+#[test]
+fn sub_region_scroll_up_marks_only_region() {
+    let mut grid = Grid::new(10, 5);
+    // Drain initial dirty state.
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.scroll_region = 3..7;
+    grid.scroll_up(1);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![3, 4, 5, 6]);
+}
+
+#[test]
+fn sub_region_scroll_down_marks_only_region() {
+    let mut grid = Grid::new(10, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.scroll_region = 2..6;
+    grid.scroll_down(1);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2, 3, 4, 5]);
+}
+
+#[test]
+fn full_screen_scroll_up_marks_all_visible_lines() {
+    let mut grid = Grid::new(5, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.scroll_up(1);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn insert_lines_marks_only_affected_region() {
+    let mut grid = Grid::new(10, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // Cursor at line 4, scroll region is full screen (0..10).
+    // insert_lines uses range cursor..scroll_region.end.
+    grid.cursor_mut().set_line(4);
+    grid.insert_lines(2);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![4, 5, 6, 7, 8, 9]);
+}
+
+#[test]
+fn delete_lines_marks_only_affected_region() {
+    let mut grid = Grid::new(10, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_line(3);
+    grid.delete_lines(2);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![3, 4, 5, 6, 7, 8, 9]);
+}
+
+#[test]
+fn insert_lines_outside_scroll_region_no_dirty() {
+    let mut grid = Grid::new(10, 5);
+    grid.scroll_region = 3..7;
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // Cursor outside scroll region — insert_lines is a noop.
+    grid.cursor_mut().set_line(1);
+    grid.insert_lines(2);
+
+    assert!(!grid.dirty().is_any_dirty());
+}
+
+#[test]
+fn delete_lines_outside_scroll_region_no_dirty() {
+    let mut grid = Grid::new(10, 5);
+    grid.scroll_region = 3..7;
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // Cursor outside scroll region — delete_lines is a noop.
+    grid.cursor_mut().set_line(8);
+    grid.delete_lines(1);
+
+    assert!(!grid.dirty().is_any_dirty());
+}
+
+#[test]
+fn linefeed_at_bottom_marks_scroll_region_dirty() {
+    let mut grid = Grid::new(5, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_line(4);
+    grid.linefeed();
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    // Full-screen scroll region: all lines dirty.
+    assert_eq!(dirty, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn linefeed_at_bottom_of_sub_region_marks_only_region() {
+    let mut grid = Grid::new(10, 5);
+    grid.scroll_region = 3..7;
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // Cursor at bottom of scroll region (line 6, since region is 3..7).
+    grid.cursor_mut().set_line(6);
+    grid.linefeed();
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![3, 4, 5, 6]);
+}
+
+#[test]
+fn linefeed_in_middle_does_not_dirty() {
+    let mut grid = Grid::new(10, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // Cursor in the middle — linefeed just moves cursor down.
+    grid.cursor_mut().set_line(3);
+    grid.linefeed();
+
+    assert!(!grid.dirty().is_any_dirty());
+}
+
+#[test]
+fn reverse_index_at_top_marks_scroll_region_dirty() {
+    let mut grid = Grid::new(5, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_line(0);
+    grid.reverse_index();
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn reverse_index_at_top_of_sub_region_marks_only_region() {
+    let mut grid = Grid::new(10, 5);
+    grid.scroll_region = 2..6;
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_line(2);
+    grid.reverse_index();
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2, 3, 4, 5]);
+}
+
+#[test]
+fn reverse_index_in_middle_does_not_dirty() {
+    let mut grid = Grid::new(10, 5);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_line(5);
+    grid.reverse_index();
+
+    assert!(!grid.dirty().is_any_dirty());
+}
+
 // --- scrollback content after mem::replace ---
 
 #[test]

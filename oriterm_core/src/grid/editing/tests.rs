@@ -519,3 +519,167 @@ fn erase_line_below_with_bce() {
     // Cols before cursor untouched.
     assert_eq!(grid[line][Column(4)].ch, 'E');
 }
+
+// --- dirty tracking ---
+
+/// Helper: create a grid and drain its dirty state so tests start clean.
+fn clean_grid(lines: usize, cols: usize) -> Grid {
+    let mut grid = Grid::new(lines, cols);
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+    grid
+}
+
+#[test]
+fn put_char_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('A');
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2]);
+}
+
+#[test]
+fn put_char_wraparound_marks_new_line_dirty() {
+    let mut grid = clean_grid(5, 5);
+    // Fill line 0 to trigger pending wrap.
+    for ch in "ABCDE".chars() {
+        grid.put_char(ch);
+    }
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    // This put_char triggers wrap to line 1.
+    grid.put_char('F');
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert!(dirty.contains(&1), "new line should be dirty: {dirty:?}");
+}
+
+#[test]
+fn insert_blank_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(3);
+    grid.cursor_mut().set_col(Column(2));
+    grid.insert_blank(3);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![3]);
+}
+
+#[test]
+fn delete_chars_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    // Write some content first.
+    grid.put_char('A');
+    grid.put_char('B');
+    grid.put_char('C');
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_col(Column(0));
+    grid.delete_chars(1);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![0]);
+}
+
+#[test]
+fn erase_chars_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.put_char('A');
+    let _: Vec<usize> = grid.dirty_mut().drain().collect();
+
+    grid.cursor_mut().set_col(Column(0));
+    grid.erase_chars(5);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![0]);
+}
+
+#[test]
+fn erase_line_below_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(3));
+    grid.erase_line(EraseMode::Below);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2]);
+}
+
+#[test]
+fn erase_line_above_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(3));
+    grid.erase_line(EraseMode::Above);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2]);
+}
+
+#[test]
+fn erase_line_all_marks_cursor_line_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.erase_line(EraseMode::All);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![2]);
+}
+
+#[test]
+fn erase_display_below_marks_cursor_and_below_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(3));
+    grid.erase_display(EraseMode::Below);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    // Cursor line (2) + lines below (3, 4).
+    assert_eq!(dirty, vec![2, 3, 4]);
+}
+
+#[test]
+fn erase_display_above_marks_above_and_cursor_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(3));
+    grid.erase_display(EraseMode::Above);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    // Lines above (0, 1) + cursor line (2).
+    assert_eq!(dirty, vec![0, 1, 2]);
+}
+
+#[test]
+fn erase_display_all_marks_all_dirty() {
+    let mut grid = clean_grid(5, 10);
+    grid.erase_display(EraseMode::All);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    assert_eq!(dirty, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn erase_display_below_does_not_dirty_lines_above() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(3);
+    grid.cursor_mut().set_col(Column(0));
+    grid.erase_display(EraseMode::Below);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    // Only lines 3 and 4.
+    assert_eq!(dirty, vec![3, 4]);
+}
+
+#[test]
+fn erase_display_above_does_not_dirty_lines_below() {
+    let mut grid = clean_grid(5, 10);
+    grid.cursor_mut().set_line(1);
+    grid.cursor_mut().set_col(Column(5));
+    grid.erase_display(EraseMode::Above);
+
+    let dirty: Vec<usize> = grid.dirty_mut().drain().collect();
+    // Only lines 0 and 1.
+    assert_eq!(dirty, vec![0, 1]);
+}

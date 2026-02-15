@@ -4,6 +4,8 @@
 //! renderer calls `drain()` each frame to discover dirty lines, rebuilds
 //! only those lines' instance buffers, and the tracker resets to clean.
 
+use std::ops::Range;
+
 /// Tracks which rows have changed since last read.
 ///
 /// Each visible line has a dirty bit. `mark_all` provides a fast path for
@@ -30,6 +32,13 @@ impl DirtyTracker {
     /// Mark a single line dirty.
     pub fn mark(&mut self, line: usize) {
         if let Some(b) = self.dirty.get_mut(line) {
+            *b = true;
+        }
+    }
+
+    /// Mark a contiguous range of lines dirty.
+    pub fn mark_range(&mut self, range: Range<usize>) {
+        for b in &mut self.dirty[range] {
             *b = true;
         }
     }

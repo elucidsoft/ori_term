@@ -133,8 +133,12 @@ impl Grid {
     pub fn scroll_display(&mut self, delta: isize) {
         let max = self.scrollback.len();
         let current = self.display_offset as isize;
-        let target = (current + delta).clamp(0, max as isize);
-        self.display_offset = target as usize;
+        let target = (current + delta).clamp(0, max as isize) as usize;
+
+        if target != self.display_offset {
+            self.display_offset = target;
+            self.dirty.mark_all();
+        }
     }
 
     /// Initialize tab stops every 8 columns.

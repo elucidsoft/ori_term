@@ -111,6 +111,38 @@ fn drain_drop_clears_remaining() {
 }
 
 #[test]
+fn mark_range_marks_only_target_lines() {
+    let mut tracker = DirtyTracker::new(10);
+    tracker.mark_range(3..7);
+
+    // Lines inside the range are dirty.
+    for i in 3..7 {
+        assert!(tracker.is_dirty(i), "line {i} should be dirty");
+    }
+
+    // Lines outside the range are clean.
+    for i in (0..3).chain(7..10) {
+        assert!(!tracker.is_dirty(i), "line {i} should be clean");
+    }
+}
+
+#[test]
+fn mark_range_empty_range_is_noop() {
+    let mut tracker = DirtyTracker::new(10);
+    tracker.mark_range(5..5);
+    assert!(!tracker.is_any_dirty());
+}
+
+#[test]
+fn mark_range_drain_yields_only_range() {
+    let mut tracker = DirtyTracker::new(10);
+    tracker.mark_range(2..5);
+
+    let indices: Vec<usize> = tracker.drain().collect();
+    assert_eq!(indices, vec![2, 3, 4]);
+}
+
+#[test]
 fn mark_out_of_bounds_is_safe() {
     let mut tracker = DirtyTracker::new(5);
     tracker.mark(100); // no panic, no effect
