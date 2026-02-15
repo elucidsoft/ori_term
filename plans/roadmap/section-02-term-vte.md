@@ -22,7 +22,7 @@ sections:
     status: complete
   - id: "2.6"
     title: "VTE Handler — Print + Execute"
-    status: not-started
+    status: complete
   - id: "2.7"
     title: "VTE Handler — CSI Sequences"
     status: not-started
@@ -238,28 +238,28 @@ The terminal state machine. Owns two grids (primary + alternate), mode flags, pa
 
 **File:** `oriterm_core/src/term/handler.rs`
 
-- [ ] `impl<T: EventListener> vte::ansi::Handler for Term<T>`
-- [ ] `fn input(&mut self, ch: char)`
-  - [ ] Translate through charset (`self.charset.translate(ch)`)
-  - [ ] If auto-wrap pending (cursor at last col with WRAP): advance to next line, scroll if needed
-  - [ ] Call `self.grid_mut().put_char(translated_ch)`
-- [ ] Control characters (dispatched by `fn execute`):
-  - [ ] `\x07` BEL — `self.event_listener.send_event(Event::Bell)`
-  - [ ] `\x08` BS — move cursor left by 1
-  - [ ] `\x09` HT — tab forward
-  - [ ] `\x0A` LF — linefeed
-  - [ ] `\x0B` VT — same as LF
-  - [ ] `\x0C` FF — same as LF
-  - [ ] `\x0D` CR — carriage return
-  - [ ] `\x0E` SO — activate G1 charset
-  - [ ] `\x0F` SI — activate G0 charset
-- [ ] **Tests** (feed bytes through `vte::ansi::Processor`):
-  - [ ] `"hello"` → cells 0..5 contain h,e,l,l,o; cursor at col 5
-  - [ ] `"hello\nworld"` → "hello" on line 0, "world" on line 1
-  - [ ] `"hello\rworld"` → "world" on line 0 (overwrites "hello")
-  - [ ] `"\t"` → cursor advances to column 8
-  - [ ] `"\x08"` → cursor moves left
-  - [ ] BEL triggers Event::Bell on a recording listener
+- [x] `impl<T: EventListener> vte::ansi::Handler for Term<T>`
+- [x] `fn input(&mut self, ch: char)`
+  - [x] Translate through charset (`self.charset.translate(ch)`)
+  - [x] If auto-wrap pending (cursor at last col with WRAP): advance to next line, scroll if needed
+  - [x] Call `self.grid_mut().put_char(translated_ch)`
+- [x] Control characters (dispatched by `fn execute`):
+  - [x] `\x07` BEL — `self.event_listener.send_event(Event::Bell)`
+  - [x] `\x08` BS — move cursor left by 1
+  - [x] `\x09` HT — tab forward
+  - [x] `\x0A` LF — linefeed
+  - [x] `\x0B` VT — same as LF
+  - [x] `\x0C` FF — same as LF
+  - [x] `\x0D` CR — carriage return
+  - [x] `\x0E` SO — activate G1 charset
+  - [x] `\x0F` SI — activate G0 charset
+- [x] **Tests** (feed bytes through `vte::ansi::Processor`):
+  - [x] `"hello"` → cells 0..5 contain h,e,l,l,o; cursor at col 5
+  - [x] `"hello\nworld"` → "hello" on line 0, "world" on line 1
+  - [x] `"hello\rworld"` → "world" on line 0 (overwrites "hello")
+  - [x] `"\t"` → cursor advances to column 8
+  - [x] `"\x08"` → cursor moves left
+  - [x] BEL triggers Event::Bell on a recording listener
 
 ---
 

@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use super::{ClipboardType, Event, EventListener, Rgb, VoidListener};
+use super::{ClipboardType, Event, EventListener, VoidListener};
+use crate::color::Rgb;
 
 #[test]
 fn void_listener_implements_event_listener() {

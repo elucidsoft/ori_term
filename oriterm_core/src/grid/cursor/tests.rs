@@ -2,11 +2,10 @@ use super::{Cursor, CursorShape};
 use crate::index::Column;
 
 #[test]
-fn default_cursor_at_origin_with_block_shape() {
+fn default_cursor_at_origin() {
     let cursor = Cursor::new();
     assert_eq!(cursor.line(), 0);
     assert_eq!(cursor.col(), Column(0));
-    assert_eq!(cursor.shape, CursorShape::Block);
 }
 
 #[test]
@@ -23,8 +22,6 @@ fn default_shape_is_block() {
     assert_eq!(CursorShape::default(), CursorShape::Block);
 }
 
-// --- Additional tests from reference repo gap analysis ---
-
 #[test]
 fn template_defaults_to_empty_cell() {
     let cursor = Cursor::new();
@@ -36,13 +33,11 @@ fn cursor_clone_preserves_all_fields() {
     let mut cursor = Cursor::new();
     cursor.set_line(5);
     cursor.set_col(Column(10));
-    cursor.shape = CursorShape::Bar;
     cursor.template.ch = 'X';
 
     let cloned = cursor.clone();
     assert_eq!(cloned.line(), 5);
     assert_eq!(cloned.col(), Column(10));
-    assert_eq!(cloned.shape, CursorShape::Bar);
     assert_eq!(cloned.template.ch, 'X');
 }
 

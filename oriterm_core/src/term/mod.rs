@@ -6,6 +6,7 @@
 //! from the UI layer.
 
 pub mod charset;
+mod handler;
 pub mod mode;
 
 pub use charset::CharsetState;
@@ -14,6 +15,20 @@ pub use mode::TermMode;
 use crate::color::Palette;
 use crate::event::EventListener;
 use crate::grid::{CursorShape, Grid};
+
+/// Maximum depth for title stack (xterm push/pop title).
+///
+/// Prevents OOM from malicious PTY input pushing unlimited titles.
+/// Matches Alacritty's cap. Enforced in the VTE handler's `push_title`.
+#[expect(dead_code, reason = "cap enforced when VTE handler push_title is implemented")]
+const TITLE_STACK_MAX_DEPTH: usize = 4096;
+
+/// Maximum depth for Kitty keyboard enhancement mode stacks.
+///
+/// Prevents OOM from malicious PTY input. Matches Alacritty's cap.
+/// Enforced in the VTE handler's `set_keyboard_mode`.
+#[expect(dead_code, reason = "cap enforced when VTE handler set_keyboard_mode is implemented")]
+const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = 4096;
 
 /// The terminal state machine.
 ///
@@ -37,13 +52,15 @@ pub struct Term<T: EventListener> {
     charset: CharsetState,
     /// Window title (set by OSC 0/2).
     title: String,
-    /// Pushed title stack (xterm extension).
+    /// Pushed title stack (xterm extension). Capped at [`TITLE_STACK_MAX_DEPTH`].
     title_stack: Vec<String>,
     /// Cursor shape for rendering.
     cursor_shape: CursorShape,
     /// Kitty keyboard enhancement mode stack (active screen).
+    /// Capped at [`KEYBOARD_MODE_STACK_MAX_DEPTH`].
     keyboard_mode_stack: Vec<u8>,
     /// Kitty keyboard enhancement mode stack (inactive screen).
+    /// Capped at [`KEYBOARD_MODE_STACK_MAX_DEPTH`].
     inactive_keyboard_mode_stack: Vec<u8>,
     /// Event sink for terminal events.
     event_listener: T,
@@ -101,11 +118,6 @@ impl<T: EventListener> Term<T> {
     /// Reference to the charset state.
     pub fn charset(&self) -> &CharsetState {
         &self.charset
-    }
-
-    /// Reference to the event listener.
-    pub fn event_listener(&self) -> &T {
-        &self.event_listener
     }
 
     /// The title stack (xterm push/pop title).

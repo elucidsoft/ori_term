@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::Arc;
 
-pub use vte::ansi::Rgb;
+use crate::color::Rgb;
 
 /// Which system clipboard to target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

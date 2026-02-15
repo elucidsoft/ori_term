@@ -44,6 +44,11 @@ impl CharsetState {
         self.charsets[idx as usize].map(ch)
     }
 
+    /// Currently active charset slot.
+    pub fn active(&self) -> &CharsetIndex {
+        &self.active
+    }
+
     /// Assign a charset to a slot (ESC (, ESC ), ESC *, ESC +).
     pub fn set_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
         self.charsets[index as usize] = charset;

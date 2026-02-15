@@ -15,8 +15,8 @@ pub mod index;
 pub mod term;
 
 pub use cell::{Cell, CellExtra, CellFlags, Hyperlink};
-pub use color::Palette;
-pub use event::{ClipboardType, Event, EventListener, Notify, Rgb, VoidListener};
+pub use color::{Palette, Rgb};
+pub use event::{ClipboardType, Event, EventListener, Notify, VoidListener};
 pub use grid::{Cursor, CursorShape, EraseMode, Grid, Row, TabClearMode};
 pub use index::{Boundary, Column, Direction, Line, Point, Side};
 pub use term::{Term, TermMode};

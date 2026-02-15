@@ -1,12 +1,16 @@
 //! Terminal cursor state.
 //!
 //! Tracks the current write position and the "template cell" used for
-//! newly written characters. Also tracks cursor shape for rendering.
+//! newly written characters.
 
 use crate::cell::Cell;
 use crate::index::Column;
 
 /// Cursor shape for rendering.
+///
+/// DECSCUSR sets cursor shape globally (not per-screen), so this is stored
+/// on `Term`, not on `Cursor`. Kept in this module because it's a cursor
+/// concept re-exported through `grid::CursorShape`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CursorShape {
     #[default]
@@ -16,7 +20,7 @@ pub enum CursorShape {
     HollowBlock,
 }
 
-/// Terminal cursor: position, template cell, and shape.
+/// Terminal cursor: position and template cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor {
     /// Line index into visible rows (0-based).
@@ -29,21 +33,15 @@ pub struct Cursor {
     /// on this cell, and Grid editing methods read it for character writes
     /// and BCE (Background Color Erase) operations.
     pub template: Cell,
-    /// Visual cursor shape.
-    ///
-    /// Intentionally `pub` — set by DECSCUSR (CSI Ps SP q) in the VTE
-    /// handler, read by the renderer to choose the cursor glyph.
-    pub shape: CursorShape,
 }
 
 impl Cursor {
-    /// Create a cursor at (0, 0) with default template and block shape.
+    /// Create a cursor at (0, 0) with default template.
     pub fn new() -> Self {
         Self {
             line: 0,
             col: Column(0),
             template: Cell::default(),
-            shape: CursorShape::Block,
         }
     }
 
