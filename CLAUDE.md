@@ -28,7 +28,7 @@ GPU-accelerated terminal emulator in Rust (same category as Alacritty, WezTerm, 
 
 **Formatting**: `imports_granularity = "Module"`. Group imports: std, external, crate. Comments wrapped at 100 chars. Format code in doc comments.
 
-**Module Organization**: Separate terminal logic from GUI (Alacritty pattern: pure terminal lib vs. rendering binary). One primary type per module file. Re-export key types at parent `mod.rs`. Two-file pattern: `style.rs` + `style/` directory for sub-modules. Platform-specific code behind `#[cfg()]` in dedicated files.
+**Module Organization**: Separate terminal logic from GUI (Alacritty pattern: pure terminal lib vs. rendering binary). One primary type per module file. Re-export key types at parent `mod.rs`. Two-file pattern: `style.rs` + `style/` directory for sub-modules. Platform-specific code behind `#[cfg()]` in dedicated files. **Source files (excluding `tests.rs`) must not exceed 500 lines** — when writing new code, proactively split into submodules before hitting the limit rather than writing a large file and splitting later.
 
 **Public API**: Keep surface small — expose primitives, not internals. `#[must_use]` on builder methods. `impl Into<T>` and `impl AsRef<str>` for ergonomic APIs. Document every public item with `///`. First line: summary. Second: blank. Then details.
 

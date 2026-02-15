@@ -86,6 +86,13 @@ Inline comments on struct fields when purpose isn't obvious from the name.
 - No dead pub items (pub but unused outside crate)
 - No dead code (functions, imports, enum variants never used)
 
+## File Size
+
+- **Source files (excluding `tests.rs`) must not exceed 500 lines.** If a file grows past this limit, break it up — extract related functionality into submodules. This is not a suggestion; treat it as a hard limit.
+- Test files (`tests.rs`) are exempt from the 500-line limit.
+- When splitting a file, follow the existing pattern: `foo.rs` becomes `foo/mod.rs` + `foo/submodule.rs` (or `foo.rs` + `foo/submodule.rs` with Rust 2018 paths).
+- Common split points: separate `impl` blocks by concern, extract private helpers into a submodule, split types into their own files.
+
 ## Style
 
 - No `#[allow(clippy)]` without `reason = "..."` (use `#[expect]` when possible)
