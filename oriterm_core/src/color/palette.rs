@@ -1,0 +1,154 @@
+//! 270-entry color palette for terminal emulation.
+//!
+//! Layout: 0–15 ANSI, 16–231 6×6×6 cube, 232–255 grayscale ramp,
+//! 256–269 named semantic slots (foreground, background, cursor, dim
+//! variants, bright/dim foreground).
+
+use vte::ansi::{Color, NamedColor};
+
+pub use vte::ansi::Rgb;
+
+/// Total palette entries: 256 indexed + 14 named semantic slots.
+pub const NUM_COLORS: usize = 270;
+
+/// Standard xterm ANSI colors (indices 0–15).
+const ANSI_COLORS: [Rgb; 16] = [
+    Rgb { r: 0x00, g: 0x00, b: 0x00 }, // 0  Black
+    Rgb { r: 0xcc, g: 0x00, b: 0x00 }, // 1  Red
+    Rgb { r: 0x4e, g: 0x9a, b: 0x06 }, // 2  Green
+    Rgb { r: 0xc4, g: 0xa0, b: 0x00 }, // 3  Yellow
+    Rgb { r: 0x34, g: 0x65, b: 0xa4 }, // 4  Blue
+    Rgb { r: 0x75, g: 0x50, b: 0x7b }, // 5  Magenta
+    Rgb { r: 0x06, g: 0x98, b: 0x9a }, // 6  Cyan
+    Rgb { r: 0xd3, g: 0xd7, b: 0xcf }, // 7  White
+    Rgb { r: 0x55, g: 0x57, b: 0x53 }, // 8  Bright Black
+    Rgb { r: 0xef, g: 0x29, b: 0x29 }, // 9  Bright Red
+    Rgb { r: 0x8a, g: 0xe2, b: 0x34 }, // 10 Bright Green
+    Rgb { r: 0xfc, g: 0xe9, b: 0x4f }, // 11 Bright Yellow
+    Rgb { r: 0x72, g: 0x9f, b: 0xcf }, // 12 Bright Blue
+    Rgb { r: 0xad, g: 0x7f, b: 0xa8 }, // 13 Bright Magenta
+    Rgb { r: 0x34, g: 0xe2, b: 0xe2 }, // 14 Bright Cyan
+    Rgb { r: 0xee, g: 0xee, b: 0xec }, // 15 Bright White
+];
+
+/// Default foreground (light gray).
+const DEFAULT_FG: Rgb = Rgb { r: 0xd3, g: 0xd7, b: 0xcf };
+/// Default background (black).
+const DEFAULT_BG: Rgb = Rgb { r: 0x00, g: 0x00, b: 0x00 };
+/// Default cursor color (white).
+const DEFAULT_CURSOR: Rgb = Rgb { r: 0xff, g: 0xff, b: 0xff };
+
+/// 270-entry color palette with indexed and named color slots.
+///
+/// Resolves `vte::ansi::Color` variants to concrete `Rgb` values. Supports
+/// per-index overrides (OSC 4) and reset-to-default (OSC 104).
+#[derive(Debug, Clone)]
+pub struct Palette {
+    /// Live palette entries.
+    colors: [Rgb; NUM_COLORS],
+    /// Factory defaults for reset operations.
+    defaults: [Rgb; NUM_COLORS],
+}
+
+impl Default for Palette {
+    fn default() -> Self {
+        let colors = build_default_palette();
+        Self { colors, defaults: colors }
+    }
+}
+
+impl Palette {
+    /// Resolve a `vte::ansi::Color` to an `Rgb` value.
+    pub fn resolve(&self, color: Color) -> Rgb {
+        match color {
+            Color::Spec(rgb) => rgb,
+            Color::Indexed(idx) => self.colors[idx as usize],
+            Color::Named(name) => self.colors[name as usize],
+        }
+    }
+
+    /// Set an indexed color (OSC 4).
+    pub fn set_indexed(&mut self, index: usize, color: Rgb) {
+        if index < NUM_COLORS {
+            self.colors[index] = color;
+        }
+    }
+
+    /// Reset an indexed color to its default (OSC 104).
+    pub fn reset_indexed(&mut self, index: usize) {
+        if index < NUM_COLORS {
+            self.colors[index] = self.defaults[index];
+        }
+    }
+
+    /// Default foreground color.
+    pub fn foreground(&self) -> Rgb {
+        self.colors[NamedColor::Foreground as usize]
+    }
+
+    /// Default background color.
+    pub fn background(&self) -> Rgb {
+        self.colors[NamedColor::Background as usize]
+    }
+
+    /// Cursor color.
+    pub fn cursor_color(&self) -> Rgb {
+        self.colors[NamedColor::Cursor as usize]
+    }
+}
+
+/// Build the default xterm-256 palette with sensible semantic colors.
+fn build_default_palette() -> [Rgb; NUM_COLORS] {
+    let mut colors = [Rgb { r: 0, g: 0, b: 0 }; NUM_COLORS];
+
+    // 0–15: ANSI colors.
+    colors[..16].copy_from_slice(&ANSI_COLORS);
+
+    // 16–231: 6×6×6 color cube.
+    for r in 0..6u8 {
+        for g in 0..6u8 {
+            for b in 0..6u8 {
+                let idx = 16 + (r as usize * 36) + (g as usize * 6) + b as usize;
+                colors[idx] = Rgb {
+                    r: if r == 0 { 0 } else { 55 + r * 40 },
+                    g: if g == 0 { 0 } else { 55 + g * 40 },
+                    b: if b == 0 { 0 } else { 55 + b * 40 },
+                };
+            }
+        }
+    }
+
+    // 232–255: grayscale ramp.
+    for i in 0..24u8 {
+        let v = 8 + i * 10;
+        colors[232 + i as usize] = Rgb { r: v, g: v, b: v };
+    }
+
+    // Named semantic slots.
+    colors[NamedColor::Foreground as usize] = DEFAULT_FG;
+    colors[NamedColor::Background as usize] = DEFAULT_BG;
+    colors[NamedColor::Cursor as usize] = DEFAULT_CURSOR;
+
+    // Dim variants (2/3 brightness of ANSI 0–7).
+    for i in 0..8 {
+        colors[NamedColor::DimBlack as usize + i] = dim(colors[i]);
+    }
+
+    // Bright/dim foreground.
+    colors[NamedColor::BrightForeground as usize] = DEFAULT_FG;
+    colors[NamedColor::DimForeground as usize] = dim(DEFAULT_FG);
+
+    colors
+}
+
+/// Reduce a color to 2/3 brightness for dim variants.
+fn dim(c: Rgb) -> Rgb {
+    Rgb {
+        r: (c.r as u16 * 2 / 3) as u8,
+        g: (c.g as u16 * 2 / 3) as u8,
+        b: (c.b as u16 * 2 / 3) as u8,
+    }
+}
+
+#[cfg(test)]
+mod tests;

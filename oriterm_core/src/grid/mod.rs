@@ -53,11 +53,16 @@ pub struct Grid {
 }
 
 impl Grid {
-    /// Create a new grid with the given dimensions.
+    /// Create a new grid with the given dimensions and default scrollback.
     ///
     /// Initializes all rows as empty, cursor at (0, 0), and tab stops
     /// every 8 columns.
     pub fn new(lines: usize, cols: usize) -> Self {
+        Self::with_scrollback(lines, cols, ring::DEFAULT_MAX_SCROLLBACK)
+    }
+
+    /// Create a new grid with explicit scrollback capacity.
+    pub fn with_scrollback(lines: usize, cols: usize, max_scrollback: usize) -> Self {
         debug_assert!(lines >= 1 && cols >= 1, "Grid dimensions must be >= 1 (got {lines}x{cols})");
         let rows = (0..lines).map(|_| Row::new(cols)).collect();
         let tab_stops = Self::init_tab_stops(cols);
@@ -70,7 +75,7 @@ impl Grid {
             saved_cursor: None,
             tab_stops,
             scroll_region: 0..lines,
-            scrollback: ScrollbackBuffer::new(ring::DEFAULT_MAX_SCROLLBACK),
+            scrollback: ScrollbackBuffer::new(max_scrollback),
             display_offset: 0,
             dirty: DirtyTracker::new(lines),
         }

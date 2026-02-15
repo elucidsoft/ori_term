@@ -1,25 +1,25 @@
 ---
 section: 2
 title: Terminal State Machine + VTE
-status: not-started
+status: in-progress
 tier: 0
 goal: Build Term<T> and implement all ~50 VTE handler methods so escape sequences produce correct grid state
 sections:
   - id: "2.1"
     title: Event System
-    status: not-started
+    status: complete
   - id: "2.2"
     title: TermMode Flags
-    status: not-started
+    status: complete
   - id: "2.3"
     title: CharsetState
-    status: not-started
+    status: complete
   - id: "2.4"
     title: Color Palette
-    status: not-started
+    status: complete
   - id: "2.5"
     title: "Term<T> Struct"
-    status: not-started
+    status: complete
   - id: "2.6"
     title: "VTE Handler — Print + Execute"
     status: not-started
@@ -69,32 +69,32 @@ The bridge between terminal state changes and the UI layer. Terminal fires event
 
 **File:** `oriterm_core/src/event.rs`
 
-- [ ] `Event` enum — terminal events that flow outward
-  - [ ] `Wakeup` — new content available, trigger redraw
-  - [ ] `Bell` — BEL character received
-  - [ ] `Title(String)` — window title changed (OSC 2)
-  - [ ] `ResetTitle` — title reset to default
-  - [ ] `ClipboardStore(ClipboardType, String)` — OSC 52 clipboard store
-  - [ ] `ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Send + Sync>)` — OSC 52 clipboard load
-  - [ ] `ColorRequest(usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>)` — OSC 4/10/11 color query
-  - [ ] `PtyWrite(String)` — response bytes to write back to PTY
-  - [ ] `CursorBlinkingChange` — cursor blink state toggled
-  - [ ] `MouseCursorDirty` — mouse cursor shape may need update
-  - [ ] `ChildExit(i32)` — child process exited with status
-- [ ] `ClipboardType` enum — `Clipboard`, `Selection` (primary)
-- [ ] `Rgb` struct — `{ r: u8, g: u8, b: u8 }`
-- [ ] `EventListener` trait
-  - [ ] `fn send_event(&self, event: Event) {}` — default no-op
-  - [ ] Bound: `Send + 'static`
-- [ ] `Notify` trait — for writing responses back to PTY
-  - [ ] `fn notify<B: Into<Cow<'static, [u8]>>>(&self, bytes: B);`
-  - [ ] Bound: `Send`
-- [ ] `VoidListener` struct — no-op implementation for testing
-  - [ ] `impl EventListener for VoidListener {}`
-- [ ] Re-export from `lib.rs`
-- [ ] **Tests**:
-  - [ ] `VoidListener` compiles and implements `EventListener`
-  - [ ] `Event` variants can be constructed
+- [x] `Event` enum — terminal events that flow outward
+  - [x] `Wakeup` — new content available, trigger redraw
+  - [x] `Bell` — BEL character received
+  - [x] `Title(String)` — window title changed (OSC 2)
+  - [x] `ResetTitle` — title reset to default
+  - [x] `ClipboardStore(ClipboardType, String)` — OSC 52 clipboard store
+  - [x] `ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Send + Sync>)` — OSC 52 clipboard load
+  - [x] `ColorRequest(usize, Arc<dyn Fn(Rgb) -> String + Send + Sync>)` — OSC 4/10/11 color query
+  - [x] `PtyWrite(String)` — response bytes to write back to PTY
+  - [x] `CursorBlinkingChange` — cursor blink state toggled
+  - [x] `MouseCursorDirty` — mouse cursor shape may need update
+  - [x] `ChildExit(i32)` — child process exited with status
+- [x] `ClipboardType` enum — `Clipboard`, `Selection` (primary)
+- [x] `Rgb` struct — `{ r: u8, g: u8, b: u8 }`
+- [x] `EventListener` trait
+  - [x] `fn send_event(&self, event: Event) {}` — default no-op
+  - [x] Bound: `Send + 'static`
+- [x] `Notify` trait — for writing responses back to PTY
+  - [x] `fn notify<B: Into<Cow<'static, [u8]>>>(&self, bytes: B);`
+  - [x] Bound: `Send`
+- [x] `VoidListener` struct — no-op implementation for testing
+  - [x] `impl EventListener for VoidListener {}`
+- [x] Re-export from `lib.rs`
+- [x] **Tests**:
+  - [x] `VoidListener` compiles and implements `EventListener`
+  - [x] `Event` variants can be constructed
 
 ---
 
@@ -104,31 +104,31 @@ Bitflags for terminal mode state (DECSET/DECRST, SM/RM).
 
 **File:** `oriterm_core/src/term/mode.rs`
 
-- [ ] `TermMode` — `bitflags! { struct TermMode: u32 { ... } }`
-  - [ ] `SHOW_CURSOR` — DECTCEM (cursor visible)
-  - [ ] `APP_CURSOR` — DECCKM (application cursor keys)
-  - [ ] `APP_KEYPAD` — DECKPAM/DECKPNM (application keypad)
-  - [ ] `MOUSE_REPORT_CLICK` — mode 1000
-  - [ ] `MOUSE_DRAG` — mode 1002
-  - [ ] `MOUSE_MOTION` — mode 1003
-  - [ ] `MOUSE_SGR` — mode 1006 (SGR mouse encoding)
-  - [ ] `MOUSE_UTF8` — mode 1005 (UTF8 mouse encoding)
-  - [ ] `ALT_SCREEN` — mode 1049 (alternate screen)
-  - [ ] `LINE_WRAP` — DECAWM (auto-wrap)
-  - [ ] `ORIGIN` — DECOM (origin mode)
-  - [ ] `INSERT` — IRM (insert mode)
-  - [ ] `FOCUS_IN_OUT` — mode 1004 (focus events)
-  - [ ] `BRACKETED_PASTE` — mode 2004
-  - [ ] `SYNC_UPDATE` — mode 2026 (synchronized output)
-  - [ ] `URGENCY_HINTS` — mode 1042
-  - [ ] `ANY_MOUSE` — computed: CLICK | DRAG | MOTION
-  - [ ] `KITTY_KEYBOARD` — progressive keyboard enhancement
-  - [ ] `CURSOR_BLINKING` — ATT610
-  - [ ] Default: `SHOW_CURSOR | LINE_WRAP`
-- [ ] **Tests**:
-  - [ ] Default mode has SHOW_CURSOR and LINE_WRAP set
-  - [ ] Can set/clear individual modes
-  - [ ] `ANY_MOUSE` is the union of all mouse modes
+- [x] `TermMode` — `bitflags! { struct TermMode: u32 { ... } }`
+  - [x] `SHOW_CURSOR` — DECTCEM (cursor visible)
+  - [x] `APP_CURSOR` — DECCKM (application cursor keys)
+  - [x] `APP_KEYPAD` — DECKPAM/DECKPNM (application keypad)
+  - [x] `MOUSE_REPORT_CLICK` — mode 1000
+  - [x] `MOUSE_DRAG` — mode 1002
+  - [x] `MOUSE_MOTION` — mode 1003
+  - [x] `MOUSE_SGR` — mode 1006 (SGR mouse encoding)
+  - [x] `MOUSE_UTF8` — mode 1005 (UTF8 mouse encoding)
+  - [x] `ALT_SCREEN` — mode 1049 (alternate screen)
+  - [x] `LINE_WRAP` — DECAWM (auto-wrap)
+  - [x] `ORIGIN` — DECOM (origin mode)
+  - [x] `INSERT` — IRM (insert mode)
+  - [x] `FOCUS_IN_OUT` — mode 1004 (focus events)
+  - [x] `BRACKETED_PASTE` — mode 2004
+  - [x] `SYNC_UPDATE` — mode 2026 (synchronized output)
+  - [x] `URGENCY_HINTS` — mode 1042
+  - [x] `ANY_MOUSE` — computed: CLICK | DRAG | MOTION
+  - [x] `KITTY_KEYBOARD` — progressive keyboard enhancement
+  - [x] `CURSOR_BLINKING` — ATT610
+  - [x] Default: `SHOW_CURSOR | LINE_WRAP`
+- [x] **Tests**:
+  - [x] Default mode has SHOW_CURSOR and LINE_WRAP set
+  - [x] Can set/clear individual modes
+  - [x] `ANY_MOUSE` is the union of all mouse modes
 
 ---
 
@@ -138,24 +138,24 @@ Character set translation (G0-G3, single shifts). Needed for DEC special graphic
 
 **File:** `oriterm_core/src/term/charset.rs`
 
-- [ ] `Charset` enum — `Ascii`, `DecSpecialGraphics`, `DecSupplemental`
-- [ ] `CharsetIndex` enum — `G0`, `G1`, `G2`, `G3`
-- [ ] `CharsetState` struct
-  - [ ] Fields:
+- [x] `Charset` enum — `Ascii`, `DecSpecialGraphics`, `DecSupplemental`
+- [x] `CharsetIndex` enum — `G0`, `G1`, `G2`, `G3`
+- [x] `CharsetState` struct
+  - [x] Fields:
     - `charsets: [Charset; 4]` — G0-G3 (default: all ASCII)
     - `active: CharsetIndex` — currently active charset (default: G0)
     - `single_shift: Option<CharsetIndex>` — SS2/SS3 single shift
-  - [ ] `translate(&mut self, ch: char) -> char` — apply charset mapping to character
-    - [ ] If single_shift is set, use that charset for one char, then clear
-    - [ ] DEC special graphics maps `0x5F..=0x7E` to box-drawing characters
-  - [ ] `set_charset(&mut self, index: CharsetIndex, charset: Charset)`
-  - [ ] `set_active(&mut self, index: CharsetIndex)`
-  - [ ] `set_single_shift(&mut self, index: CharsetIndex)`
-- [ ] **Tests**:
-  - [ ] Default: all ASCII, no translation
-  - [ ] DEC special graphics: `'q'` (0x71) → `'─'` (U+2500)
-  - [ ] Single shift: applies for one char then reverts
-  - [ ] G0/G1 switching
+  - [x] `translate(&mut self, ch: char) -> char` — apply charset mapping to character
+    - [x] If single_shift is set, use that charset for one char, then clear
+    - [x] DEC special graphics maps `0x5F..=0x7E` to box-drawing characters
+  - [x] `set_charset(&mut self, index: CharsetIndex, charset: Charset)`
+  - [x] `set_active(&mut self, index: CharsetIndex)`
+  - [x] `set_single_shift(&mut self, index: CharsetIndex)`
+- [x] **Tests**:
+  - [x] Default: all ASCII, no translation
+  - [x] DEC special graphics: `'q'` (0x71) → `'─'` (U+2500)
+  - [x] Single shift: applies for one char then reverts
+  - [x] G0/G1 switching
 
 ---
 
@@ -165,27 +165,27 @@ Character set translation (G0-G3, single shifts). Needed for DEC special graphic
 
 **File:** `oriterm_core/src/color/palette.rs`, `oriterm_core/src/color/mod.rs`
 
-- [ ] `Palette` struct
-  - [ ] Fields:
+- [x] `Palette` struct
+  - [x] Fields:
     - `colors: [Rgb; 270]` — full palette (0..=255 = indexed, 256..269 = foreground, background, cursor, etc.)
     - `scheme_name: String` — name of the loaded scheme
-  - [ ] `Palette::default()` — standard xterm-256 colors + sensible defaults for named slots
-  - [ ] `resolve(&self, color: &vte::ansi::Color, is_fg: bool) -> Rgb` — resolve Color enum to RGB
-    - [ ] `Color::Named(n)` → `self.colors[n as usize]`
-    - [ ] `Color::Spec(rgb)` → direct RGB
-    - [ ] `Color::Indexed(idx)` → `self.colors[idx as usize]`
-  - [ ] `set_indexed(&mut self, index: usize, color: Rgb)` — OSC 4
-  - [ ] `reset_indexed(&mut self, index: usize)` — OSC 104
-  - [ ] `foreground(&self) -> Rgb` — default foreground
-  - [ ] `background(&self) -> Rgb` — default background
-  - [ ] `cursor_color(&self) -> Rgb` — cursor color
-- [ ] `mod.rs`: re-export `Palette`, `Rgb`
-- [ ] **Tests**:
-  - [ ] Default palette: color 0 is black, color 7 is white, color 15 is bright white
-  - [ ] 256-color cube: indices 16–231 map correctly
-  - [ ] Grayscale ramp: indices 232–255
-  - [ ] `resolve` handles Named, Spec, Indexed variants
-  - [ ] `set_indexed` / `reset_indexed` work
+  - [x] `Palette::default()` — standard xterm-256 colors + sensible defaults for named slots
+  - [x] `resolve(&self, color: &vte::ansi::Color, is_fg: bool) -> Rgb` — resolve Color enum to RGB
+    - [x] `Color::Named(n)` → `self.colors[n as usize]`
+    - [x] `Color::Spec(rgb)` → direct RGB
+    - [x] `Color::Indexed(idx)` → `self.colors[idx as usize]`
+  - [x] `set_indexed(&mut self, index: usize, color: Rgb)` — OSC 4
+  - [x] `reset_indexed(&mut self, index: usize)` — OSC 104
+  - [x] `foreground(&self) -> Rgb` — default foreground
+  - [x] `background(&self) -> Rgb` — default background
+  - [x] `cursor_color(&self) -> Rgb` — cursor color
+- [x] `mod.rs`: re-export `Palette`, `Rgb`
+- [x] **Tests**:
+  - [x] Default palette: color 0 is black, color 7 is white, color 15 is bright white
+  - [x] 256-color cube: indices 16–231 map correctly
+  - [x] Grayscale ramp: indices 232–255
+  - [x] `resolve` handles Named, Spec, Indexed variants
+  - [x] `set_indexed` / `reset_indexed` work
 
 ---
 
@@ -195,8 +195,8 @@ The terminal state machine. Owns two grids (primary + alternate), mode flags, pa
 
 **File:** `oriterm_core/src/term/mod.rs`
 
-- [ ] `Term<T: EventListener>` struct
-  - [ ] Fields:
+- [x] `Term<T: EventListener>` struct
+  - [x] Fields:
     - `grid: Grid` — primary grid (active when not in alt screen)
     - `alt_grid: Grid` — alternate grid (active during alt screen)
     - `active_is_alt: bool` — which grid is active
@@ -209,26 +209,26 @@ The terminal state machine. Owns two grids (primary + alternate), mode flags, pa
     - `keyboard_mode_stack: Vec<u8>` — kitty keyboard enhancement stack
     - `inactive_keyboard_mode_stack: Vec<u8>` — stack for inactive screen
     - `event_listener: T` — event sink
-  - [ ] `Term::new(lines: usize, cols: usize, scrollback: usize, listener: T) -> Self`
-    - [ ] Create primary grid with scrollback
-    - [ ] Create alt grid (no scrollback — alt screen never has scrollback)
-    - [ ] Default mode, palette, charset, empty title
-  - [ ] `grid(&self) -> &Grid` — active grid
-  - [ ] `grid_mut(&mut self) -> &mut Grid` — active grid (mutable)
-  - [ ] `mode(&self) -> TermMode`
-  - [ ] `palette(&self) -> &Palette`
-  - [ ] `title(&self) -> &str`
-  - [ ] `cursor_shape(&self) -> CursorShape`
-  - [ ] `swap_alt(&mut self)` — switch between primary and alt screen
-    - [ ] Save/restore cursor
-    - [ ] Toggle `active_is_alt`
-    - [ ] Swap keyboard mode stacks
-    - [ ] Mark all dirty
-- [ ] **Tests**:
-  - [ ] `Term::<VoidListener>::new(24, 80, 1000, VoidListener)` creates a working terminal
-  - [ ] `grid()` returns primary grid by default
-  - [ ] `swap_alt()` switches to alt grid and back
-  - [ ] Mode defaults include SHOW_CURSOR and LINE_WRAP
+  - [x] `Term::new(lines: usize, cols: usize, scrollback: usize, listener: T) -> Self`
+    - [x] Create primary grid with scrollback
+    - [x] Create alt grid (no scrollback — alt screen never has scrollback)
+    - [x] Default mode, palette, charset, empty title
+  - [x] `grid(&self) -> &Grid` — active grid
+  - [x] `grid_mut(&mut self) -> &mut Grid` — active grid (mutable)
+  - [x] `mode(&self) -> TermMode`
+  - [x] `palette(&self) -> &Palette`
+  - [x] `title(&self) -> &str`
+  - [x] `cursor_shape(&self) -> CursorShape`
+  - [x] `swap_alt(&mut self)` — switch between primary and alt screen
+    - [x] Save/restore cursor
+    - [x] Toggle `active_is_alt`
+    - [x] Swap keyboard mode stacks
+    - [x] Mark all dirty
+- [x] **Tests**:
+  - [x] `Term::<VoidListener>::new(24, 80, 1000, VoidListener)` creates a working terminal
+  - [x] `grid()` returns primary grid by default
+  - [x] `swap_alt()` switches to alt grid and back
+  - [x] Mode defaults include SHOW_CURSOR and LINE_WRAP
 
 ---
 
