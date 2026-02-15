@@ -35,10 +35,25 @@ impl Grid {
 
     /// Scroll the scroll region up by `count` lines.
     ///
-    /// Top rows are lost (scrollback not yet implemented). Blank rows
-    /// appear at the bottom of the region.
+    /// When the scroll region covers the full screen, evicted top rows
+    /// are pushed to scrollback history. With a sub-region, top rows
+    /// are lost. Blank rows appear at the bottom of the region.
     pub fn scroll_up(&mut self, count: usize) {
         let range = self.scroll_region.clone();
+        let len = range.end - range.start;
+        if len == 0 {
+            return;
+        }
+        let count = count.min(len);
+
+        // Push evicted rows to scrollback when scrolling the full screen.
+        let is_full_screen = range.start == 0 && range.end == self.lines;
+        if is_full_screen {
+            for i in 0..count {
+                self.scrollback.push(self.rows[i].clone());
+            }
+        }
+
         self.scroll_range_up(range, count);
     }
 

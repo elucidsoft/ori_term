@@ -34,7 +34,7 @@ sections:
     status: complete
   - id: "1.10"
     title: Scrollback Ring Buffer
-    status: not-started
+    status: complete
   - id: "1.11"
     title: Dirty Tracking
     status: not-started
@@ -389,32 +389,32 @@ Efficient storage for scrollback history. Rows that scroll off the top go into a
 
 **File:** `oriterm_core/src/grid/ring.rs`
 
-- [ ] `ScrollbackBuffer` struct
-  - [ ] Fields:
+- [x] `ScrollbackBuffer` struct
+  - [x] Fields:
     - `buf: Vec<Row>` — pre-allocated ring buffer
     - `max_scrollback: usize` — maximum history lines (configurable, default 10000)
     - `len: usize` — current number of rows in buffer
     - `start: usize` — ring buffer start index
-  - [ ] `ScrollbackBuffer::new(max_scrollback: usize) -> Self`
-  - [ ] `push(&mut self, row: Row)` — add row to scrollback (evicts oldest if full)
-  - [ ] `len(&self) -> usize` — number of rows stored
-  - [ ] `get(&self, index: usize) -> Option<&Row>` — index 0 = most recent, len-1 = oldest
-  - [ ] `iter(&self) -> impl Iterator<Item = &Row>` — iterate newest to oldest
-  - [ ] `clear(&mut self)` — clear all scrollback
-- [ ] Integrate with `Grid`:
-  - [ ] Add field: `scrollback: ScrollbackBuffer`
-  - [ ] Add field: `display_offset: usize` — how many lines scrolled back (0 = live)
-  - [ ] `Grid::scroll_up` pushes evicted rows to scrollback (when scroll region is full screen)
-  - [ ] `Grid::total_lines(&self) -> usize` — `self.lines + self.scrollback.len()`
-  - [ ] `Grid::display_offset(&self) -> usize`
-  - [ ] `Grid::scroll_display(&mut self, delta: isize)` — adjust display_offset, clamped
-- [ ] **Tests** (`oriterm_core/src/grid/ring.rs` `#[cfg(test)]`):
-  - [ ] Push rows into scrollback, verify retrieval order (newest first)
-  - [ ] Ring buffer wraps: push max+10 rows, only max retained
-  - [ ] Clear empties the buffer
-  - [ ] Integration: scroll_up pushes to scrollback
-  - [ ] display_offset scrolls through history
-  - [ ] display_offset clamped to scrollback length
+  - [x] `ScrollbackBuffer::new(max_scrollback: usize) -> Self`
+  - [x] `push(&mut self, row: Row)` — add row to scrollback (evicts oldest if full)
+  - [x] `len(&self) -> usize` — number of rows stored
+  - [x] `get(&self, index: usize) -> Option<&Row>` — index 0 = most recent, len-1 = oldest
+  - [x] `iter(&self) -> impl Iterator<Item = &Row>` — iterate newest to oldest
+  - [x] `clear(&mut self)` — clear all scrollback
+- [x] Integrate with `Grid`:
+  - [x] Add field: `scrollback: ScrollbackBuffer`
+  - [x] Add field: `display_offset: usize` — how many lines scrolled back (0 = live)
+  - [x] `Grid::scroll_up` pushes evicted rows to scrollback (when scroll region is full screen)
+  - [x] `Grid::total_lines(&self) -> usize` — `self.lines + self.scrollback.len()`
+  - [x] `Grid::display_offset(&self) -> usize`
+  - [x] `Grid::scroll_display(&mut self, delta: isize)` — adjust display_offset, clamped
+- [x] **Tests** (`oriterm_core/src/grid/ring.rs` `#[cfg(test)]`):
+  - [x] Push rows into scrollback, verify retrieval order (newest first)
+  - [x] Ring buffer wraps: push max+10 rows, only max retained
+  - [x] Clear empties the buffer
+  - [x] Integration: scroll_up pushes to scrollback
+  - [x] display_offset scrolls through history
+  - [x] display_offset clamped to scrollback length
 
 ---
 

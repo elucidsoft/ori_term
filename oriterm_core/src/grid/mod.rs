@@ -7,6 +7,7 @@
 pub mod cursor;
 pub mod editing;
 pub mod navigation;
+pub mod ring;
 pub mod row;
 pub mod scroll;
 
@@ -17,13 +18,14 @@ use crate::index::Line;
 pub use cursor::{Cursor, CursorShape};
 pub use editing::EraseMode;
 pub use navigation::TabClearMode;
+pub use ring::ScrollbackBuffer;
 pub use row::Row;
 
 /// The 2D terminal cell grid.
 ///
 /// Stores visible rows indexed `0..lines` (top to bottom), a cursor,
-/// and tab stops. Scrollback and dirty tracking are added in later
-/// subsections.
+/// tab stops, and scrollback history. Dirty tracking is added in a
+/// later subsection.
 #[derive(Debug, Clone)]
 pub struct Grid {
     /// Visible rows (index 0 = top of screen).
@@ -40,6 +42,10 @@ pub struct Grid {
     tab_stops: Vec<bool>,
     /// DECSTBM scroll region: top (inclusive) .. bottom (exclusive).
     scroll_region: Range<usize>,
+    /// Scrollback history (rows that scrolled off the top).
+    scrollback: ScrollbackBuffer,
+    /// How many lines scrolled back into history (0 = live view).
+    display_offset: usize,
 }
 
 impl Grid {
@@ -60,6 +66,8 @@ impl Grid {
             saved_cursor: None,
             tab_stops,
             scroll_region: 0..lines,
+            scrollback: ScrollbackBuffer::new(ring::DEFAULT_MAX_SCROLLBACK),
+            display_offset: 0,
         }
     }
 
@@ -87,6 +95,31 @@ impl Grid {
     #[cfg(test)]
     pub(crate) fn tab_stops(&self) -> &[bool] {
         &self.tab_stops
+    }
+
+    /// Total lines: visible + scrollback history.
+    pub fn total_lines(&self) -> usize {
+        self.lines + self.scrollback.len()
+    }
+
+    /// How many lines scrolled back into history (0 = live view).
+    pub fn display_offset(&self) -> usize {
+        self.display_offset
+    }
+
+    /// Immutable reference to the scrollback buffer.
+    pub fn scrollback(&self) -> &ScrollbackBuffer {
+        &self.scrollback
+    }
+
+    /// Adjust display offset (positive = scroll back, negative = scroll forward).
+    ///
+    /// Clamped to `0..=scrollback.len()`.
+    pub fn scroll_display(&mut self, delta: isize) {
+        let max = self.scrollback.len();
+        let current = self.display_offset as isize;
+        let target = (current + delta).clamp(0, max as isize);
+        self.display_offset = target as usize;
     }
 
     /// Initialize tab stops every 8 columns.
