@@ -15,7 +15,7 @@ paths:
 6. Inherent `impl` blocks (immediately after their type)
 7. Trait `impl` blocks (immediately after inherent impls)
 8. Free functions
-9. `#[cfg(test)] mod tests` at bottom
+9. `#[cfg(test)] mod tests;` at bottom (tests in sibling `tests.rs` — see test-organization.md)
 
 ## Import Organization (3 groups, blank-line separated)
 
