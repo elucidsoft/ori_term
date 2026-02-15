@@ -100,6 +100,7 @@ impl Grid {
             // Advance cursor by character width.
             self.cursor.set_col(Column(col + width));
 
+            self.dirty.mark(line);
             break;
         }
     }
@@ -140,6 +141,8 @@ impl Grid {
 
         // Cells shifted right: occ grows by at most `count`, capped at cols.
         row.set_occ((row.occ() + count).min(cols));
+
+        self.dirty.mark(line);
     }
 
     /// Delete `count` cells at the cursor, shifting remaining cells left.
@@ -182,6 +185,8 @@ impl Grid {
         }
         // else: Content shifted left; existing occ remains a valid upper
         // bound. Fill cells are empty and don't extend the dirty range.
+
+        self.dirty.mark(line);
     }
 
     /// Erase part or all of the display.
@@ -197,20 +202,25 @@ impl Grid {
         match mode {
             EraseMode::Below => {
                 self.erase_line_with_template(EraseMode::Below, &template);
-                for line in self.cursor.line() + 1..self.lines {
+                let cursor_line = self.cursor.line();
+                for line in cursor_line + 1..self.lines {
                     self.rows[line].reset(self.cols, &template);
+                    self.dirty.mark(line);
                 }
             }
             EraseMode::Above => {
                 self.erase_line_with_template(EraseMode::Above, &template);
-                for line in 0..self.cursor.line() {
+                let cursor_line = self.cursor.line();
+                for line in 0..cursor_line {
                     self.rows[line].reset(self.cols, &template);
+                    self.dirty.mark(line);
                 }
             }
             EraseMode::All => {
                 for line in 0..self.lines {
                     self.rows[line].reset(self.cols, &template);
                 }
+                self.dirty.mark_all();
             }
             EraseMode::Scrollback => {
                 // Scrollback clearing will be implemented in 1.10.
@@ -279,6 +289,10 @@ impl Grid {
             // doesn't exist in xterm/ECMA-48). Treat as no-op in release builds.
             EraseMode::Scrollback => {}
         }
+
+        if mode != EraseMode::Scrollback {
+            self.dirty.mark(line);
+        }
     }
 
     /// Erase `count` cells starting at cursor (replace with template, don't shift).
@@ -307,6 +321,8 @@ impl Grid {
         if !template.is_empty() {
             row.set_occ(row.occ().max(end));
         }
+
+        self.dirty.mark(line);
     }
 
     /// Clear any wide char pair at the given position.

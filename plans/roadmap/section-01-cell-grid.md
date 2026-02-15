@@ -1,7 +1,7 @@
 ---
 section: 1
 title: Cell + Grid
-status: in-progress
+status: complete
 tier: 0
 goal: Build the core data structures — Cell, Row, Grid — in oriterm_core with full test coverage
 sections:
@@ -25,7 +25,7 @@ sections:
     status: complete
   - id: "1.7"
     title: Grid Editing
-    status: in-progress
+    status: complete
   - id: "1.8"
     title: Grid Navigation
     status: complete
@@ -37,10 +37,10 @@ sections:
     status: complete
   - id: "1.11"
     title: Dirty Tracking
-    status: not-started
+    status: complete
   - id: "1.12"
     title: Section Completion
-    status: not-started
+    status: complete
 ---
 
 # Section 01: Cell + Grid
@@ -256,29 +256,29 @@ Methods on `Grid`:
   - [x] Otherwise, advance cursor column by character width
   - [x] If overwriting a wide char spacer, clear the preceding wide char cell
   - [x] If overwriting a wide char, clear its spacer
-  - [ ] Mark row dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark row dirty  <!-- blocked-by:1.11 -->
 - [x] `insert_blank(&mut self, count: usize)`
   - [x] Insert `count` blank cells at cursor, shifting existing cells right
   - [x] Cells that shift past the right edge are lost
-  - [ ] Mark row dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark row dirty  <!-- blocked-by:1.11 -->
 - [x] `delete_chars(&mut self, count: usize)`
   - [x] Delete `count` cells at cursor, shifting remaining cells left
   - [x] New cells at right edge are blank (cursor template)
-  - [ ] Mark row dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark row dirty  <!-- blocked-by:1.11 -->
 - [x] `erase_display(&mut self, mode: EraseMode)`
   - [x] `EraseMode::Below` — erase from cursor to end of display
   - [x] `EraseMode::Above` — erase from start of display to cursor
   - [x] `EraseMode::All` — erase entire display
   - [x] `EraseMode::Scrollback` — erase scrollback buffer only
-  - [ ] Mark affected rows dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark affected rows dirty  <!-- blocked-by:1.11 -->
 - [x] `erase_line(&mut self, mode: EraseMode)`
   - [x] `Below` — erase from cursor to end of line
   - [x] `Above` — erase from start of line to cursor
   - [x] `All` — erase entire line
-  - [ ] Mark row dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark row dirty  <!-- blocked-by:1.11 -->
 - [x] `erase_chars(&mut self, count: usize)`
   - [x] Erase `count` cells starting at cursor (replace with template, don't shift)
-  - [ ] Mark row dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark row dirty  <!-- blocked-by:1.11 -->
 - [x] `EraseMode` enum — `Below`, `Above`, `All`, `Scrollback`
 - [x] **Tests** (`oriterm_core/src/grid/editing.rs` `#[cfg(test)]`):
   - [x] `put_char('A')` at (0,0) writes 'A', cursor advances to col 1
@@ -360,12 +360,12 @@ Scroll operations within scroll regions. A scroll region is a range of lines (se
   - [x] Move rows in scroll region up by `count`
   - [x] Top rows go to scrollback (if scroll region is full screen) or are lost (if sub-region)
   - [x] New blank rows appear at bottom of region
-  - [ ] Mark affected rows dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark affected rows dirty  <!-- blocked-by:1.11 -->
 - [x] `scroll_down(&mut self, count: usize)`
   - [x] Move rows in scroll region down by `count`
   - [x] Bottom rows are lost
   - [x] New blank rows appear at top of region
-  - [ ] Mark affected rows dirty  <!-- blocked-by:1.11 -->
+  - [x] Mark affected rows dirty  <!-- blocked-by:1.11 -->
 - [x] `insert_lines(&mut self, count: usize)` — IL: insert blank lines at cursor, pushing down
   - [x] Only operates within scroll region
   - [x] Cursor must be within scroll region
@@ -424,38 +424,38 @@ Track which rows have changed since last read. Enables damage-based rendering.
 
 **File:** `oriterm_core/src/grid/dirty.rs`
 
-- [ ] `DirtyTracker` struct
-  - [ ] Fields:
+- [x] `DirtyTracker` struct
+  - [x] Fields:
     - `dirty: Vec<bool>` — one bool per visible row
     - `all_dirty: bool` — shortcut: everything changed (resize, scroll, alt screen swap)
-  - [ ] `DirtyTracker::new(lines: usize) -> Self` — all clean
-  - [ ] `mark(&mut self, line: usize)` — mark single line dirty
-  - [ ] `mark_all(&mut self)` — mark everything dirty
-  - [ ] `is_dirty(&self, line: usize) -> bool`
-  - [ ] `is_any_dirty(&self) -> bool`
-  - [ ] `drain(&mut self) -> DirtyIterator` — returns iterator of dirty line indices, resets all to clean
-  - [ ] `resize(&mut self, lines: usize)` — resize tracker, mark all dirty
-- [ ] Integrate with `Grid`:  <!-- unblocks:1.7 --><!-- unblocks:1.8 --><!-- unblocks:1.9 -->
-  - [ ] Add field: `dirty: DirtyTracker`
-  - [ ] All editing/scroll/navigation methods that change cells call `self.dirty.mark(line)`
-  - [ ] `scroll_up`/`scroll_down` call `self.dirty.mark_all()` (conservative, can optimize later)
-- [ ] **Tests** (`oriterm_core/src/grid/dirty.rs` `#[cfg(test)]`):
-  - [ ] New tracker: nothing dirty
-  - [ ] Mark line 5: only line 5 is dirty
-  - [ ] Mark all: everything dirty
-  - [ ] Drain: returns dirty lines, resets to clean
-  - [ ] After drain, nothing is dirty
-  - [ ] Resize marks all dirty
+  - [x] `DirtyTracker::new(lines: usize) -> Self` — all clean
+  - [x] `mark(&mut self, line: usize)` — mark single line dirty
+  - [x] `mark_all(&mut self)` — mark everything dirty
+  - [x] `is_dirty(&self, line: usize) -> bool`
+  - [x] `is_any_dirty(&self) -> bool`
+  - [x] `drain(&mut self) -> DirtyIterator` — returns iterator of dirty line indices, resets all to clean
+  - [x] `resize(&mut self, lines: usize)` — resize tracker, mark all dirty
+- [x] Integrate with `Grid`:  <!-- unblocks:1.7 --><!-- unblocks:1.8 --><!-- unblocks:1.9 -->
+  - [x] Add field: `dirty: DirtyTracker`
+  - [x] All editing/scroll/navigation methods that change cells call `self.dirty.mark(line)`
+  - [x] `scroll_up`/`scroll_down` call `self.dirty.mark_all()` (conservative, can optimize later)
+- [x] **Tests** (`oriterm_core/src/grid/dirty.rs` `#[cfg(test)]`):
+  - [x] New tracker: nothing dirty
+  - [x] Mark line 5: only line 5 is dirty
+  - [x] Mark all: everything dirty
+  - [x] Drain: returns dirty lines, resets to clean
+  - [x] After drain, nothing is dirty
+  - [x] Resize marks all dirty
 
 ---
 
 ## 1.12 Section Completion
 
-- [ ] All 1.1–1.11 items complete
-- [ ] `cargo test -p oriterm_core` — all tests pass
-- [ ] `cargo clippy -p oriterm_core --target x86_64-pc-windows-gnu` — no warnings
-- [ ] `cargo doc -p oriterm_core --no-deps` — generates clean docs
-- [ ] Grid can: create, write chars (including wide), move cursor, scroll, erase, tab stops, scrollback, dirty tracking
-- [ ] No VTE, no events, no palette, no selection, no rendering — just data structures + operations
+- [x] All 1.1–1.11 items complete
+- [x] `cargo test -p oriterm_core` — all tests pass
+- [x] `cargo clippy -p oriterm_core --target x86_64-pc-windows-gnu` — no warnings
+- [x] `cargo doc -p oriterm_core --no-deps` — generates clean docs
+- [x] Grid can: create, write chars (including wide), move cursor, scroll, erase, tab stops, scrollback, dirty tracking
+- [x] No VTE, no events, no palette, no selection, no rendering — just data structures + operations
 
 **Exit Criteria:** `oriterm_core` compiles, all grid operations are tested, `cargo test -p oriterm_core` passes with zero failures.

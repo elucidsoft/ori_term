@@ -5,6 +5,7 @@
 //! dirty tracking, and editing operations are added in submodules.
 
 pub mod cursor;
+pub mod dirty;
 pub mod editing;
 pub mod navigation;
 pub mod ring;
@@ -16,6 +17,7 @@ use std::ops::{Index, IndexMut, Range};
 use crate::index::Line;
 
 pub use cursor::{Cursor, CursorShape};
+pub use dirty::DirtyTracker;
 pub use editing::EraseMode;
 pub use navigation::TabClearMode;
 pub use ring::ScrollbackBuffer;
@@ -24,8 +26,8 @@ pub use row::Row;
 /// The 2D terminal cell grid.
 ///
 /// Stores visible rows indexed `0..lines` (top to bottom), a cursor,
-/// tab stops, and scrollback history. Dirty tracking is added in a
-/// later subsection.
+/// tab stops, scrollback history, and dirty tracking for damage-based
+/// rendering.
 #[derive(Debug, Clone)]
 pub struct Grid {
     /// Visible rows (index 0 = top of screen).
@@ -46,6 +48,8 @@ pub struct Grid {
     scrollback: ScrollbackBuffer,
     /// How many lines scrolled back into history (0 = live view).
     display_offset: usize,
+    /// Tracks which rows have changed since last drain.
+    dirty: DirtyTracker,
 }
 
 impl Grid {
@@ -68,6 +72,7 @@ impl Grid {
             scroll_region: 0..lines,
             scrollback: ScrollbackBuffer::new(ring::DEFAULT_MAX_SCROLLBACK),
             display_offset: 0,
+            dirty: DirtyTracker::new(lines),
         }
     }
 
@@ -110,6 +115,16 @@ impl Grid {
     /// Immutable reference to the scrollback buffer.
     pub fn scrollback(&self) -> &ScrollbackBuffer {
         &self.scrollback
+    }
+
+    /// Immutable reference to the dirty tracker.
+    pub fn dirty(&self) -> &DirtyTracker {
+        &self.dirty
+    }
+
+    /// Mutable reference to the dirty tracker.
+    pub fn dirty_mut(&mut self) -> &mut DirtyTracker {
+        &mut self.dirty
     }
 
     /// Adjust display offset (positive = scroll back, negative = scroll forward).
