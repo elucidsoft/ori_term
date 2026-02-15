@@ -118,6 +118,90 @@ fn zero_max_scrollback_ignores_push() {
     assert!(sb.is_empty());
 }
 
+#[test]
+fn max_scrollback_returns_configured_limit() {
+    let sb = ScrollbackBuffer::new(500);
+    assert_eq!(sb.max_scrollback(), 500);
+
+    let sb_zero = ScrollbackBuffer::new(0);
+    assert_eq!(sb_zero.max_scrollback(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Ring buffer boundary tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exact_capacity_boundary_first_eviction() {
+    let mut sb = ScrollbackBuffer::new(3);
+
+    // Push exactly max_scrollback rows (buffer just becomes full).
+    sb.push(make_row("R0"));
+    sb.push(make_row("R1"));
+    sb.push(make_row("R2"));
+    assert_eq!(sb.len(), 3);
+    assert_eq!(row_text(sb.get(0).unwrap()), "R2");
+    assert_eq!(row_text(sb.get(2).unwrap()), "R0");
+
+    // One more push triggers the first eviction (start becomes non-zero).
+    sb.push(make_row("R3"));
+    assert_eq!(sb.len(), 3);
+    assert_eq!(row_text(sb.get(0).unwrap()), "R3");
+    assert_eq!(row_text(sb.get(1).unwrap()), "R2");
+    assert_eq!(row_text(sb.get(2).unwrap()), "R1");
+}
+
+// ---------------------------------------------------------------------------
+// Wide character scrollback tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wide_char_flags_preserved_in_scrollback() {
+    use crate::cell::CellFlags;
+
+    let cols = 4;
+    let mut row = Row::new(cols);
+
+    // Simulate a wide char at col 0: char + spacer.
+    row[Column(0)].ch = '\u{4e16}'; // CJK character
+    row[Column(0)].flags = CellFlags::WIDE_CHAR;
+    row[Column(1)].ch = ' ';
+    row[Column(1)].flags = CellFlags::WIDE_CHAR_SPACER;
+    // Normal char at col 2.
+    row[Column(2)].ch = 'A';
+
+    let mut sb = ScrollbackBuffer::new(10);
+    sb.push(row);
+
+    let retrieved = sb.get(0).unwrap();
+    assert_eq!(retrieved[Column(0)].ch, '\u{4e16}');
+    assert!(retrieved[Column(0)].flags.contains(CellFlags::WIDE_CHAR));
+    assert_eq!(retrieved[Column(1)].ch, ' ');
+    assert!(retrieved[Column(1)].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+    assert_eq!(retrieved[Column(2)].ch, 'A');
+}
+
+#[test]
+fn wide_char_survives_scrollback_via_grid_scroll_up() {
+    use crate::cell::CellFlags;
+
+    let mut grid = Grid::new(3, 6);
+    // Write a wide char on line 0 using put_char (the production path).
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('\u{4e16}'); // width 2: cell + spacer
+    grid.put_char('X');
+
+    grid.scroll_up(1);
+
+    assert_eq!(grid.scrollback().len(), 1);
+    let row = grid.scrollback().get(0).unwrap();
+    assert_eq!(row[Column(0)].ch, '\u{4e16}');
+    assert!(row[Column(0)].flags.contains(CellFlags::WIDE_CHAR));
+    assert!(row[Column(1)].flags.contains(CellFlags::WIDE_CHAR_SPACER));
+    assert_eq!(row[Column(2)].ch, 'X');
+}
+
 // ---------------------------------------------------------------------------
 // Grid integration tests
 // ---------------------------------------------------------------------------

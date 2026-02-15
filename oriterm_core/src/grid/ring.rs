@@ -38,7 +38,7 @@ impl ScrollbackBuffer {
     }
 
     /// Add a row to scrollback (evicts the oldest if full).
-    pub fn push(&mut self, row: Row) {
+    pub(super) fn push(&mut self, row: Row) {
         if self.max_scrollback == 0 {
             return;
         }
@@ -62,6 +62,11 @@ impl ScrollbackBuffer {
     /// Whether the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// Maximum number of rows this buffer will retain.
+    pub fn max_scrollback(&self) -> usize {
+        self.max_scrollback
     }
 
     /// Retrieve a row by logical index (0 = most recent, `len - 1` = oldest).

@@ -4,11 +4,13 @@
 //! `insert_lines`, and `delete_lines`. All operations use O(1) rotation
 //! of existing row allocations and fill new rows with BCE background.
 
+use std::mem;
 use std::ops::Range;
 
 use crate::cell::Cell;
 use crate::index::Column;
 
+use super::row::Row;
 use super::Grid;
 
 impl Grid {
@@ -49,8 +51,18 @@ impl Grid {
         // Push evicted rows to scrollback when scrolling the full screen.
         let is_full_screen = range.start == 0 && range.end == self.lines;
         if is_full_screen {
+            // Keep user's scrollback view stable when new content arrives.
+            if self.display_offset > 0 {
+                self.display_offset = (self.display_offset + count)
+                    .min(self.scrollback.max_scrollback());
+            }
+
             for i in 0..count {
-                self.scrollback.push(self.rows[i].clone());
+                // Move the row out (zero-copy), leave a blank in its place.
+                // The blank rotates to the bottom via scroll_range_up, where
+                // it would be reset anyway — but it's already blank (no-op).
+                let evicted = mem::replace(&mut self.rows[i], Row::new(self.cols));
+                self.scrollback.push(evicted);
             }
         }
 

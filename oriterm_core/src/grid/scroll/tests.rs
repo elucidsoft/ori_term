@@ -358,3 +358,369 @@ fn delete_lines_bce_fill() {
     assert_eq!(grid[Line(2)][Column(0)].bg, Color::Indexed(3));
     assert_eq!(grid[Line(2)][Column(9)].bg, Color::Indexed(3));
 }
+
+// --- display offset stabilization ---
+
+#[test]
+fn scroll_up_stabilizes_display_offset() {
+    let mut grid = Grid::new(3, 5);
+    // Push some rows into scrollback.
+    for i in 0..5u8 {
+        grid.cursor_mut().set_line(0);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + i) as char);
+        grid.scroll_up(1);
+    }
+    assert_eq!(grid.scrollback().len(), 5);
+
+    // Scroll back 3 lines into history.
+    grid.scroll_display(3);
+    assert_eq!(grid.display_offset(), 3);
+
+    // New content arrives — scroll_up should bump display_offset.
+    grid.scroll_up(1);
+    assert_eq!(grid.display_offset(), 4);
+
+    // Another scroll_up.
+    grid.scroll_up(1);
+    assert_eq!(grid.display_offset(), 5);
+}
+
+#[test]
+fn scroll_up_display_offset_clamped_to_max_scrollback() {
+    let mut grid = Grid::new(3, 5);
+    // Fill scrollback near capacity.
+    for _ in 0..9998 {
+        grid.scroll_up(1);
+    }
+
+    // Scroll back to near the limit.
+    grid.scroll_display(9998);
+    assert_eq!(grid.display_offset(), 9998);
+
+    // Two more scroll_ups — offset should clamp at max_scrollback (10_000).
+    grid.scroll_up(1);
+    assert_eq!(grid.display_offset(), 9999);
+    grid.scroll_up(1);
+    assert_eq!(grid.display_offset(), 10_000);
+    grid.scroll_up(1);
+    // Clamped — can't exceed max.
+    assert_eq!(grid.display_offset(), 10_000);
+}
+
+#[test]
+fn scroll_up_no_offset_change_when_at_live_view() {
+    let mut grid = Grid::new(3, 5);
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('A');
+    grid.scroll_up(1);
+
+    // display_offset is 0 (live view) — should stay 0.
+    assert_eq!(grid.display_offset(), 0);
+    grid.scroll_up(1);
+    assert_eq!(grid.display_offset(), 0);
+}
+
+// --- scrollback interaction invariants ---
+
+#[test]
+fn linefeed_at_bottom_pushes_to_scrollback() {
+    let mut grid = Grid::new(3, 5);
+    // Write identifiable content on line 0.
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('A');
+    grid.put_char('B');
+    grid.put_char('C');
+
+    // Move to bottom and trigger linefeed (the real production path).
+    grid.cursor_mut().set_line(2);
+    grid.linefeed();
+
+    // The evicted row should appear in scrollback.
+    assert_eq!(grid.scrollback().len(), 1);
+    let row = grid.scrollback().get(0).unwrap();
+    assert_eq!(row[Column(0)].ch, 'A');
+    assert_eq!(row[Column(1)].ch, 'B');
+    assert_eq!(row[Column(2)].ch, 'C');
+}
+
+#[test]
+fn delete_lines_does_not_push_to_scrollback() {
+    let mut grid = Grid::new(5, 10);
+    for line in 0..5 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    // Delete 2 lines at the cursor in a full-screen region.
+    grid.cursor_mut().set_line(0);
+    grid.delete_lines(2);
+
+    // DL uses scroll_range_up, NOT scroll_up — no scrollback.
+    assert_eq!(grid.scrollback().len(), 0);
+}
+
+#[test]
+fn insert_lines_does_not_push_to_scrollback() {
+    let mut grid = Grid::new(5, 10);
+    for line in 0..5 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    grid.cursor_mut().set_line(0);
+    grid.insert_lines(2);
+
+    // IL uses scroll_range_down — no scrollback.
+    assert_eq!(grid.scrollback().len(), 0);
+}
+
+#[test]
+fn reverse_index_at_top_does_not_push_to_scrollback() {
+    let mut grid = Grid::new(3, 10);
+    for line in 0..3 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    // RI at top of scroll region calls scroll_down, not scroll_up.
+    grid.cursor_mut().set_line(0);
+    grid.reverse_index();
+
+    assert_eq!(grid.scrollback().len(), 0);
+}
+
+// --- occ tracking after scroll operations ---
+
+#[test]
+fn scroll_up_blank_rows_have_zero_occ() {
+    let mut grid = Grid::new(4, 10);
+    for line in 0..4 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    grid.scroll_up(2);
+
+    // Bottom 2 rows should be blank with occ=0.
+    assert_eq!(grid[Line(2)].occ(), 0);
+    assert_eq!(grid[Line(3)].occ(), 0);
+    // Top 2 rows still have content.
+    assert!(grid[Line(0)].occ() > 0);
+    assert!(grid[Line(1)].occ() > 0);
+}
+
+#[test]
+fn scroll_down_blank_rows_have_zero_occ() {
+    let mut grid = Grid::new(4, 10);
+    for line in 0..4 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    grid.scroll_down(2);
+
+    // Top 2 rows should be blank with occ=0.
+    assert_eq!(grid[Line(0)].occ(), 0);
+    assert_eq!(grid[Line(1)].occ(), 0);
+    // Bottom 2 rows still have content.
+    assert!(grid[Line(2)].occ() > 0);
+    assert!(grid[Line(3)].occ() > 0);
+}
+
+#[test]
+fn insert_lines_blank_rows_have_zero_occ() {
+    let mut grid = Grid::new(5, 10);
+    for line in 0..5 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    grid.cursor_mut().set_line(1);
+    grid.insert_lines(2);
+
+    // Inserted rows at lines 1-2 should have occ=0.
+    assert_eq!(grid[Line(1)].occ(), 0);
+    assert_eq!(grid[Line(2)].occ(), 0);
+}
+
+#[test]
+fn delete_lines_blank_rows_have_zero_occ() {
+    let mut grid = Grid::new(5, 10);
+    for line in 0..5 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char);
+    }
+
+    grid.cursor_mut().set_line(1);
+    grid.delete_lines(2);
+
+    // Bottom 2 rows (new blanks) should have occ=0.
+    assert_eq!(grid[Line(3)].occ(), 0);
+    assert_eq!(grid[Line(4)].occ(), 0);
+}
+
+// --- BCE background preserved in scrollback ---
+
+#[test]
+fn scroll_up_preserves_bce_background_in_scrollback() {
+    let mut grid = Grid::new(3, 5);
+    // Write a row with non-default background.
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().template.bg = Color::Indexed(4);
+    for col in 0..5 {
+        grid.cursor_mut().set_col(Column(col));
+        grid.put_char('X');
+    }
+
+    grid.scroll_up(1);
+
+    // Scrollback row should preserve the background color.
+    let row = grid.scrollback().get(0).unwrap();
+    for col in 0..5 {
+        assert_eq!(row[Column(col)].bg, Color::Indexed(4));
+        assert_eq!(row[Column(col)].ch, 'X');
+    }
+}
+
+// --- cursor position unchanged after scroll ---
+
+#[test]
+fn scroll_up_does_not_move_cursor() {
+    let mut grid = Grid::new(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(7));
+    grid.scroll_up(1);
+    assert_eq!(grid.cursor().line(), 2);
+    assert_eq!(grid.cursor().col(), Column(7));
+}
+
+#[test]
+fn scroll_down_does_not_move_cursor() {
+    let mut grid = Grid::new(5, 10);
+    grid.cursor_mut().set_line(2);
+    grid.cursor_mut().set_col(Column(7));
+    grid.scroll_down(1);
+    assert_eq!(grid.cursor().line(), 2);
+    assert_eq!(grid.cursor().col(), Column(7));
+}
+
+// --- count=0 edge case ---
+
+#[test]
+fn scroll_up_zero_is_noop() {
+    let mut grid = Grid::new(3, 10);
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('A');
+
+    grid.scroll_up(0);
+
+    // Nothing changed.
+    assert_eq!(grid[Line(0)][Column(0)].ch, 'A');
+    assert_eq!(grid.scrollback().len(), 0);
+}
+
+#[test]
+fn scroll_down_zero_is_noop() {
+    let mut grid = Grid::new(3, 10);
+    grid.cursor_mut().set_line(0);
+    grid.cursor_mut().set_col(Column(0));
+    grid.put_char('A');
+
+    grid.scroll_down(0);
+
+    assert_eq!(grid[Line(0)][Column(0)].ch, 'A');
+}
+
+// --- accumulated scrollback via linefeed cycles ---
+
+#[test]
+fn accumulated_scrollback_via_linefeed_cycles() {
+    let mut grid = Grid::new(3, 4);
+
+    // Fill initial screen — every row has content.
+    for line in 0..3 {
+        grid.cursor_mut().set_line(line);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'A' + line as u8) as char); // A, B, C
+    }
+
+    // Simulate new lines arriving: write at bottom, linefeed scrolls.
+    // This is the real production path: put_char → linefeed → scroll_up → push.
+    for i in 0..4u8 {
+        grid.cursor_mut().set_line(2);
+        grid.cursor_mut().set_col(Column(0));
+        grid.put_char((b'D' + i) as char); // D, E, F, G
+        grid.linefeed();
+    }
+
+    // Each linefeed at bottom evicts the TOP row to scrollback:
+    //   Initial:  [A, B, C]
+    //   Write D@2 → [A, B, D] → evict A → [B, D, blank]
+    //   Write E@2 → [B, D, E] → evict B → [D, E, blank]
+    //   Write F@2 → [D, E, F] → evict D → [E, F, blank]
+    //   Write G@2 → [E, F, G] → evict E → [F, G, blank]
+    // Note: C was overwritten by D before reaching the top — correct
+    // terminal behavior (overwritten content is lost).
+    assert_eq!(grid.scrollback().len(), 4);
+    assert_eq!(grid.scrollback().get(0).unwrap()[Column(0)].ch, 'E');
+    assert_eq!(grid.scrollback().get(1).unwrap()[Column(0)].ch, 'D');
+    assert_eq!(grid.scrollback().get(2).unwrap()[Column(0)].ch, 'B');
+    assert_eq!(grid.scrollback().get(3).unwrap()[Column(0)].ch, 'A');
+
+    // Visible grid has the remaining content.
+    assert_eq!(grid[Line(0)][Column(0)].ch, 'F');
+    assert_eq!(grid[Line(1)][Column(0)].ch, 'G');
+}
+
+// --- scroll_display(0) is noop ---
+
+#[test]
+fn scroll_display_zero_is_noop() {
+    let mut grid = Grid::new(3, 5);
+    // Push some scrollback.
+    grid.scroll_up(1);
+    grid.scroll_up(1);
+    grid.scroll_display(1);
+    assert_eq!(grid.display_offset(), 1);
+
+    grid.scroll_display(0);
+    assert_eq!(grid.display_offset(), 1);
+}
+
+// --- scrollback content after mem::replace ---
+
+#[test]
+fn scroll_up_preserves_row_content_in_scrollback() {
+    let mut grid = Grid::new(3, 5);
+    // Write distinct content into each row.
+    for line in 0..3 {
+        grid.cursor_mut().set_line(line);
+        for col in 0..5 {
+            grid.cursor_mut().set_col(Column(col));
+            grid.put_char((b'A' + line as u8) as char);
+        }
+    }
+
+    // Scroll all 3 rows off.
+    grid.scroll_up(3);
+
+    assert_eq!(grid.scrollback().len(), 3);
+    // Most recent = row 2 (CCC), oldest = row 0 (AAA).
+    let newest = grid.scrollback().get(0).unwrap();
+    let oldest = grid.scrollback().get(2).unwrap();
+    for col in 0..5 {
+        assert_eq!(newest[Column(col)].ch, 'C');
+        assert_eq!(oldest[Column(col)].ch, 'A');
+    }
+}
